@@ -1,6 +1,6 @@
 # Seed7 DOOM-lite (Option B: Raycaster)
 
-A minimal **DOOM-lite / Wolfenstein 3D–style raycaster** written entirely in **Seed7**, suitable for compilation to **WebAssembly** so it can run in the browser.
+A minimal **DOOM-lite / Doom 3–inspired raycaster** written entirely in **Seed7**, suitable for compilation to **WebAssembly** so it can run in the browser.
 
 ## Why Option B?
 
@@ -13,7 +13,8 @@ Translating a full C DOOM engine (Dwasm, wasm-doom, 72k–137k+ lines) to Seed7 
 
 - **`raycaster.s7`** – Main program:
   - 2D grid map (24×24), DDA raycasting, perpendicular distance (no fisheye).
-  - Arrow keys: move (forward/back) and rotate (left/right). ESC to quit.
+  - 640×400 viewport, dark industrial palette, distance shading, crosshair, weapon silhouette, and compact HUD bars.
+  - Arrow keys: hold to move (forward/back) and rotate (left/right). ESC to quit.
   - Uses Seed7 `draw.s7i` (screen, rect, clear, flushGraphic) and `keybd.s7i` (GRAPH_KEYBOARD, getc, inputReady, buttonPressed).
 
 ## Build and Run
@@ -73,9 +74,10 @@ This repo includes a **browser runner** so you can open the raycaster in a page.
 
 ## Technical Notes
 
-- **Resolution:** 320×200 (change `SCREEN_WIDTH` / `SCREEN_HEIGHT` in `raycaster.s7` if needed).
+- **Resolution:** 640×400 (change `SCREEN_WIDTH` / `SCREEN_HEIGHT` in `raycaster.s7` if needed).
 - **Map:** Defined in `WORLD_MAP`; `0` = empty, `1`–`5` = walls with different colors.
 - **Algorithm:** Same idea as [Lode’s raycaster](https://lodev.org/cgtutor/raycasting.html): camera plane, ray direction per column, DDA step, perpendicular wall distance, vertical stripe height, then draw with `rect(..., 1, height, col)`.
+- **Visual style:** Doom 3–inspired only: dark sci-fi lighting and a first-person HUD, not a Doom 3 engine or asset port.
 
 ## License
 
