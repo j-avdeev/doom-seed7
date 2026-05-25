@@ -13,8 +13,8 @@ Translating a full C DOOM engine (Dwasm, wasm-doom, 72k–137k+ lines) to Seed7 
 
 - **`raycaster.s7`** – Main program:
   - Original compact 24×24 sci-fi room: entrance corridor, main chamber, side server bays, central console, and sealed far door.
-  - 640×400 viewport, dark industrial palette, distance shading, crosshair, weapon silhouette, and compact HUD bars.
-  - Arrow keys: hold to move (forward/back) and rotate (left/right). ESC to quit.
+  - 640×400 viewport, dark industrial palette, distance shading, red-brown block monsters, crosshair, weapon silhouette, and compact HUD bars.
+  - Arrow keys: hold to move (forward/back) and rotate (left/right). Space or left mouse shoots. ESC quits.
   - Uses Seed7 `draw.s7i` (screen, rect, clear, flushGraphic) and `keybd.s7i` (GRAPH_KEYBOARD, getc, inputReady, buttonPressed).
 
 ## Build and Run
@@ -70,12 +70,14 @@ This repo includes a **browser runner** so you can open the raycaster in a page.
 | Down   | Move backward |
 | Left   | Rotate left   |
 | Right  | Rotate right  |
+| Space / left mouse | Shoot |
 | ESC    | Quit          |
 
 ## Technical Notes
 
 - **Resolution:** 640×400 (change `SCREEN_WIDTH` / `SCREEN_HEIGHT` in `raycaster.s7` if needed).
 - **Map:** Defined in `WORLD_MAP`; `0` = empty, `1`–`5` = dark metal, tech panels, server panels, trim, and amber/red door or console blocks.
+- **Monsters:** Three simple red-brown projected blocks with center-aim shooting.
 - **Algorithm:** Same idea as [Lode’s raycaster](https://lodev.org/cgtutor/raycasting.html): camera plane, ray direction per column, DDA step, perpendicular wall distance, vertical stripe height, then draw with `rect(..., 1, height, col)`.
 - **Visual style:** Original Doom 3–inspired sci-fi room only: dark lighting and a first-person HUD, not a Doom 3 room, engine, or asset port.
 
