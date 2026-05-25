@@ -1,0 +1,274 @@
+(********************************************************************)
+(*  raycaster.s7   Minimal DOOM-lite raycaster in Seed7              *)
+(*  Option B: Native Seed7 raycaster for WebAssembly/browser.        *)
+(*  Wolfenstein 3D style: 2D grid, DDA raycasting, flat walls.      *)
+(********************************************************************)
+
+$ include "seed7_05.s7i";
+$ include "draw.s7i";
+$ include "keybd.s7i";
+$ include "float.s7i";
+$ include "math.s7i";
+$ include "duration.s7i";
+
+(* Screen and map dimensions *)
+const integer: SCREEN_WIDTH  is 320;
+const integer: SCREEN_HEIGHT is 200;
+const integer: MAP_WIDTH     is 24;
+const integer: MAP_HEIGHT    is 24;
+
+(* World map: 0 = empty, 1+ = wall (value selects color) *)
+const array array integer: WORLD_MAP is [] (
+    [] (1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1),
+    [] (1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1),
+    [] (1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1),
+    [] (1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1),
+    [] (1,0,0,0,0,0,2,2,2,2,2,0,0,0,0,3,0,3,0,3,0,0,0,1),
+    [] (1,0,0,0,0,0,2,0,0,0,2,0,0,0,0,0,0,0,0,0,0,0,0,1),
+    [] (1,0,0,0,0,0,2,0,0,0,2,0,0,0,0,3,0,0,0,3,0,0,0,1),
+    [] (1,0,0,0,0,0,2,0,0,0,2,0,0,0,0,0,0,0,0,0,0,0,0,1),
+    [] (1,0,0,0,0,0,2,2,0,2,2,0,0,0,0,3,0,3,0,3,0,0,0,1),
+    [] (1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1),
+    [] (1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1),
+    [] (1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1),
+    [] (1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1),
+    [] (1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1),
+    [] (1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1),
+    [] (1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1),
+    [] (1,4,4,4,4,4,4,4,4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1),
+    [] (1,4,0,4,0,0,0,0,4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1),
+    [] (1,4,0,0,0,0,5,0,4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1),
+    [] (1,4,0,4,0,0,0,0,4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1),
+    [] (1,4,0,4,4,4,4,4,4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1),
+    [] (1,4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1),
+    [] (1,4,4,4,4,4,4,4,4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1),
+    [] (1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1)
+  );
+
+(* Wall color by map value (1-based index for Seed7 map) *)
+const func color: wallColor (in integer: wallId) is func
+  result
+    var color: col is color.value;
+  begin
+    case wallId of
+      when {1}: col := Red;
+      when {2}: col := light_green;
+      when {3}: col := light_blue;
+      when {4}: col := White;
+      when {5}: col := Yellow;
+      otherwise: col := light_gray;
+    end case;
+  end func;
+
+(* Darken color for N/S wall sides *)
+const func color: darken (in color: col) is func
+  result
+    var color: outCol is color.value;
+  begin
+    outCol.redLight   := col.redLight   mdiv 2;
+    outCol.greenLight := col.greenLight mdiv 2;
+    outCol.blueLight  := col.blueLight  mdiv 2;
+  end func;
+
+const func boolean: isEmptyTile (in integer: mapX, in integer: mapY) is func
+  result
+    var boolean: empty is FALSE;
+  begin
+    if (mapX >= 0) and (mapX < MAP_WIDTH) and
+        (mapY >= 0) and (mapY < MAP_HEIGHT) then
+      empty := WORLD_MAP[succ(mapX)][succ(mapY)] = 0;
+    end if;
+  end func;
+
+const proc: castRays (in float: posX, in float: posY,
+    in float: dirX, in float: dirY,
+    in float: planeX, in float: planeY) is func
+  local
+    var integer: x is 0;
+    var float: cameraX is 0.0;
+    var float: rayDirX is 0.0;
+    var float: rayDirY is 0.0;
+    var integer: mapX is 0;
+    var integer: mapY is 0;
+    var float: deltaDistX is 0.0;
+    var float: deltaDistY is 0.0;
+    var float: sideDistX is 0.0;
+    var float: sideDistY is 0.0;
+    var integer: stepX is 0;
+    var integer: stepY is 0;
+    var integer: hit is 0;
+    var integer: side is 0;
+    var float: perpWallDist is 0.0;
+    var integer: lineHeight is 0;
+    var integer: drawStart is 0;
+    var integer: drawEnd is 0;
+    var integer: wallId is 0;
+    var color: col is color.value;
+  begin
+    for x range 0 to pred(SCREEN_WIDTH) do
+      (* Camera plane position: -1 .. +1 *)
+      cameraX := 2.0 * flt(x) / flt(SCREEN_WIDTH) - 1.0;
+      rayDirX := dirX + planeX * cameraX;
+      rayDirY := dirY + planeY * cameraX;
+
+      mapX := trunc(posX);
+      mapY := trunc(posY);
+
+      if rayDirX <> 0.0 then
+        deltaDistX := abs(1.0 / rayDirX);
+      else
+        deltaDistX := 1.0e30;
+      end if;
+      if rayDirY <> 0.0 then
+        deltaDistY := abs(1.0 / rayDirY);
+      else
+        deltaDistY := 1.0e30;
+      end if;
+
+      if rayDirX < 0.0 then
+        stepX := -1;
+        sideDistX := (posX - flt(mapX)) * deltaDistX;
+      else
+        stepX := 1;
+        sideDistX := (flt(mapX) + 1.0 - posX) * deltaDistX;
+      end if;
+      if rayDirY < 0.0 then
+        stepY := -1;
+        sideDistY := (posY - flt(mapY)) * deltaDistY;
+      else
+        stepY := 1;
+        sideDistY := (flt(mapY) + 1.0 - posY) * deltaDistY;
+      end if;
+
+      hit := 0;
+      while hit = 0 do
+        if sideDistX < sideDistY then
+          sideDistX +:= deltaDistX;
+          mapX +:= stepX;
+          side := 0;
+        else
+          sideDistY +:= deltaDistY;
+          mapY +:= stepY;
+          side := 1;
+        end if;
+        (* Bounds check and wall check; map is 1-based *)
+        if mapX >= 0 and mapX < MAP_WIDTH and mapY >= 0 and mapY < MAP_HEIGHT then
+          if WORLD_MAP[succ(mapX)][succ(mapY)] <> 0 then
+            hit := 1;
+          end if;
+        else
+          hit := 1;
+        end if;
+      end while;
+
+      (* Perpendicular distance (no fisheye) *)
+      if side = 0 then
+        perpWallDist := sideDistX - deltaDistX;
+      else
+        perpWallDist := sideDistY - deltaDistY;
+      end if;
+
+      lineHeight := trunc(flt(SCREEN_HEIGHT) / perpWallDist);
+      drawStart := -lineHeight mdiv 2 + SCREEN_HEIGHT mdiv 2;
+      if drawStart < 0 then
+        drawStart := 0;
+      end if;
+      drawEnd := lineHeight mdiv 2 + SCREEN_HEIGHT mdiv 2;
+      if drawEnd >= SCREEN_HEIGHT then
+        drawEnd := pred(SCREEN_HEIGHT);
+      end if;
+
+      if mapX >= 0 and mapX < MAP_WIDTH and mapY >= 0 and mapY < MAP_HEIGHT then
+        wallId := WORLD_MAP[succ(mapX)][succ(mapY)];
+      else
+        wallId := 1;
+      end if;
+      col := wallColor(wallId);
+      if side = 1 then
+        col := darken(col);
+      end if;
+
+      (* Draw vertical stripe (1-pixel-wide filled rect) *)
+      if drawEnd >= drawStart then
+        rect(x, drawStart, 1, succ(drawEnd - drawStart), col);
+      end if;
+    end for;
+  end func;
+
+const proc: main is func
+  local
+    var float: posX is 22.0;
+    var float: posY is 12.0;
+    var float: dirX is -1.0;
+    var float: dirY is 0.0;
+    var float: planeX is 0.0;
+    var float: planeY is 0.66;
+    var float: moveSpeed is 0.08;
+    var float: rotSpeed is 0.06;
+    var float: oldDirX is 0.0;
+    var float: oldPlaneX is 0.0;
+    var char: ch is ' ';
+    var integer: newMapX is 0;
+    var integer: newMapY is 0;
+    var boolean: quit is FALSE;
+  begin
+    screen(SCREEN_WIDTH, SCREEN_HEIGHT);
+    KEYBOARD := GRAPH_KEYBOARD;
+
+    repeat
+      clear(Black);
+      castRays(posX, posY, dirX, dirY, planeX, planeY);
+      flushGraphic;
+
+      (* Drain keyboard and remember last key *)
+      while inputReady(KEYBOARD) do
+        ch := getc(KEYBOARD);
+      end while;
+
+      (* Move/rotate based on last key if still pressed *)
+      if (ch = KEY_UP) and buttonPressed(KEYBOARD, KEY_UP) then
+        newMapX := trunc(posX + dirX * moveSpeed);
+        newMapY := trunc(posY);
+        if isEmptyTile(newMapX, newMapY) then
+          posX +:= dirX * moveSpeed;
+        end if;
+        newMapX := trunc(posX);
+        newMapY := trunc(posY + dirY * moveSpeed);
+        if isEmptyTile(newMapX, newMapY) then
+          posY +:= dirY * moveSpeed;
+        end if;
+      elsif (ch = KEY_DOWN) and buttonPressed(KEYBOARD, KEY_DOWN) then
+        newMapX := trunc(posX - dirX * moveSpeed);
+        newMapY := trunc(posY);
+        if isEmptyTile(newMapX, newMapY) then
+          posX -:= dirX * moveSpeed;
+        end if;
+        newMapX := trunc(posX);
+        newMapY := trunc(posY - dirY * moveSpeed);
+        if isEmptyTile(newMapX, newMapY) then
+          posY -:= dirY * moveSpeed;
+        end if;
+      elsif (ch = KEY_RIGHT) and buttonPressed(KEYBOARD, KEY_RIGHT) then
+        oldDirX := dirX;
+        dirX := dirX * cos(-rotSpeed) - dirY * sin(-rotSpeed);
+        dirY := oldDirX * sin(-rotSpeed) + dirY * cos(-rotSpeed);
+        oldPlaneX := planeX;
+        planeX := planeX * cos(-rotSpeed) - planeY * sin(-rotSpeed);
+        planeY := oldPlaneX * sin(-rotSpeed) + planeY * cos(-rotSpeed);
+      elsif (ch = KEY_LEFT) and buttonPressed(KEYBOARD, KEY_LEFT) then
+        oldDirX := dirX;
+        dirX := dirX * cos(rotSpeed) - dirY * sin(rotSpeed);
+        dirY := oldDirX * sin(rotSpeed) + dirY * cos(rotSpeed);
+        oldPlaneX := planeX;
+        planeX := planeX * cos(rotSpeed) - planeY * sin(rotSpeed);
+        planeY := oldPlaneX * sin(rotSpeed) + planeY * cos(rotSpeed);
+      end if;
+
+      (* Quit on ESC *)
+      if (ch = KEY_ESC) and buttonPressed(KEYBOARD, KEY_ESC) then
+        quit := TRUE;
+      end if;
+
+      wait(40000 . MICRO_SECONDS);
+    until quit;
+  end func;
