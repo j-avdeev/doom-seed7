@@ -1,6 +1,6 @@
 # Seed7 DOOM-lite (Option B: Raycaster)
 
-A minimal **DOOM-lite / Doom 3–inspired raycaster** written entirely in **Seed7**, suitable for compilation to **WebAssembly** so it can run in the browser.
+A minimal **DOOM-lite / original Doom 3–inspired sci-fi room raycaster** written entirely in **Seed7**, suitable for compilation to **WebAssembly** so it can run in the browser.
 
 ## Why Option B?
 
@@ -12,7 +12,7 @@ Translating a full C DOOM engine (Dwasm, wasm-doom, 72k–137k+ lines) to Seed7 
 ## What’s Included
 
 - **`raycaster.s7`** – Main program:
-  - 2D grid map (24×24), DDA raycasting, perpendicular distance (no fisheye).
+  - Original compact 24×24 sci-fi room: entrance corridor, main chamber, side server bays, central console, and sealed far door.
   - 640×400 viewport, dark industrial palette, distance shading, crosshair, weapon silhouette, and compact HUD bars.
   - Arrow keys: hold to move (forward/back) and rotate (left/right). ESC to quit.
   - Uses Seed7 `draw.s7i` (screen, rect, clear, flushGraphic) and `keybd.s7i` (GRAPH_KEYBOARD, getc, inputReady, buttonPressed).
@@ -75,9 +75,9 @@ This repo includes a **browser runner** so you can open the raycaster in a page.
 ## Technical Notes
 
 - **Resolution:** 640×400 (change `SCREEN_WIDTH` / `SCREEN_HEIGHT` in `raycaster.s7` if needed).
-- **Map:** Defined in `WORLD_MAP`; `0` = empty, `1`–`5` = walls with different colors.
+- **Map:** Defined in `WORLD_MAP`; `0` = empty, `1`–`5` = dark metal, tech panels, server panels, trim, and amber/red door or console blocks.
 - **Algorithm:** Same idea as [Lode’s raycaster](https://lodev.org/cgtutor/raycasting.html): camera plane, ray direction per column, DDA step, perpendicular wall distance, vertical stripe height, then draw with `rect(..., 1, height, col)`.
-- **Visual style:** Doom 3–inspired only: dark sci-fi lighting and a first-person HUD, not a Doom 3 engine or asset port.
+- **Visual style:** Original Doom 3–inspired sci-fi room only: dark lighting and a first-person HUD, not a Doom 3 room, engine, or asset port.
 
 ## License
 
