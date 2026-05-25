@@ -12,8 +12,8 @@ $ include "math.s7i";
 $ include "duration.s7i";
 
 (* Screen and map dimensions *)
-const integer: SCREEN_WIDTH  is 320;
-const integer: SCREEN_HEIGHT is 200;
+const integer: SCREEN_WIDTH  is 640;
+const integer: SCREEN_HEIGHT is 400;
 const integer: MAP_WIDTH     is 24;
 const integer: MAP_HEIGHT    is 24;
 
@@ -45,29 +45,68 @@ const array array integer: WORLD_MAP is [] (
     [] (1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1)
   );
 
+(* Doom 3 inspired low-light industrial palette. *)
+const color: CEILING_COLOR    is color(1800, 2400, 3200);
+const color: CEILING_GLOW     is color(5200, 6500, 8200);
+const color: FLOOR_COLOR      is color(5200, 4800, 4200);
+const color: FLOOR_NEAR       is color(11500, 9700, 7600);
+const color: CROSSHAIR_COLOR  is color(25000, 43000, 52000);
+const color: HUD_AMBER        is color(50000, 25000, 5500);
+const color: HUD_RED          is color(43000, 4200, 2400);
+const color: WEAPON_DARK      is color(4200, 4700, 5200);
+const color: WEAPON_MID       is color(12000, 13500, 15000);
+const color: WEAPON_LIGHT     is color(23000, 25000, 27000);
+
 (* Wall color by map value (1-based index for Seed7 map) *)
 const func color: wallColor (in integer: wallId) is func
   result
     var color: col is color.value;
   begin
     case wallId of
-      when {1}: col := Red;
-      when {2}: col := light_green;
-      when {3}: col := light_blue;
-      when {4}: col := White;
-      when {5}: col := Yellow;
-      otherwise: col := light_gray;
+      when {1}: col := color(23000, 6000, 4500);
+      when {2}: col := color(7800, 24500, 12500);
+      when {3}: col := color(6000, 10500, 27000);
+      when {4}: col := color(30000, 30000, 27500);
+      when {5}: col := color(47000, 27000, 4500);
+      otherwise: col := color(15000, 15000, 15000);
     end case;
   end func;
 
-(* Darken color for N/S wall sides *)
-const func color: darken (in color: col) is func
+const func color: scaledColor (in color: col, in integer: percent) is func
   result
     var color: outCol is color.value;
   begin
-    outCol.redLight   := col.redLight   mdiv 2;
-    outCol.greenLight := col.greenLight mdiv 2;
-    outCol.blueLight  := col.blueLight  mdiv 2;
+    outCol.redLight   := col.redLight   * percent mdiv 100;
+    outCol.greenLight := col.greenLight * percent mdiv 100;
+    outCol.blueLight  := col.blueLight  * percent mdiv 100;
+  end func;
+
+(* Darken color for N/S wall sides and distance fog. *)
+const func color: shadeWall (in color: col, in integer: side, in float: distance) is func
+  result
+    var color: outCol is color.value;
+  local
+    var integer: percent is 100;
+  begin
+    if distance > 16.0 then
+      percent := 18;
+    elsif distance > 12.0 then
+      percent := 25;
+    elsif distance > 9.0 then
+      percent := 34;
+    elsif distance > 6.0 then
+      percent := 47;
+    elsif distance > 4.0 then
+      percent := 63;
+    elsif distance > 2.5 then
+      percent := 78;
+    else
+      percent := 95;
+    end if;
+    if side = 1 then
+      percent := percent * 70 mdiv 100;
+    end if;
+    outCol := scaledColor(col, percent);
   end func;
 
 const func boolean: isEmptyTile (in integer: mapX, in integer: mapY) is func
@@ -78,6 +117,56 @@ const func boolean: isEmptyTile (in integer: mapX, in integer: mapY) is func
         (mapY >= 0) and (mapY < MAP_HEIGHT) then
       empty := WORLD_MAP[succ(mapX)][succ(mapY)] = 0;
     end if;
+  end func;
+
+const proc: drawBackground is func
+  begin
+    rect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT mdiv 2, CEILING_COLOR);
+    rect(0, SCREEN_HEIGHT mdiv 2, SCREEN_WIDTH, SCREEN_HEIGHT mdiv 2, FLOOR_COLOR);
+
+    (* Subtle horizontal lighting bands: cold ceiling glow, warm floor fade. *)
+    rect(0, SCREEN_HEIGHT mdiv 2 - 28, SCREEN_WIDTH, 6, CEILING_GLOW);
+    rect(0, SCREEN_HEIGHT mdiv 2 + 22, SCREEN_WIDTH, 10, scaledColor(FLOOR_NEAR, 70));
+    rect(0, SCREEN_HEIGHT - 92, SCREEN_WIDTH, 92, scaledColor(FLOOR_NEAR, 46));
+  end func;
+
+const proc: drawCrosshair is func
+  local
+    var integer: cx is 0;
+    var integer: cy is 0;
+  begin
+    cx := SCREEN_WIDTH mdiv 2;
+    cy := SCREEN_HEIGHT mdiv 2;
+    rect(cx - 18, cy, 12, 2, CROSSHAIR_COLOR);
+    rect(cx + 7, cy, 12, 2, CROSSHAIR_COLOR);
+    rect(cx, cy - 18, 2, 12, CROSSHAIR_COLOR);
+    rect(cx, cy + 7, 2, 12, CROSSHAIR_COLOR);
+    rect(cx - 1, cy - 1, 4, 4, scaledColor(CROSSHAIR_COLOR, 55));
+  end func;
+
+const proc: drawWeaponAndHud is func
+  local
+    var integer: baseY is 0;
+    var integer: midX is 0;
+  begin
+    baseY := SCREEN_HEIGHT - 118;
+    midX := SCREEN_WIDTH mdiv 2;
+
+    (* Minimal plasma-rifle silhouette. *)
+    rect(midX - 62, baseY + 50, 124, 42, WEAPON_DARK);
+    rect(midX - 44, baseY + 31, 88, 28, WEAPON_MID);
+    rect(midX - 24, baseY + 12, 48, 28, WEAPON_LIGHT);
+    rect(midX - 12, baseY, 24, 22, scaledColor(WEAPON_LIGHT, 72));
+    rect(midX - 4, baseY - 16, 8, 22, scaledColor(CROSSHAIR_COLOR, 65));
+    rect(midX - 52, baseY + 42, 18, 10, HUD_AMBER);
+    rect(midX + 34, baseY + 42, 18, 10, HUD_AMBER);
+
+    (* Compact HUD bars. *)
+    rect(18, SCREEN_HEIGHT - 34, 122, 16, scaledColor(WEAPON_MID, 55));
+    rect(22, SCREEN_HEIGHT - 30, 92, 8, HUD_RED);
+    rect(SCREEN_WIDTH - 142, SCREEN_HEIGHT - 34, 124, 16, scaledColor(WEAPON_MID, 55));
+    rect(SCREEN_WIDTH - 138, SCREEN_HEIGHT - 30, 74, 8, HUD_AMBER);
+    rect(SCREEN_WIDTH - 60, SCREEN_HEIGHT - 30, 22, 8, CROSSHAIR_COLOR);
   end func;
 
 const proc: castRays (in float: posX, in float: posY,
@@ -184,9 +273,7 @@ const proc: castRays (in float: posX, in float: posY,
         wallId := 1;
       end if;
       col := wallColor(wallId);
-      if side = 1 then
-        col := darken(col);
-      end if;
+      col := shadeWall(col, side, perpWallDist);
 
       (* Draw vertical stripe (1-pixel-wide filled rect) *)
       if drawEnd >= drawStart then
@@ -216,8 +303,10 @@ const proc: main is func
     KEYBOARD := GRAPH_KEYBOARD;
 
     repeat
-      clear(Black);
+      drawBackground;
       castRays(posX, posY, dirX, dirY, planeX, planeY);
+      drawCrosshair;
+      drawWeaponAndHud;
       flushGraphic;
 
       (* Drain keyboard and remember last key *)
