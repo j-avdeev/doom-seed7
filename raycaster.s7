@@ -53,6 +53,9 @@ const color: FLOOR_NEAR       is color(11500, 9700, 7600);
 const color: CROSSHAIR_COLOR  is color(25000, 43000, 52000);
 const color: HUD_AMBER        is color(50000, 25000, 5500);
 const color: HUD_RED          is color(43000, 4200, 2400);
+const color: MONSTER_DARK     is color(12000, 4200, 2600);
+const color: MONSTER_MID      is color(28000, 9000, 5200);
+const color: MONSTER_LIGHT    is color(43000, 15000, 7600);
 const color: WEAPON_DARK      is color(4200, 4700, 5200);
 const color: WEAPON_MID       is color(12000, 13500, 15000);
 const color: WEAPON_LIGHT     is color(23000, 25000, 27000);
@@ -119,6 +122,53 @@ const func boolean: isEmptyTile (in integer: mapX, in integer: mapY) is func
     end if;
   end func;
 
+const func boolean: hasLineOfSight (in float: posX, in float: posY,
+    in float: targetX, in float: targetY) is func
+  result
+    var boolean: visible is TRUE;
+  local
+    var float: dx is 0.0;
+    var float: dy is 0.0;
+    var float: sampleFactor is 0.0;
+    var integer: steps is 0;
+    var integer: sampleStep is 1;
+    var integer: tileX is 0;
+    var integer: tileY is 0;
+  begin
+    dx := targetX - posX;
+    dy := targetY - posY;
+    steps := trunc((abs(dx) + abs(dy)) * 10.0) + 1;
+    while (sampleStep < steps) and visible do
+      sampleFactor := flt(sampleStep) / flt(steps);
+      tileX := trunc(posX + dx * sampleFactor);
+      tileY := trunc(posY + dy * sampleFactor);
+      if not isEmptyTile(tileX, tileY) then
+        visible := FALSE;
+      end if;
+      sampleStep +:= 1;
+    end while;
+  end func;
+
+const func boolean: monsterInSight (in float: posX, in float: posY,
+    in float: dirX, in float: dirY, in float: planeX, in float: planeY,
+    in float: monsterX, in float: monsterY) is func
+  result
+    var boolean: targeted is FALSE;
+  local
+    var float: dx is 0.0;
+    var float: dy is 0.0;
+    var float: forward is 0.0;
+    var float: sideways is 0.0;
+  begin
+    dx := monsterX - posX;
+    dy := monsterY - posY;
+    forward := dx * dirX + dy * dirY;
+    sideways := abs(dx * dirY - dy * dirX);
+    if (forward > 0.3) and (sideways / forward < 0.28) then
+      targeted := TRUE;
+    end if;
+  end func;
+
 const proc: drawBackground is func
   begin
     rect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT mdiv 2, CEILING_COLOR);
@@ -144,7 +194,78 @@ const proc: drawCrosshair is func
     rect(cx - 1, cy - 1, 4, 4, scaledColor(CROSSHAIR_COLOR, 55));
   end func;
 
-const proc: drawWeaponAndHud is func
+const proc: drawMonster (in float: posX, in float: posY,
+    in float: dirX, in float: dirY, in float: planeX, in float: planeY,
+    in float: monsterX, in float: monsterY, in boolean: alive) is func
+  local
+    var float: spriteX is 0.0;
+    var float: spriteY is 0.0;
+    var float: invDet is 0.0;
+    var float: transformX is 0.0;
+    var float: transformY is 0.0;
+    var integer: spriteScreenX is 0;
+    var integer: spriteHeight is 0;
+    var integer: spriteWidth is 0;
+    var integer: xStart is 0;
+    var integer: xEnd is 0;
+    var integer: yStart is 0;
+    var integer: yEnd is 0;
+  begin
+    if alive then
+      spriteX := monsterX - posX;
+      spriteY := monsterY - posY;
+      invDet := 1.0 / (planeX * dirY - dirX * planeY);
+      transformX := invDet * (dirY * spriteX - dirX * spriteY);
+      transformY := invDet * (-planeY * spriteX + planeX * spriteY);
+
+      if transformY > 0.3 then
+        spriteScreenX := trunc(flt(SCREEN_WIDTH) * (0.5 + transformX / transformY / 2.0));
+        spriteHeight := abs(trunc(flt(SCREEN_HEIGHT) / transformY));
+        spriteWidth := spriteHeight mdiv 2;
+        if spriteWidth < 8 then
+          spriteWidth := 8;
+        end if;
+
+        xStart := spriteScreenX - spriteWidth mdiv 2;
+        xEnd := spriteScreenX + spriteWidth mdiv 2;
+        yStart := SCREEN_HEIGHT mdiv 2 - spriteHeight mdiv 2;
+        yEnd := SCREEN_HEIGHT mdiv 2 + spriteHeight mdiv 2;
+
+        if xStart < 0 then
+          xStart := 0;
+        end if;
+        if xEnd >= SCREEN_WIDTH then
+          xEnd := pred(SCREEN_WIDTH);
+        end if;
+        if yStart < 0 then
+          yStart := 0;
+        end if;
+        if yEnd >= SCREEN_HEIGHT then
+          yEnd := pred(SCREEN_HEIGHT);
+        end if;
+
+        if xEnd > xStart and yEnd > yStart then
+          rect(xStart, yStart, succ(xEnd - xStart), succ(yEnd - yStart), MONSTER_DARK);
+          rect(xStart + spriteWidth mdiv 8, yStart + spriteHeight mdiv 10,
+              succ(xEnd - xStart) * 3 mdiv 4, succ(yEnd - yStart) * 3 mdiv 4,
+              MONSTER_MID);
+          rect(spriteScreenX - spriteWidth mdiv 8, yStart + spriteHeight mdiv 5,
+              spriteWidth mdiv 4, spriteHeight mdiv 5, MONSTER_LIGHT);
+        end if;
+      end if;
+    end if;
+  end func;
+
+const proc: drawMonsters (in float: posX, in float: posY,
+    in float: dirX, in float: dirY, in float: planeX, in float: planeY,
+    in boolean: monster1Alive, in boolean: monster2Alive, in boolean: monster3Alive) is func
+  begin
+    drawMonster(posX, posY, dirX, dirY, planeX, planeY, 6.5, 12.0, monster1Alive);
+    drawMonster(posX, posY, dirX, dirY, planeX, planeY, 5.0, 14.0, monster2Alive);
+    drawMonster(posX, posY, dirX, dirY, planeX, planeY, 18.5, 14.0, monster3Alive);
+  end func;
+
+const proc: drawWeaponAndHud (in integer: shotFlash) is func
   local
     var integer: baseY is 0;
     var integer: midX is 0;
@@ -158,6 +279,10 @@ const proc: drawWeaponAndHud is func
     rect(midX - 24, baseY + 12, 48, 28, WEAPON_LIGHT);
     rect(midX - 12, baseY, 24, 22, scaledColor(WEAPON_LIGHT, 72));
     rect(midX - 4, baseY - 16, 8, 22, scaledColor(CROSSHAIR_COLOR, 65));
+    if shotFlash > 0 then
+      rect(midX - 18, baseY - 34, 36, 18, HUD_AMBER);
+      rect(midX - 8, baseY - 48, 16, 14, MONSTER_LIGHT);
+    end if;
     rect(midX - 52, baseY + 42, 18, 10, HUD_AMBER);
     rect(midX + 34, baseY + 42, 18, 10, HUD_AMBER);
 
@@ -298,6 +423,12 @@ const proc: main is func
     var integer: newMapX is 0;
     var integer: newMapY is 0;
     var boolean: quit is FALSE;
+    var boolean: monster1Alive is TRUE;
+    var boolean: monster2Alive is TRUE;
+    var boolean: monster3Alive is TRUE;
+    var boolean: shotHit is FALSE;
+    var integer: shotCooldown is 0;
+    var integer: shotFlash is 0;
   begin
     screen(SCREEN_WIDTH, SCREEN_HEIGHT);
     KEYBOARD := GRAPH_KEYBOARD;
@@ -305,8 +436,10 @@ const proc: main is func
     repeat
       drawBackground;
       castRays(posX, posY, dirX, dirY, planeX, planeY);
+      drawMonsters(posX, posY, dirX, dirY, planeX, planeY,
+          monster1Alive, monster2Alive, monster3Alive);
       drawCrosshair;
-      drawWeaponAndHud;
+      drawWeaponAndHud(shotFlash);
       flushGraphic;
 
       (* Drain keyboard and remember last key *)
@@ -351,6 +484,39 @@ const proc: main is func
         oldPlaneX := planeX;
         planeX := planeX * cos(rotSpeed) - planeY * sin(rotSpeed);
         planeY := oldPlaneX * sin(rotSpeed) + planeY * cos(rotSpeed);
+      end if;
+
+      if (((ch = ' ') or (ch = KEY_MOUSE1) or
+          buttonPressed(KEYBOARD, ' ') or buttonPressed(KEYBOARD, KEY_MOUSE1)) and
+          (shotCooldown = 0)) then
+        shotCooldown := 8;
+        shotFlash := 3;
+        shotHit := FALSE;
+        if monster1Alive and not shotHit then
+          if monsterInSight(posX, posY, dirX, dirY, planeX, planeY, 6.5, 12.0) or
+              hasLineOfSight(posX, posY, 6.5, 12.0) then
+            monster1Alive := FALSE;
+            shotHit := TRUE;
+          end if;
+        end if;
+        if monster2Alive and not shotHit then
+          if monsterInSight(posX, posY, dirX, dirY, planeX, planeY, 5.0, 14.0) then
+            monster2Alive := FALSE;
+            shotHit := TRUE;
+          end if;
+        end if;
+        if monster3Alive and not shotHit then
+          if monsterInSight(posX, posY, dirX, dirY, planeX, planeY, 18.5, 14.0) then
+            monster3Alive := FALSE;
+            shotHit := TRUE;
+          end if;
+        end if;
+      end if;
+      if shotCooldown > 0 then
+        shotCooldown -:= 1;
+      end if;
+      if shotFlash > 0 then
+        shotFlash -:= 1;
       end if;
 
       (* Quit on ESC *)
