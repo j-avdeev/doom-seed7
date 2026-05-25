@@ -1,7 +1,8 @@
 [submodule "seed7"]
 	path = seed7
 	url = https://github.com/thomasmertes/seed7.git
+	ignore = untracked
 [submodule "emsdk"]
 	path = emsdk
 	url = https://github.com/emscripten-core/emsdk.git
-
+	ignore = untracked
