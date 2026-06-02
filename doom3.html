@@ -519,6 +519,15 @@
         }
         return bytes;
       }
+
+      function afterBrowserPaint() {
+        return new Promise(function(resolve) {
+          requestAnimationFrame(function() {
+            setTimeout(resolve, 0);
+          });
+        });
+      }
+
       function startSeed7(args, filesToMount, entryUrl) {
         if (hasStarted) {
           setStatus('Seed7 runtime already started. Reload the page to run another mode.', 'warn');
@@ -607,6 +616,11 @@
           .then(function(bytes) {
             appendLog('Synthetic fixture ready: ' + bytes.length + ' bytes.');
             setStatus('Starting Seed7 ' + selectedModeName() + ' with synthetic fixture.');
+            return afterBrowserPaint().then(function() {
+              return bytes;
+            });
+          })
+          .then(function(bytes) {
             return startSeed7([
               '-l', '/seed7/lib',
               '/' + entryUrl,
