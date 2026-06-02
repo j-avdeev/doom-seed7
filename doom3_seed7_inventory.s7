@@ -1,0 +1,578 @@
+(********************************************************************)
+(*  doom3_seed7_inventory.s7                                        *)
+(*                                                                  *)
+(*  Focused Doom 3 / id Tech 4 gameplay subsystem probe for Seed7.  *)
+(*  It reads user-owned pk4 archives, extracts a selected .map,      *)
+(*  recognizes health/ammo/weapon pickups, and simulates a simple    *)
+(*  player pickup path. No commercial data is bundled.               *)
+(********************************************************************)
+
+$ include "seed7_05.s7i";
+$ include "osfiles.s7i";
+$ include "zip.s7i";
+$ include "math.s7i";
+
+const string: DEFAULT_DATA_PATH is ".";
+const string: DEFAULT_BASE_DIR is "base";
+const string: DEFAULT_START_MAP is "game/mars_city1";
+const float: PLAYER_STEP_DISTANCE is 16.0;
+const integer: PLAYER_STEP_COUNT is 4;
+const float: PICKUP_TOUCH_RADIUS is 32.0;
+
+const type: inventoryConfig is new struct
+    var string: dataPath is DEFAULT_DATA_PATH;
+    var string: basePath is "";
+    var string: startMap is DEFAULT_START_MAP;
+    var boolean: showHelp is FALSE;
+  end struct;
+
+const type: mapEntity is new struct
+    var string: className is "";
+    var string: entityName is "";
+    var string: originText is "";
+    var boolean: hasOrigin is FALSE;
+    var float: x is 0.0;
+    var float: y is 0.0;
+    var float: z is 0.0;
+  end struct;
+
+const type: inventoryStats is new struct
+    var integer: pk4Archives is 0;
+    var boolean: requestedMapFound is FALSE;
+    var string: requestedMapPath is "";
+    var string: requestedCollisionPath is "";
+    var boolean: requestedCollisionFound is FALSE;
+    var integer: collisionModels is 0;
+    var integer: collisionPolygons is 0;
+    var integer: mapEntities is 0;
+    var integer: playerStarts is 0;
+    var integer: pickupEntities is 0;
+    var integer: healthPickups is 0;
+    var integer: ammoPickups is 0;
+    var integer: weaponPickups is 0;
+    var integer: pickupsWithOrigin is 0;
+    var integer: touchedPickups is 0;
+    var integer: touchedHealthPickups is 0;
+    var integer: touchedAmmoPickups is 0;
+    var integer: touchedWeaponPickups is 0;
+    var string: firstPickupClass is "";
+    var string: firstPickupName is "";
+    var string: firstTouchedPickupName is "";
+    var boolean: playerStartFound is FALSE;
+    var boolean: playerStartParsed is FALSE;
+    var float: playerX is 0.0;
+    var float: playerY is 0.0;
+    var float: playerZ is 0.0;
+    var float: playerYaw is 0.0;
+  end struct;
+
+const proc: logInfo (in string: msg) is func
+  begin
+    writeln("[inventory] " <& msg);
+  end func;
+
+const proc: logError (in string: msg) is func
+  begin
+    writeln("[inventory-error] " <& msg);
+  end func;
+
+const func string: joinPath (in string: leftPath, in string: rightPath) is func
+  result
+    var string: joined is "";
+  begin
+    if leftPath = "" then
+      joined := rightPath;
+    elsif endsWith(leftPath, "/") or endsWith(leftPath, "\\") then
+      joined := leftPath <& rightPath;
+    else
+      joined := leftPath <& "/" <& rightPath;
+    end if;
+  end func;
+
+const func boolean: isPk4Name (in string: fileName) is
+    return endsWith(lower(fileName), ".pk4");
+
+const func string: normalizedAssetPath (in string: filePath) is
+    return replace(lower(filePath), "\\", "/");
+
+const func string: mapNameToAssetPath (in string: mapName) is func
+  result
+    var string: assetPath is "";
+  begin
+    assetPath := normalizedAssetPath(mapName);
+    if not startsWith(assetPath, "maps/") then
+      assetPath := "maps/" <& assetPath;
+    end if;
+    if not endsWith(assetPath, ".map") then
+      assetPath &:= ".map";
+    end if;
+  end func;
+
+const func string: compiledSiblingPath (in string: mapPath,
+    in string: suffix) is func
+  result
+    var string: siblingPath is "";
+  begin
+    if endsWith(mapPath, ".map") then
+      siblingPath := mapPath[.. length(mapPath) - 4] <& suffix;
+    else
+      siblingPath := mapPath <& suffix;
+    end if;
+  end func;
+
+const func string: cleanedToken (in string: token) is func
+  result
+    var string: clean is "";
+  local
+    var integer: idx is 1;
+    var char: ch is ' ';
+  begin
+    clean := token;
+    while idx <= length(clean) do
+      ch := clean[idx];
+      if ch = '"' or ch = '(' or ch = ')' or ch = '{' or ch = '}' or
+          ch = ',' or ch = ';' then
+        clean := clean[.. pred(idx)] & clean[succ(idx) ..];
+      else
+        incr(idx);
+      end if;
+    end while;
+  end func;
+
+const func integer: countOccurrences (in string: content,
+    in string: token) is func
+  result
+    var integer: count is 0;
+  local
+    var integer: searchPos is 1;
+    var integer: foundPos is 0;
+  begin
+    foundPos := pos(content, token, searchPos);
+    while foundPos <> 0 do
+      count +:= 1;
+      searchPos := foundPos + length(token);
+      foundPos := pos(content, token, searchPos);
+    end while;
+  end func;
+
+const func integer: sumIntegersAfterWord (in string: content,
+    in string: keyName) is func
+  result
+    var integer: total is 0;
+  local
+    var array string: tokens is 0 times "";
+    var integer: tokenIndex is 1;
+    var integer: valueIndex is 0;
+    var integer: value is 0;
+    var boolean: foundValue is FALSE;
+  begin
+    tokens := noEmptyStrings(split(replace(replace(replace(content, "\n", " "),
+        "\r", " "), "\t", " "), ' '));
+    while tokenIndex < length(tokens) do
+      if lower(cleanedToken(tokens[tokenIndex])) = lower(keyName) then
+        foundValue := FALSE;
+        valueIndex := succ(tokenIndex);
+        while valueIndex <= length(tokens) and valueIndex <= tokenIndex + 4 and
+            not foundValue do
+          block
+            value := integer(cleanedToken(tokens[valueIndex]));
+            total +:= value;
+            foundValue := TRUE;
+          exception
+            catch RANGE_ERROR:
+              noop;
+          end block;
+          incr(valueIndex);
+        end while;
+      end if;
+      incr(tokenIndex);
+    end while;
+  end func;
+
+const func boolean: isPickupClass (in string: className) is func
+  result
+    var boolean: pickup is FALSE;
+  begin
+    pickup := startsWith(className, "item_") or
+        startsWith(className, "ammo_") or startsWith(className, "weapon_");
+  end func;
+
+const func string: quotedValueAfter (in string: content, in string: keyName) is func
+  result
+    var string: value is "";
+  local
+    var string: keyText is "";
+    var integer: keyPos is 0;
+    var integer: keyEnd is 0;
+    var integer: valueStart is 0;
+    var integer: valueEnd is 0;
+  begin
+    keyText := "\"" <& keyName <& "\"";
+    keyPos := pos(lower(content), lower(keyText), 1);
+    if keyPos <> 0 then
+      keyEnd := pos(content, "\"", succ(keyPos));
+      if keyEnd <> 0 then
+        valueStart := pos(content, "\"", succ(keyEnd));
+        if valueStart <> 0 then
+          valueEnd := pos(content, "\"", succ(valueStart));
+          if valueEnd <> 0 then
+            value := content[succ(valueStart) .. pred(valueEnd)];
+          end if;
+        end if;
+      end if;
+    end if;
+  end func;
+
+const func integer: previousCharPos (in string: content, in char: needle,
+    in integer: startPos) is func
+  result
+    var integer: foundPos is 0;
+  local
+    var integer: idx is 0;
+  begin
+    idx := startPos;
+    while idx >= 1 and foundPos = 0 do
+      if content[idx] = needle then
+        foundPos := idx;
+      end if;
+      decr(idx);
+    end while;
+  end func;
+
+const func integer: matchingBlockEnd (in string: content,
+    in integer: blockStart) is func
+  result
+    var integer: blockEnd is 0;
+  local
+    var integer: idx is 0;
+    var integer: depth is 0;
+  begin
+    if blockStart <> 0 then
+      idx := blockStart;
+      while idx <= length(content) and blockEnd = 0 do
+        if content[idx] = '{' then
+          incr(depth);
+        elsif content[idx] = '}' then
+          decr(depth);
+          if depth = 0 then
+            blockEnd := idx;
+          end if;
+        end if;
+        incr(idx);
+      end while;
+    end if;
+  end func;
+
+const proc: parseOrigin (inout mapEntity: entity) is func
+  local
+    var array string: parts is 0 times "";
+  begin
+    parts := noEmptyStrings(split(entity.originText, ' '));
+    if length(parts) >= 3 then
+      block
+        entity.x := float(parts[1]);
+        entity.y := float(parts[2]);
+        entity.z := float(parts[3]);
+        entity.hasOrigin := TRUE;
+      exception
+        catch RANGE_ERROR:
+          entity.hasOrigin := FALSE;
+      end block;
+    end if;
+  end func;
+
+const func float: degreesToRadians (in float: degrees) is
+    return degrees * 3.14159265358979323846 / 180.0;
+
+const func boolean: pointTouchesEntity (
+    in mapEntity: entity, in float: x, in float: y) is func
+  result
+    var boolean: touches is FALSE;
+  local
+    var float: deltaX is 0.0;
+    var float: deltaY is 0.0;
+  begin
+    if entity.hasOrigin then
+      deltaX := entity.x - x;
+      deltaY := entity.y - y;
+      touches := deltaX * deltaX + deltaY * deltaY <=
+          PICKUP_TOUCH_RADIUS * PICKUP_TOUCH_RADIUS;
+    end if;
+  end func;
+
+const proc: addPickupTouch (inout inventoryStats: stats,
+    in mapEntity: entity) is func
+  begin
+    stats.touchedPickups +:= 1;
+    if startsWith(entity.className, "item_") then
+      stats.touchedHealthPickups +:= 1;
+    elsif startsWith(entity.className, "ammo_") then
+      stats.touchedAmmoPickups +:= 1;
+    elsif startsWith(entity.className, "weapon_") then
+      stats.touchedWeaponPickups +:= 1;
+    end if;
+    if stats.firstTouchedPickupName = "" then
+      stats.firstTouchedPickupName := entity.entityName;
+    end if;
+  end func;
+
+const proc: inspectMapEntity (inout inventoryStats: stats,
+    in string: entityBlock) is func
+  local
+    var mapEntity: entity is mapEntity.value;
+    var string: angleText is "";
+    var integer: simStep is 0;
+    var float: yawRadians is 0.0;
+    var float: pathX is 0.0;
+    var float: pathY is 0.0;
+    var boolean: touched is FALSE;
+  begin
+    entity.className := lower(quotedValueAfter(entityBlock, "classname"));
+    entity.entityName := quotedValueAfter(entityBlock, "name");
+    entity.originText := quotedValueAfter(entityBlock, "origin");
+    parseOrigin(entity);
+    if entity.className <> "" then
+      stats.mapEntities +:= 1;
+      if entity.className = "info_player_start" then
+        stats.playerStarts +:= 1;
+        stats.playerStartFound := TRUE;
+        if entity.hasOrigin then
+          stats.playerStartParsed := TRUE;
+          stats.playerX := entity.x;
+          stats.playerY := entity.y;
+          stats.playerZ := entity.z;
+        end if;
+        angleText := quotedValueAfter(entityBlock, "angle");
+        if angleText <> "" then
+          block
+            stats.playerYaw := float(angleText);
+          exception
+            catch RANGE_ERROR:
+              stats.playerYaw := 0.0;
+          end block;
+        end if;
+      elsif isPickupClass(entity.className) then
+        stats.pickupEntities +:= 1;
+        if startsWith(entity.className, "item_") then
+          stats.healthPickups +:= 1;
+        elsif startsWith(entity.className, "ammo_") then
+          stats.ammoPickups +:= 1;
+        elsif startsWith(entity.className, "weapon_") then
+          stats.weaponPickups +:= 1;
+        end if;
+        if entity.hasOrigin then
+          stats.pickupsWithOrigin +:= 1;
+        end if;
+        if stats.firstPickupClass = "" then
+          stats.firstPickupClass := entity.className;
+          stats.firstPickupName := entity.entityName;
+        end if;
+        if stats.playerStartParsed and stats.requestedCollisionFound and
+            stats.collisionModels <> 0 and stats.collisionPolygons <> 0 then
+          yawRadians := degreesToRadians(stats.playerYaw);
+          for simStep range 0 to PLAYER_STEP_COUNT do
+            pathX := stats.playerX + cos(yawRadians) *
+                PLAYER_STEP_DISTANCE * float(simStep);
+            pathY := stats.playerY + sin(yawRadians) *
+                PLAYER_STEP_DISTANCE * float(simStep);
+            if not touched and pointTouchesEntity(entity, pathX, pathY) then
+              addPickupTouch(stats, entity);
+              touched := TRUE;
+            end if;
+          end for;
+        end if;
+      end if;
+    end if;
+  end func;
+
+const proc: inspectMapContent (inout inventoryStats: stats,
+    in string: content) is func
+  local
+    var string: contentLower is "";
+    var integer: searchPos is 1;
+    var integer: classPos is 0;
+    var integer: blockStart is 0;
+    var integer: blockEnd is 0;
+  begin
+    contentLower := lower(content);
+    classPos := pos(contentLower, "\"classname\"", searchPos);
+    while classPos <> 0 do
+      blockStart := previousCharPos(content, '{', classPos);
+      blockEnd := matchingBlockEnd(content, blockStart);
+      if blockStart <> 0 and blockEnd <> 0 then
+        inspectMapEntity(stats, content[blockStart .. blockEnd]);
+      end if;
+      searchPos := classPos + length("\"classname\"");
+      classPos := pos(contentLower, "\"classname\"", searchPos);
+    end while;
+  end func;
+
+const proc: inspectCollisionContent (inout inventoryStats: stats,
+    in string: content) is func
+  begin
+    stats.collisionModels +:= countOccurrences(lower(content), "collisionmodel");
+    stats.collisionPolygons +:= sumIntegersAfterWord(lower(content), "polygons");
+  end func;
+
+const func array string: findPk4Archives (in string: basePath) is func
+  result
+    var array string: pk4Files is 0 times "";
+  local
+    var array string: names is 0 times "";
+    var string: name is "";
+  begin
+    if fileType(basePath) = FILE_DIR then
+      names := readDir(basePath);
+      for name range names do
+        if isPk4Name(name) and fileType(joinPath(basePath, name)) = FILE_REGULAR then
+          pk4Files &:= joinPath(basePath, name);
+        end if;
+      end for;
+    end if;
+  end func;
+
+const proc: scanArchive (inout inventoryStats: stats,
+    in string: pk4File, in string: targetMapPath) is func
+  local
+    var fileSys: zipFs is fileSys.value;
+    var array string: paths is 0 times "";
+    var string: path is "";
+    var string: pathLower is "";
+  begin
+    zipFs := openZip(pk4File);
+    if zipFs = fileSys.value then
+      logError("could not open pk4 archive: " <& pk4File);
+    else
+      paths := readDir(zipFs, RECURSIVE);
+      for path range paths do
+        pathLower := normalizedAssetPath(path);
+        if not stats.requestedCollisionFound and
+            pathLower = stats.requestedCollisionPath then
+          stats.requestedCollisionFound := TRUE;
+          inspectCollisionContent(stats, getFile(zipFs, path));
+        end if;
+      end for;
+      for path range paths do
+        if not stats.requestedMapFound and
+            normalizedAssetPath(path) = targetMapPath then
+          stats.requestedMapFound := TRUE;
+          inspectMapContent(stats, getFile(zipFs, path));
+        end if;
+      end for;
+      close(zipFs);
+    end if;
+  end func;
+
+const proc: parseArgs (inout inventoryConfig: config) is func
+  local
+    var array string: args is 0 times "";
+    var integer: argIdx is 1;
+  begin
+    args := argv(PROGRAM);
+    while argIdx <= length(args) do
+      if args[argIdx] = "--help" or args[argIdx] = "-h" then
+        config.showHelp := TRUE;
+      elsif args[argIdx] = "--doom3_data_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.dataPath := convDosPath(args[argIdx]);
+      elsif args[argIdx] = "--doom3_base_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.basePath := convDosPath(args[argIdx]);
+      elsif args[argIdx] = "--doom3_start_map" and argIdx < length(args) then
+        incr(argIdx);
+        config.startMap := args[argIdx];
+      elsif args[argIdx] = "+set" and argIdx + 2 <= length(args) then
+        if args[argIdx + 1] = "fs_basepath" then
+          config.dataPath := convDosPath(args[argIdx + 2]);
+        elsif args[argIdx + 1] = "fs_game" then
+          config.basePath := convDosPath(args[argIdx + 2]);
+        end if;
+        argIdx +:= 2;
+      elsif args[argIdx] = "+map" and argIdx < length(args) then
+        incr(argIdx);
+        config.startMap := args[argIdx];
+      end if;
+      incr(argIdx);
+    end while;
+    if config.basePath = "" then
+      config.basePath := joinPath(config.dataPath, DEFAULT_BASE_DIR);
+    end if;
+  end func;
+
+const proc: showUsage is func
+  begin
+    writeln("Usage:");
+    writeln("  s7 doom3_seed7_inventory.s7 --doom3_data_path <doom3-root>");
+    writeln("  s7 doom3_seed7_inventory.s7 +set fs_basepath <doom3-root> +map <map>");
+    writeln("");
+    writeln("Scans user-owned Doom 3 pk4 files for pickup/inventory readiness.");
+  end func;
+
+const proc: printStats (in inventoryStats: stats) is func
+  begin
+    logInfo("pk4_archives=" <& stats.pk4Archives);
+    logInfo("requested_map=" <& stats.requestedMapPath);
+    logInfo("requested_map_found=" <& stats.requestedMapFound);
+    logInfo("inventory_collision cm=" <& stats.requestedCollisionPath <&
+        " found=" <& stats.requestedCollisionFound <& " models=" <&
+        stats.collisionModels <& " polygons=" <& stats.collisionPolygons);
+    logInfo("map_entities=" <& stats.mapEntities <&
+        " player_start=" <& stats.playerStarts <&
+        " pickup=" <& stats.pickupEntities);
+    logInfo("pickup_classes health=" <& stats.healthPickups <&
+        " ammo=" <& stats.ammoPickups <&
+        " weapon=" <& stats.weaponPickups);
+    logInfo("pickups_with_origin=" <& stats.pickupsWithOrigin);
+    logInfo("player_start_parsed=" <& stats.playerStartParsed);
+    logInfo("pickup_path steps=" <& PLAYER_STEP_COUNT <&
+        " step_distance=" <& PLAYER_STEP_DISTANCE <&
+        " touch_radius=" <& PICKUP_TOUCH_RADIUS <&
+        " collision_ready=" <& (stats.requestedCollisionFound and
+        stats.collisionModels <> 0 and stats.collisionPolygons <> 0));
+    logInfo("touched_pickups=" <& stats.touchedPickups <&
+        " health=" <& stats.touchedHealthPickups <&
+        " ammo=" <& stats.touchedAmmoPickups <&
+        " weapon=" <& stats.touchedWeaponPickups);
+    if stats.firstPickupClass <> "" then
+      logInfo("first_pickup=" <& stats.firstPickupClass <& ":" <&
+          stats.firstPickupName);
+    end if;
+    if stats.firstTouchedPickupName <> "" then
+      logInfo("first_touched_pickup=" <& stats.firstTouchedPickupName);
+    end if;
+    logInfo("inventory_probe_ready=" <&
+        (stats.requestedMapFound and stats.playerStartParsed and
+        stats.requestedCollisionFound and stats.collisionModels <> 0 and
+        stats.collisionPolygons <> 0 and stats.touchedPickups <> 0));
+  end func;
+
+const proc: main is func
+  local
+    var inventoryConfig: config is inventoryConfig.value;
+    var inventoryStats: stats is inventoryStats.value;
+    var array string: pk4Files is 0 times "";
+    var string: pk4File is "";
+  begin
+    parseArgs(config);
+    if config.showHelp then
+      showUsage;
+    else
+      stats.requestedMapPath := mapNameToAssetPath(config.startMap);
+      stats.requestedCollisionPath := compiledSiblingPath(stats.requestedMapPath,
+          ".cm");
+      if fileType(config.basePath) <> FILE_DIR then
+        logError("Doom 3 base directory not found: " <& config.basePath);
+      else
+        pk4Files := sort(findPk4Archives(config.basePath));
+        stats.pk4Archives := length(pk4Files);
+        if length(pk4Files) = 0 then
+          logError("No .pk4 archives found in: " <& config.basePath);
+        else
+          for pk4File range pk4Files do
+            scanArchive(stats, pk4File, stats.requestedMapPath);
+          end for;
+          printStats(stats);
+        end if;
+      end if;
+    end if;
+  end func;

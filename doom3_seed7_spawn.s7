@@ -1,0 +1,987 @@
+(********************************************************************)
+(*  doom3_seed7_spawn.s7                                            *)
+(*                                                                  *)
+(*  Focused Doom 3 / id Tech 4 entity-spawn probe for Seed7. It     *)
+(*  reads user-owned pk4 archives, merges selected-map spawnargs     *)
+(*  with inherited entityDef defaults, resolves referenced assets,   *)
+(*  and reports typed runtime component readiness. No commercial     *)
+(*  data is bundled.                                                *)
+(********************************************************************)
+
+$ include "seed7_05.s7i";
+$ include "osfiles.s7i";
+$ include "zip.s7i";
+
+const string: DEFAULT_DATA_PATH is ".";
+const string: DEFAULT_BASE_DIR is "base";
+const string: DEFAULT_START_MAP is "game/mars_city1";
+const integer: INHERIT_LIMIT is 8;
+
+const type: spawnConfig is new struct
+    var string: dataPath is DEFAULT_DATA_PATH;
+    var string: basePath is "";
+    var string: startMap is DEFAULT_START_MAP;
+    var boolean: showHelp is FALSE;
+  end struct;
+
+const type: defRecord is new struct
+    var string: className is "";
+    var string: parentName is "";
+    var integer: health is 0;
+    var string: modelRef is "";
+    var string: soundRef is "";
+    var string: guiRef is "";
+    var string: spawnclass is "";
+    var string: minsText is "";
+    var string: maxsText is "";
+  end struct;
+
+const type: mapRecord is new struct
+    var string: className is "";
+    var string: entityName is "";
+    var string: target is "";
+    var string: modelRef is "";
+    var string: soundRef is "";
+    var string: guiRef is "";
+    var string: healthText is "";
+    var string: originText is "";
+    var string: angleText is "";
+    var boolean: hasOrigin is FALSE;
+  end struct;
+
+const type: spawnStats is new struct
+    var integer: pk4Archives is 0;
+    var string: requestedMapPath is "";
+    var boolean: requestedMapFound is FALSE;
+    var string: requestedCollisionPath is "";
+    var boolean: requestedCollisionFound is FALSE;
+    var integer: collisionModels is 0;
+    var integer: collisionPolygons is 0;
+    var integer: entityDefs is 0;
+    var integer: entityDefInherits is 0;
+    var integer: entityDefHealthValues is 0;
+    var integer: entityDefModelValues is 0;
+    var integer: entityDefSoundValues is 0;
+    var integer: entityDefGuiValues is 0;
+    var integer: entityDefSpawnclassValues is 0;
+    var integer: entityDefBoundsValues is 0;
+    var integer: mapEntities is 0;
+    var integer: namedEntities is 0;
+    var integer: mapOrigins is 0;
+    var integer: playerStarts is 0;
+    var integer: lights is 0;
+    var integer: monsters is 0;
+    var integer: doors is 0;
+    var integer: triggers is 0;
+    var integer: pickups is 0;
+    var integer: runtimeEntities is 0;
+    var integer: transformComponents is 0;
+    var integer: healthComponents is 0;
+    var integer: modelComponents is 0;
+    var integer: soundComponents is 0;
+    var integer: targetComponents is 0;
+    var integer: guiComponents is 0;
+    var integer: collisionComponents is 0;
+    var integer: thinkComponents is 0;
+    var integer: pickupComponents is 0;
+    var integer: lightComponents is 0;
+    var integer: modelRefs is 0;
+    var integer: resolvedModelRefs is 0;
+    var integer: missingModelRefs is 0;
+    var integer: soundRefs is 0;
+    var integer: resolvedSoundRefs is 0;
+    var integer: missingSoundRefs is 0;
+    var integer: guiRefs is 0;
+    var integer: resolvedGuiRefs is 0;
+    var integer: missingGuiRefs is 0;
+    var integer: targetRefs is 0;
+    var integer: resolvedTargetRefs is 0;
+    var integer: missingTargetRefs is 0;
+    var integer: mapHealthOverrides is 0;
+    var integer: mapSoundOverrides is 0;
+    var string: firstDefClass is "";
+    var string: firstInheritedClass is "";
+    var string: firstSpawnEntity is "";
+    var string: firstSpawnKind is "";
+    var string: firstRuntimeModel is "";
+    var string: firstRuntimeSound is "";
+    var string: firstRuntimeGui is "";
+    var string: firstRuntimeTarget is "";
+    var string: firstRuntimeHealth is "";
+    var string: firstRuntimeBounds is "";
+    var string: firstRuntimeSpawnclass is "";
+    var string: firstSpawnPath is "";
+    var array defRecord: defs is 0 times defRecord.value;
+    var array mapRecord: maps is 0 times mapRecord.value;
+    var array string: modelAssetStems is 0 times "";
+    var array string: soundAssetStems is 0 times "";
+    var array string: guiAssetPaths is 0 times "";
+    var array string: namedEntityNames is 0 times "";
+  end struct;
+
+const proc: logInfo (in string: msg) is func
+  begin
+    writeln("[spawn] " <& msg);
+  end func;
+
+const proc: logError (in string: msg) is func
+  begin
+    writeln("[spawn-error] " <& msg);
+  end func;
+
+const func string: joinPath (in string: leftPath, in string: rightPath) is func
+  result
+    var string: joined is "";
+  begin
+    if leftPath = "" then
+      joined := rightPath;
+    elsif endsWith(leftPath, "/") or endsWith(leftPath, "\\") then
+      joined := leftPath <& rightPath;
+    else
+      joined := leftPath <& "/" <& rightPath;
+    end if;
+  end func;
+
+const func boolean: isPk4Name (in string: fileName) is
+    return endsWith(lower(fileName), ".pk4");
+
+const func string: normalizedAssetPath (in string: filePath) is
+    return replace(lower(filePath), "\\", "/");
+
+const func string: assetStem (in string: filePath) is func
+  result
+    var string: stem is "";
+  local
+    var string: path is "";
+    var integer: dotPos is 0;
+  begin
+    path := normalizedAssetPath(filePath);
+    dotPos := length(path);
+    while dotPos >= 1 and path[dotPos] <> '.' do
+      decr(dotPos);
+    end while;
+    if dotPos > 1 then
+      stem := path[.. pred(dotPos)];
+    else
+      stem := path;
+    end if;
+  end func;
+
+const func boolean: isModelAsset (in string: path) is
+    return endsWith(path, ".md5mesh") or endsWith(path, ".lwo") or
+        endsWith(path, ".ase");
+
+const func boolean: isSoundAsset (in string: path) is
+    return endsWith(path, ".wav") or endsWith(path, ".ogg");
+
+const func string: mapNameToAssetPath (in string: mapName) is func
+  result
+    var string: assetPath is "";
+  begin
+    assetPath := normalizedAssetPath(mapName);
+    if not startsWith(assetPath, "maps/") then
+      assetPath := "maps/" <& assetPath;
+    end if;
+    if not endsWith(assetPath, ".map") then
+      assetPath &:= ".map";
+    end if;
+  end func;
+
+const func string: compiledSiblingPath (in string: mapPath,
+    in string: suffix) is func
+  result
+    var string: siblingPath is "";
+  begin
+    if endsWith(mapPath, ".map") then
+      siblingPath := mapPath[.. length(mapPath) - 4] <& suffix;
+    else
+      siblingPath := mapPath <& suffix;
+    end if;
+  end func;
+
+const func boolean: containsString (in array string: values,
+    in string: value) is func
+  result
+    var boolean: found is FALSE;
+  local
+    var string: current is "";
+  begin
+    for current range values do
+      if current = value then
+        found := TRUE;
+      end if;
+    end for;
+  end func;
+
+const proc: appendUnique (inout array string: values, in string: value) is func
+  begin
+    if value <> "" and not containsString(values, value) then
+      values &:= value;
+    end if;
+  end func;
+
+const func string: cleanedToken (in string: token) is func
+  result
+    var string: clean is "";
+  local
+    var integer: idx is 1;
+    var char: ch is ' ';
+  begin
+    clean := token;
+    while idx <= length(clean) do
+      ch := clean[idx];
+      if ch = '"' or ch = '(' or ch = ')' or ch = '{' or ch = '}' or
+          ch = ',' or ch = ';' then
+        clean := clean[.. pred(idx)] & clean[succ(idx) ..];
+      else
+        incr(idx);
+      end if;
+    end while;
+  end func;
+
+const func integer: countOccurrences (in string: content,
+    in string: token) is func
+  result
+    var integer: count is 0;
+  local
+    var integer: searchPos is 1;
+    var integer: foundPos is 0;
+  begin
+    foundPos := pos(content, token, searchPos);
+    while foundPos <> 0 do
+      count +:= 1;
+      searchPos := foundPos + length(token);
+      foundPos := pos(content, token, searchPos);
+    end while;
+  end func;
+
+const func integer: sumIntegersAfterWord (in string: content,
+    in string: keyName) is func
+  result
+    var integer: total is 0;
+  local
+    var array string: tokens is 0 times "";
+    var integer: tokenIndex is 1;
+    var integer: valueIndex is 0;
+    var integer: value is 0;
+    var boolean: foundValue is FALSE;
+  begin
+    tokens := noEmptyStrings(split(replace(replace(replace(content, "\n", " "),
+        "\r", " "), "\t", " "), ' '));
+    while tokenIndex < length(tokens) do
+      if lower(cleanedToken(tokens[tokenIndex])) = lower(keyName) then
+        foundValue := FALSE;
+        valueIndex := succ(tokenIndex);
+        while valueIndex <= length(tokens) and valueIndex <= tokenIndex + 4 and
+            not foundValue do
+          block
+            value := integer(cleanedToken(tokens[valueIndex]));
+            total +:= value;
+            foundValue := TRUE;
+          exception
+            catch RANGE_ERROR:
+              noop;
+          end block;
+          incr(valueIndex);
+        end while;
+      end if;
+      incr(tokenIndex);
+    end while;
+  end func;
+
+const func string: declNameAfter (in string: content, in integer: startPos) is func
+  result
+    var string: name is "";
+  local
+    var integer: idx is 0;
+    var integer: nameStart is 0;
+    var integer: nameEnd is 0;
+  begin
+    idx := startPos;
+    while idx <= length(content) and
+        (content[idx] = ' ' or content[idx] = '\t' or
+        content[idx] = '\n' or content[idx] = '\r') do
+      incr(idx);
+    end while;
+    nameStart := idx;
+    while idx <= length(content) and content[idx] <> ' ' and
+        content[idx] <> '\t' and content[idx] <> '\n' and
+        content[idx] <> '\r' and content[idx] <> '{' do
+      incr(idx);
+    end while;
+    nameEnd := pred(idx);
+    if nameEnd >= nameStart then
+      name := cleanedToken(content[nameStart .. nameEnd]);
+    end if;
+  end func;
+
+const func string: quotedValueAfter (in string: content, in string: keyName) is func
+  result
+    var string: value is "";
+  local
+    var string: keyText is "";
+    var integer: keyPos is 0;
+    var integer: keyEnd is 0;
+    var integer: valueStart is 0;
+    var integer: valueEnd is 0;
+  begin
+    keyText := "\"" <& keyName <& "\"";
+    keyPos := pos(lower(content), lower(keyText), 1);
+    if keyPos <> 0 then
+      keyEnd := pos(content, "\"", succ(keyPos));
+      if keyEnd <> 0 then
+        valueStart := pos(content, "\"", succ(keyEnd));
+        if valueStart <> 0 then
+          valueEnd := pos(content, "\"", succ(valueStart));
+          if valueEnd <> 0 then
+            value := content[succ(valueStart) .. pred(valueEnd)];
+          end if;
+        end if;
+      end if;
+    end if;
+  end func;
+
+const func string: quotedValueAfterKeyPrefix (in string: content,
+    in string: keyPrefix) is func
+  result
+    var string: value is "";
+  local
+    var string: lowerBlock is "";
+    var integer: keyPos is 0;
+    var integer: keyEnd is 0;
+    var integer: valueStart is 0;
+    var integer: valueEnd is 0;
+  begin
+    lowerBlock := lower(content);
+    keyPos := pos(lowerBlock, "\"" <& lower(keyPrefix), 1);
+    if keyPos <> 0 then
+      keyEnd := pos(content, "\"", succ(keyPos));
+      if keyEnd <> 0 then
+        valueStart := pos(content, "\"", succ(keyEnd));
+        if valueStart <> 0 then
+          valueEnd := pos(content, "\"", succ(valueStart));
+          if valueEnd <> 0 then
+            value := content[succ(valueStart) .. pred(valueEnd)];
+          end if;
+        end if;
+      end if;
+    end if;
+  end func;
+
+const func integer: previousCharPos (in string: content, in char: needle,
+    in integer: startPos) is func
+  result
+    var integer: foundPos is 0;
+  local
+    var integer: idx is 0;
+  begin
+    idx := startPos;
+    while idx >= 1 and foundPos = 0 do
+      if content[idx] = needle then
+        foundPos := idx;
+      end if;
+      decr(idx);
+    end while;
+  end func;
+
+const func integer: matchingBlockEnd (in string: content,
+    in integer: blockStart) is func
+  result
+    var integer: blockEnd is 0;
+  local
+    var integer: idx is 0;
+    var integer: depth is 0;
+  begin
+    if blockStart <> 0 then
+      idx := blockStart;
+      while idx <= length(content) and blockEnd = 0 do
+        if content[idx] = '{' then
+          incr(depth);
+        elsif content[idx] = '}' then
+          decr(depth);
+          if depth = 0 then
+            blockEnd := idx;
+          end if;
+        end if;
+        incr(idx);
+      end while;
+    end if;
+  end func;
+
+const func integer: parseIntegerOrZero (in string: text) is func
+  result
+    var integer: value is 0;
+  begin
+    if text <> "" then
+      block
+        value := integer(text);
+      exception
+        catch RANGE_ERROR:
+          value := 0;
+      end block;
+    end if;
+  end func;
+
+const func boolean: hasOriginText (in string: text) is
+    return length(noEmptyStrings(split(trim(text), ' '))) >= 3;
+
+const proc: inspectDefContent (inout spawnStats: stats,
+    in string: content) is func
+  local
+    var string: contentLower is "";
+    var integer: searchPos is 1;
+    var integer: defPos is 0;
+    var integer: blockStart is 0;
+    var integer: blockEnd is 0;
+    var string: blockText is "";
+    var defRecord: defValue is defRecord.value;
+  begin
+    contentLower := lower(content);
+    defPos := pos(contentLower, "entitydef ", searchPos);
+    while defPos <> 0 do
+      blockStart := pos(content, "{", defPos);
+      blockEnd := matchingBlockEnd(content, blockStart);
+      if blockStart <> 0 and blockEnd <> 0 then
+        blockText := content[blockStart .. blockEnd];
+        defValue := defRecord.value;
+        defValue.className := lower(declNameAfter(content,
+            defPos + length("entitydef ")));
+        defValue.parentName := lower(quotedValueAfter(blockText, "inherit"));
+        defValue.health := parseIntegerOrZero(quotedValueAfter(blockText,
+            "health"));
+        defValue.modelRef := quotedValueAfter(blockText, "model");
+        defValue.soundRef := quotedValueAfterKeyPrefix(blockText, "snd_");
+        defValue.guiRef := normalizedAssetPath(quotedValueAfter(blockText,
+            "gui"));
+        defValue.spawnclass := quotedValueAfter(blockText, "spawnclass");
+        defValue.minsText := quotedValueAfter(blockText, "mins");
+        defValue.maxsText := quotedValueAfter(blockText, "maxs");
+        if defValue.className <> "" then
+          stats.defs &:= defValue;
+          stats.entityDefs +:= 1;
+          if stats.firstDefClass = "" then
+            stats.firstDefClass := defValue.className;
+          end if;
+          if defValue.parentName <> "" then
+            stats.entityDefInherits +:= 1;
+            if stats.firstInheritedClass = "" then
+              stats.firstInheritedClass := defValue.className <& ">" <&
+                  defValue.parentName;
+            end if;
+          end if;
+          if defValue.health <> 0 then stats.entityDefHealthValues +:= 1; end if;
+          if defValue.modelRef <> "" then stats.entityDefModelValues +:= 1; end if;
+          if defValue.soundRef <> "" then stats.entityDefSoundValues +:= 1; end if;
+          if defValue.guiRef <> "" then stats.entityDefGuiValues +:= 1; end if;
+          if defValue.spawnclass <> "" then stats.entityDefSpawnclassValues +:= 1; end if;
+          if defValue.minsText <> "" and defValue.maxsText <> "" then
+            stats.entityDefBoundsValues +:= 1;
+          end if;
+        end if;
+      end if;
+      searchPos := defPos + length("entitydef ");
+      defPos := pos(contentLower, "entitydef ", searchPos);
+    end while;
+  end func;
+
+const func defRecord: defForClass (in spawnStats: stats,
+    in string: className) is func
+  result
+    var defRecord: resolved is defRecord.value;
+  local
+    var defRecord: current is defRecord.value;
+  begin
+    for current range stats.defs do
+      if resolved.className = "" and current.className = lower(className) then
+        resolved := current;
+      end if;
+    end for;
+  end func;
+
+const func string: inheritedTextValue (in spawnStats: stats,
+    in string: className, in string: fieldName) is func
+  result
+    var string: value is "";
+  local
+    var string: currentClass is "";
+    var integer: depth is 0;
+    var defRecord: defValue is defRecord.value;
+  begin
+    currentClass := lower(className);
+    while currentClass <> "" and depth < INHERIT_LIMIT and value = "" do
+      defValue := defForClass(stats, currentClass);
+      if fieldName = "model" then
+        value := defValue.modelRef;
+      elsif fieldName = "sound" then
+        value := defValue.soundRef;
+      elsif fieldName = "gui" then
+        value := defValue.guiRef;
+      elsif fieldName = "spawnclass" then
+        value := defValue.spawnclass;
+      elsif fieldName = "bounds" and defValue.minsText <> "" and
+          defValue.maxsText <> "" then
+        value := defValue.minsText <& " " <& defValue.maxsText;
+      end if;
+      if value = "" then
+        currentClass := defValue.parentName;
+      end if;
+      incr(depth);
+    end while;
+  end func;
+
+const func integer: inheritedHealth (in spawnStats: stats,
+    in string: className) is func
+  result
+    var integer: value is 0;
+  local
+    var string: currentClass is "";
+    var integer: depth is 0;
+    var defRecord: defValue is defRecord.value;
+  begin
+    currentClass := lower(className);
+    while currentClass <> "" and depth < INHERIT_LIMIT and value = 0 do
+      defValue := defForClass(stats, currentClass);
+      value := defValue.health;
+      if value = 0 then
+        currentClass := defValue.parentName;
+      end if;
+      incr(depth);
+    end while;
+  end func;
+
+const proc: inspectMapEntity (inout spawnStats: stats,
+    in string: entityBlock) is func
+  local
+    var mapRecord: mapValue is mapRecord.value;
+  begin
+    mapValue.className := lower(quotedValueAfter(entityBlock, "classname"));
+    mapValue.entityName := quotedValueAfter(entityBlock, "name");
+    mapValue.target := quotedValueAfter(entityBlock, "target");
+    mapValue.modelRef := quotedValueAfter(entityBlock, "model");
+    mapValue.soundRef := quotedValueAfterKeyPrefix(entityBlock, "snd_");
+    mapValue.guiRef := normalizedAssetPath(quotedValueAfter(entityBlock,
+        "gui"));
+    mapValue.healthText := quotedValueAfter(entityBlock, "health");
+    mapValue.originText := quotedValueAfter(entityBlock, "origin");
+    mapValue.angleText := quotedValueAfter(entityBlock, "angle");
+    mapValue.hasOrigin := hasOriginText(mapValue.originText);
+    if mapValue.className <> "" then
+      stats.maps &:= mapValue;
+      stats.mapEntities +:= 1;
+      if mapValue.entityName <> "" then
+        stats.namedEntities +:= 1;
+        appendUnique(stats.namedEntityNames, lower(mapValue.entityName));
+      end if;
+      if mapValue.hasOrigin then stats.mapOrigins +:= 1; end if;
+      if mapValue.className = "info_player_start" then
+        stats.playerStarts +:= 1;
+      elsif mapValue.className = "light" then
+        stats.lights +:= 1;
+      elsif startsWith(mapValue.className, "monster_") then
+        stats.monsters +:= 1;
+      elsif mapValue.className = "func_door" or mapValue.className = "mover_door" then
+        stats.doors +:= 1;
+      elsif startsWith(mapValue.className, "trigger_") then
+        stats.triggers +:= 1;
+      elsif startsWith(mapValue.className, "item_") or
+          startsWith(mapValue.className, "ammo_") or
+          startsWith(mapValue.className, "weapon_") then
+        stats.pickups +:= 1;
+      end if;
+    end if;
+  end func;
+
+const proc: inspectMapContent (inout spawnStats: stats,
+    in string: content) is func
+  local
+    var string: contentLower is "";
+    var integer: searchPos is 1;
+    var integer: classPos is 0;
+    var integer: blockStart is 0;
+    var integer: blockEnd is 0;
+  begin
+    contentLower := lower(content);
+    classPos := pos(contentLower, "\"classname\"", searchPos);
+    while classPos <> 0 do
+      blockStart := previousCharPos(content, '{', classPos);
+      blockEnd := matchingBlockEnd(content, blockStart);
+      if blockStart <> 0 and blockEnd <> 0 then
+        inspectMapEntity(stats, content[blockStart .. blockEnd]);
+      end if;
+      searchPos := classPos + length("\"classname\"");
+      classPos := pos(contentLower, "\"classname\"", searchPos);
+    end while;
+  end func;
+
+const proc: inspectCollisionContent (inout spawnStats: stats,
+    in string: content) is func
+  begin
+    stats.collisionModels +:= countOccurrences(lower(content), "collisionmodel");
+    stats.collisionPolygons +:= sumIntegersAfterWord(lower(content), "polygons");
+  end func;
+
+const func string: spawnKind (in string: className) is func
+  result
+    var string: kind is "generic";
+  begin
+    if className = "info_player_start" then
+      kind := "player_start";
+    elsif className = "light" then
+      kind := "light";
+    elsif startsWith(className, "monster_") then
+      kind := "monster";
+    elsif className = "func_door" or className = "mover_door" then
+      kind := "door";
+    elsif startsWith(className, "trigger_") then
+      kind := "trigger";
+    elsif startsWith(className, "item_") or startsWith(className, "ammo_") or
+        startsWith(className, "weapon_") then
+      kind := "pickup";
+    end if;
+  end func;
+
+const proc: resolveRuntimeSpawns (inout spawnStats: stats) is func
+  local
+    var mapRecord: mapValue is mapRecord.value;
+    var string: kind is "";
+    var integer: healthValue is 0;
+    var string: modelRef is "";
+    var string: soundRef is "";
+    var string: guiRef is "";
+    var string: boundsText is "";
+    var string: spawnclassValue is "";
+    var integer: displayHealth is 0;
+    var boolean: collisionWorldReady is FALSE;
+  begin
+    collisionWorldReady := stats.requestedCollisionFound and
+        stats.collisionModels <> 0 and stats.collisionPolygons <> 0;
+    for mapValue range stats.maps do
+      if mapValue.className <> "worldspawn" then
+        stats.runtimeEntities +:= 1;
+        kind := spawnKind(mapValue.className);
+        if stats.firstSpawnEntity = "" then
+          stats.firstSpawnEntity := mapValue.entityName;
+          stats.firstSpawnKind := kind;
+          stats.firstSpawnPath := mapValue.className <& ">" <& kind;
+        end if;
+        if mapValue.hasOrigin then stats.transformComponents +:= 1; end if;
+        healthValue := inheritedHealth(stats, mapValue.className);
+        if mapValue.healthText <> "" then
+          healthValue := parseIntegerOrZero(mapValue.healthText);
+          stats.mapHealthOverrides +:= 1;
+        end if;
+        if healthValue <> 0 or kind = "player_start" then
+          stats.healthComponents +:= 1;
+          if stats.firstRuntimeHealth = "" then
+            displayHealth := healthValue;
+            if displayHealth = 0 then
+              displayHealth := 100;
+            end if;
+            stats.firstRuntimeHealth := mapValue.entityName <& "=" <&
+                displayHealth;
+          end if;
+        end if;
+        modelRef := mapValue.modelRef;
+        if modelRef = "" then
+          modelRef := inheritedTextValue(stats, mapValue.className, "model");
+        end if;
+        if modelRef <> "" then
+          stats.modelComponents +:= 1;
+          stats.modelRefs +:= 1;
+          if containsString(stats.modelAssetStems, assetStem(modelRef)) then
+            stats.resolvedModelRefs +:= 1;
+          else
+            stats.missingModelRefs +:= 1;
+          end if;
+          if stats.firstRuntimeModel = "" then
+            stats.firstRuntimeModel := mapValue.entityName <& "=" <& modelRef;
+          end if;
+        end if;
+        soundRef := mapValue.soundRef;
+        if soundRef <> "" then
+          stats.mapSoundOverrides +:= 1;
+        else
+          soundRef := inheritedTextValue(stats, mapValue.className, "sound");
+        end if;
+        if soundRef <> "" then
+          stats.soundComponents +:= 1;
+          stats.soundRefs +:= 1;
+          if containsString(stats.soundAssetStems, assetStem(soundRef)) then
+            stats.resolvedSoundRefs +:= 1;
+          else
+            stats.missingSoundRefs +:= 1;
+          end if;
+          if stats.firstRuntimeSound = "" then
+            stats.firstRuntimeSound := mapValue.entityName <& "=" <& soundRef;
+          end if;
+        end if;
+        guiRef := mapValue.guiRef;
+        if guiRef = "" then
+          guiRef := inheritedTextValue(stats, mapValue.className, "gui");
+        end if;
+        if guiRef <> "" then
+          stats.guiComponents +:= 1;
+          stats.guiRefs +:= 1;
+          if containsString(stats.guiAssetPaths, normalizedAssetPath(guiRef)) then
+            stats.resolvedGuiRefs +:= 1;
+          else
+            stats.missingGuiRefs +:= 1;
+          end if;
+          if stats.firstRuntimeGui = "" then
+            stats.firstRuntimeGui := mapValue.entityName <& "=" <& guiRef;
+          end if;
+        end if;
+        if mapValue.target <> "" then
+          stats.targetComponents +:= 1;
+          stats.targetRefs +:= 1;
+          if containsString(stats.namedEntityNames, lower(mapValue.target)) then
+            stats.resolvedTargetRefs +:= 1;
+          else
+            stats.missingTargetRefs +:= 1;
+          end if;
+          if stats.firstRuntimeTarget = "" then
+            stats.firstRuntimeTarget := mapValue.entityName <& ">" <&
+                mapValue.target;
+          end if;
+        end if;
+        boundsText := inheritedTextValue(stats, mapValue.className, "bounds");
+        if collisionWorldReady and
+            (boundsText <> "" or kind = "door" or kind = "trigger") then
+          stats.collisionComponents +:= 1;
+          if stats.firstRuntimeBounds = "" and boundsText <> "" then
+            stats.firstRuntimeBounds := mapValue.entityName <& "=" <&
+                boundsText;
+          end if;
+        end if;
+        spawnclassValue := inheritedTextValue(stats, mapValue.className,
+            "spawnclass");
+        if spawnclassValue <> "" then
+          stats.thinkComponents +:= 1;
+          if stats.firstRuntimeSpawnclass = "" then
+            stats.firstRuntimeSpawnclass := mapValue.entityName <& "=" <&
+                spawnclassValue;
+          end if;
+        end if;
+        if kind = "pickup" then stats.pickupComponents +:= 1; end if;
+        if kind = "light" then stats.lightComponents +:= 1; end if;
+      end if;
+    end for;
+  end func;
+
+const func array string: findPk4Archives (in string: basePath) is func
+  result
+    var array string: pk4Files is 0 times "";
+  local
+    var array string: names is 0 times "";
+    var string: name is "";
+  begin
+    if fileType(basePath) = FILE_DIR then
+      names := readDir(basePath);
+      for name range names do
+        if isPk4Name(name) and fileType(joinPath(basePath, name)) = FILE_REGULAR then
+          pk4Files &:= joinPath(basePath, name);
+        end if;
+      end for;
+    end if;
+  end func;
+
+const proc: scanArchive (inout spawnStats: stats,
+    in string: pk4File) is func
+  local
+    var fileSys: zipFs is fileSys.value;
+    var array string: paths is 0 times "";
+    var string: path is "";
+    var string: pathLower is "";
+  begin
+    zipFs := openZip(pk4File);
+    if zipFs = fileSys.value then
+      logError("Could not open pk4 archive: " <& pk4File);
+    else
+      paths := sort(readDir(zipFs, RECURSIVE));
+      for path range paths do
+        pathLower := normalizedAssetPath(path);
+        if isModelAsset(pathLower) then
+          appendUnique(stats.modelAssetStems, assetStem(pathLower));
+        elsif isSoundAsset(pathLower) then
+          appendUnique(stats.soundAssetStems, assetStem(pathLower));
+        elsif endsWith(pathLower, ".gui") then
+          appendUnique(stats.guiAssetPaths, pathLower);
+        elsif endsWith(pathLower, ".def") then
+          inspectDefContent(stats, getFile(zipFs, path));
+        elsif not stats.requestedMapFound and pathLower = stats.requestedMapPath then
+          stats.requestedMapFound := TRUE;
+          inspectMapContent(stats, getFile(zipFs, path));
+        elsif pathLower = stats.requestedCollisionPath then
+          stats.requestedCollisionFound := TRUE;
+          inspectCollisionContent(stats, getFile(zipFs, path));
+        end if;
+      end for;
+      close(zipFs);
+    end if;
+  end func;
+
+const proc: parseArgs (inout spawnConfig: config) is func
+  local
+    var array string: args is 0 times "";
+    var integer: argIdx is 1;
+  begin
+    args := argv(PROGRAM);
+    while argIdx <= length(args) do
+      if args[argIdx] = "--help" or args[argIdx] = "-h" then
+        config.showHelp := TRUE;
+      elsif args[argIdx] = "--doom3_data_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.dataPath := convDosPath(args[argIdx]);
+      elsif args[argIdx] = "--doom3_base_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.basePath := convDosPath(args[argIdx]);
+      elsif args[argIdx] = "--doom3_start_map" and argIdx < length(args) then
+        incr(argIdx);
+        config.startMap := args[argIdx];
+      elsif args[argIdx] = "+map" and argIdx < length(args) then
+        incr(argIdx);
+        config.startMap := args[argIdx];
+      elsif args[argIdx] = "+set" and argIdx + 2 <= length(args) then
+        if args[argIdx + 1] = "fs_basepath" then
+          config.dataPath := convDosPath(args[argIdx + 2]);
+        elsif args[argIdx + 1] = "fs_game" then
+          config.basePath := convDosPath(args[argIdx + 2]);
+        end if;
+        argIdx +:= 2;
+      end if;
+      incr(argIdx);
+    end while;
+    if config.basePath = "" then
+      config.basePath := joinPath(config.dataPath, DEFAULT_BASE_DIR);
+    end if;
+  end func;
+
+const proc: showUsage is func
+  begin
+    writeln("Usage:");
+    writeln("  s7 doom3_seed7_spawn.s7 --doom3_data_path <doom3-root>");
+    writeln("  s7 doom3_seed7_spawn.s7 +set fs_basepath <doom3-root> +map <map>");
+    writeln("");
+    writeln("Scans user-owned Doom 3 pk4 files for entity spawn readiness.");
+  end func;
+
+const proc: printStats (in spawnStats: stats) is func
+  begin
+    logInfo("pk4_archives=" <& stats.pk4Archives);
+    logInfo("requested_map=" <& stats.requestedMapPath);
+    logInfo("requested_map_found=" <& stats.requestedMapFound);
+    logInfo("spawn_collision cm=" <& stats.requestedCollisionPath <&
+        " found=" <& stats.requestedCollisionFound <& " models=" <&
+        stats.collisionModels <& " polygons=" <& stats.collisionPolygons);
+    logInfo("spawn_templates entity_defs=" <& stats.entityDefs <&
+        " inherit=" <& stats.entityDefInherits <&
+        " health=" <& stats.entityDefHealthValues <&
+        " model=" <& stats.entityDefModelValues <&
+        " sound=" <& stats.entityDefSoundValues <&
+        " gui=" <& stats.entityDefGuiValues <&
+        " spawnclass=" <& stats.entityDefSpawnclassValues <&
+        " bounds=" <& stats.entityDefBoundsValues);
+    logInfo("map_spawn entities=" <& stats.mapEntities <&
+        " named=" <& stats.namedEntities <& " origins=" <&
+        stats.mapOrigins <& " player_start=" <& stats.playerStarts);
+    logInfo("spawn_kinds light=" <& stats.lights <& " monster=" <&
+        stats.monsters <& " door=" <& stats.doors <& " trigger=" <&
+        stats.triggers <& " pickup=" <& stats.pickups);
+    logInfo("runtime_spawns total=" <& stats.runtimeEntities <&
+        " transform=" <& stats.transformComponents <& " health=" <&
+        stats.healthComponents <& " model=" <& stats.modelComponents <&
+        " sound=" <& stats.soundComponents);
+    logInfo("runtime_components target=" <& stats.targetComponents <&
+        " gui=" <& stats.guiComponents <& " collision=" <&
+        stats.collisionComponents <& " think=" <& stats.thinkComponents <&
+        " pickup=" <& stats.pickupComponents <& " light=" <&
+        stats.lightComponents);
+    logInfo("spawn_resolution model_refs=" <& stats.modelRefs <&
+        " model_resolved=" <& stats.resolvedModelRefs <&
+        " model_missing=" <& stats.missingModelRefs <& " sound_refs=" <&
+        stats.soundRefs <& " sound_resolved=" <& stats.resolvedSoundRefs <&
+        " sound_missing=" <& stats.missingSoundRefs);
+    logInfo("spawn_resolution_gui refs=" <& stats.guiRefs <&
+        " resolved=" <& stats.resolvedGuiRefs <& " missing=" <&
+        stats.missingGuiRefs <& " target_refs=" <& stats.targetRefs <&
+        " target_resolved=" <& stats.resolvedTargetRefs <&
+        " target_missing=" <& stats.missingTargetRefs);
+    logInfo("spawn_overrides health=" <& stats.mapHealthOverrides <&
+        " sound=" <& stats.mapSoundOverrides);
+    if stats.firstDefClass <> "" then
+      logInfo("first_spawn_template=" <& stats.firstDefClass);
+    end if;
+    if stats.firstInheritedClass <> "" then
+      logInfo("first_spawn_inherit=" <& stats.firstInheritedClass);
+    end if;
+    if stats.firstSpawnEntity <> "" then
+      logInfo("first_spawn_entity=" <& stats.firstSpawnEntity);
+      logInfo("first_spawn_kind=" <& stats.firstSpawnKind);
+      logInfo("first_spawn_path=" <& stats.firstSpawnPath);
+    end if;
+    if stats.firstRuntimeHealth <> "" then
+      logInfo("first_spawn_health=" <& stats.firstRuntimeHealth);
+    end if;
+    if stats.firstRuntimeModel <> "" then
+      logInfo("first_spawn_model=" <& stats.firstRuntimeModel);
+    end if;
+    if stats.firstRuntimeSound <> "" then
+      logInfo("first_spawn_sound=" <& stats.firstRuntimeSound);
+    end if;
+    if stats.firstRuntimeGui <> "" then
+      logInfo("first_spawn_gui=" <& stats.firstRuntimeGui);
+    end if;
+    if stats.firstRuntimeTarget <> "" then
+      logInfo("first_spawn_target=" <& stats.firstRuntimeTarget);
+    end if;
+    if stats.firstRuntimeBounds <> "" then
+      logInfo("first_spawn_bounds=" <& stats.firstRuntimeBounds);
+    end if;
+    if stats.firstRuntimeSpawnclass <> "" then
+      logInfo("first_spawn_spawnclass=" <& stats.firstRuntimeSpawnclass);
+    end if;
+    logInfo("spawn_probe_ready=" <& (stats.pk4Archives <> 0 and
+        stats.requestedMapFound and stats.requestedCollisionFound and
+        stats.collisionModels <> 0 and stats.collisionPolygons <> 0 and
+        stats.entityDefs <> 0 and
+        stats.runtimeEntities <> 0 and stats.transformComponents <> 0 and
+        stats.healthComponents <> 0 and stats.modelRefs <> 0 and
+        stats.modelRefs = stats.resolvedModelRefs and stats.soundRefs <> 0 and
+        stats.soundRefs = stats.resolvedSoundRefs and stats.guiRefs <> 0 and
+        stats.guiRefs = stats.resolvedGuiRefs and stats.targetRefs <> 0 and
+        stats.targetRefs = stats.resolvedTargetRefs and
+        stats.collisionComponents <> 0 and stats.thinkComponents <> 0 and
+        stats.pickupComponents <> 0 and stats.lightComponents <> 0));
+  end func;
+
+const proc: main is func
+  local
+    var spawnConfig: config is spawnConfig.value;
+    var spawnStats: stats is spawnStats.value;
+    var array string: pk4Files is 0 times "";
+    var string: pk4File is "";
+  begin
+    parseArgs(config);
+    if config.showHelp then
+      showUsage;
+    else
+      stats.requestedMapPath := mapNameToAssetPath(config.startMap);
+      stats.requestedCollisionPath := compiledSiblingPath(stats.requestedMapPath,
+          ".cm");
+      if fileType(config.basePath) <> FILE_DIR then
+        logError("Doom 3 base directory not found: " <& config.basePath);
+      else
+        pk4Files := sort(findPk4Archives(config.basePath));
+        stats.pk4Archives := length(pk4Files);
+        if length(pk4Files) = 0 then
+          logError("No .pk4 archives found in: " <& config.basePath);
+        else
+          for pk4File range pk4Files do
+            scanArchive(stats, pk4File);
+          end for;
+          resolveRuntimeSpawns(stats);
+          printStats(stats);
+        end if;
+      end if;
+    end if;
+  end func;

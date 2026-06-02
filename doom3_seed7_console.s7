@@ -1,0 +1,683 @@
+(********************************************************************)
+(*  doom3_seed7_console.s7                                          *)
+(*                                                                  *)
+(*  Focused Doom 3 / id Tech 4 console-command-buffer probe for     *)
+(*  Seed7. It validates quoted command parsing, semicolon command    *)
+(*  splitting, exec/config playback, aliases, wait, devmap/map,      *)
+(*  binds, cvars, and unsupported-command reporting. No commercial   *)
+(*  data is bundled.                                                *)
+(********************************************************************)
+
+$ include "seed7_05.s7i";
+$ include "osfiles.s7i";
+$ include "zip.s7i";
+
+const string: DEFAULT_DATA_PATH is ".";
+const string: DEFAULT_BASE_DIR is "base";
+const string: DEFAULT_START_MAP is "game/mars_city1";
+
+const type: cfgRecord is new struct
+    var string: path is "";
+    var string: content is "";
+  end struct;
+
+const type: cvarRecord is new struct
+    var string: name is "";
+    var string: value is "";
+  end struct;
+
+const type: bindRecord is new struct
+    var string: keyName is "";
+    var string: actionName is "";
+  end struct;
+
+const type: aliasRecord is new struct
+    var string: name is "";
+    var string: commandText is "";
+  end struct;
+
+const type: queuedCommand is new struct
+    var string: sourceName is "";
+    var string: commandText is "";
+  end struct;
+
+const type: consoleConfig is new struct
+    var string: dataPath is DEFAULT_DATA_PATH;
+    var string: basePath is "";
+    var string: startMap is DEFAULT_START_MAP;
+    var boolean: showHelp is FALSE;
+    var array queuedCommand: startupCommands is 0 times queuedCommand.value;
+  end struct;
+
+const type: consoleStats is new struct
+    var integer: pk4Archives is 0;
+    var integer: configFiles is 0;
+    var integer: configLines is 0;
+    var integer: commandBufferQueued is 0;
+    var integer: commandBufferExecuted is 0;
+    var integer: commandBufferFromConfig is 0;
+    var integer: commandBufferFromCli is 0;
+    var integer: commandBufferFromExec is 0;
+    var integer: commandBufferFromAlias is 0;
+    var integer: semicolonCommands is 0;
+    var integer: quotedArguments is 0;
+    var integer: cvarSets is 0;
+    var integer: binds is 0;
+    var integer: unbinds is 0;
+    var integer: mapCommands is 0;
+    var integer: devmapCommands is 0;
+    var integer: execCommands is 0;
+    var integer: echoCommands is 0;
+    var integer: waitCommands is 0;
+    var integer: aliasDecls is 0;
+    var integer: aliasExpansions is 0;
+    var integer: unsupportedCommands is 0;
+    var integer: totalCvars is 0;
+    var integer: totalBinds is 0;
+    var integer: totalAliases is 0;
+    var string: firstConfigFile is "";
+    var string: firstQueuedCommand is "";
+    var string: firstExecutedCommand is "";
+    var string: firstCvar is "";
+    var string: firstBind is "";
+    var string: firstAlias is "";
+    var string: firstAliasExpansion is "";
+    var string: firstExec is "";
+    var string: firstUnsupportedCommand is "";
+    var string: commandPath is "";
+    var string: finalMap is DEFAULT_START_MAP;
+    var boolean: devmapMode is FALSE;
+    var array cfgRecord: cfgs is 0 times cfgRecord.value;
+    var array cvarRecord: cvars is 0 times cvarRecord.value;
+    var array bindRecord: bindsByKey is 0 times bindRecord.value;
+    var array aliasRecord: aliases is 0 times aliasRecord.value;
+  end struct;
+
+const proc: logInfo (in string: msg) is func
+  begin
+    writeln("[console] " <& msg);
+  end func;
+
+const proc: logError (in string: msg) is func
+  begin
+    writeln("[console-error] " <& msg);
+  end func;
+
+const func string: joinPath (in string: leftPath, in string: rightPath) is func
+  result
+    var string: joined is "";
+  begin
+    if leftPath = "" then
+      joined := rightPath;
+    elsif endsWith(leftPath, "/") or endsWith(leftPath, "\\") then
+      joined := leftPath <& rightPath;
+    else
+      joined := leftPath <& "/" <& rightPath;
+    end if;
+  end func;
+
+const func boolean: isPk4Name (in string: fileName) is
+    return endsWith(lower(fileName), ".pk4");
+
+const func string: normalizedAssetPath (in string: filePath) is
+    return replace(lower(filePath), "\\", "/");
+
+const proc: appendQueuedCommand (inout array queuedCommand: commands,
+    in string: sourceName, in string: commandText) is func
+  local
+    var queuedCommand: command is queuedCommand.value;
+  begin
+    if trim(commandText) <> "" then
+      command.sourceName := sourceName;
+      command.commandText := trim(commandText);
+      commands &:= command;
+    end if;
+  end func;
+
+const proc: setCvar (inout array cvarRecord: cvars,
+    in string: cvarName, in string: cvarValue) is func
+  local
+    var integer: idx is 1;
+    var cvarRecord: cvar is cvarRecord.value;
+  begin
+    while idx <= length(cvars) and cvars[idx].name <> cvarName do
+      incr(idx);
+    end while;
+    if idx <= length(cvars) then
+      cvars[idx].value := cvarValue;
+    elsif cvarName <> "" then
+      cvar.name := cvarName;
+      cvar.value := cvarValue;
+      cvars &:= cvar;
+    end if;
+  end func;
+
+const proc: addBind (inout array bindRecord: binds,
+    in string: keyName, in string: actionName) is func
+  local
+    var integer: idx is 1;
+    var bindRecord: bind is bindRecord.value;
+  begin
+    while idx <= length(binds) and binds[idx].keyName <> lower(keyName) do
+      incr(idx);
+    end while;
+    if idx <= length(binds) then
+      binds[idx].actionName := actionName;
+    elsif keyName <> "" then
+      bind.keyName := lower(keyName);
+      bind.actionName := actionName;
+      binds &:= bind;
+    end if;
+  end func;
+
+const proc: removeBind (inout array bindRecord: binds,
+    in string: keyName) is func
+  local
+    var integer: idx is 1;
+  begin
+    while idx <= length(binds) do
+      if binds[idx].keyName = lower(keyName) then
+        binds := binds[.. pred(idx)] & binds[succ(idx) ..];
+      else
+        incr(idx);
+      end if;
+    end while;
+  end func;
+
+const proc: setAlias (inout array aliasRecord: aliases,
+    in string: aliasName, in string: commandText) is func
+  local
+    var integer: idx is 1;
+    var aliasRecord: alias is aliasRecord.value;
+  begin
+    while idx <= length(aliases) and aliases[idx].name <> aliasName do
+      incr(idx);
+    end while;
+    if idx <= length(aliases) then
+      aliases[idx].commandText := commandText;
+    elsif aliasName <> "" then
+      alias.name := aliasName;
+      alias.commandText := commandText;
+      aliases &:= alias;
+    end if;
+  end func;
+
+const func string: aliasCommand (in array aliasRecord: aliases,
+    in string: aliasName) is func
+  result
+    var string: commandText is "";
+  local
+    var aliasRecord: alias is aliasRecord.value;
+  begin
+    for alias range aliases do
+      if commandText = "" and alias.name = aliasName then
+        commandText := alias.commandText;
+      end if;
+    end for;
+  end func;
+
+const func string: cfgContentForPath (in array cfgRecord: cfgs,
+    in string: cfgPath) is func
+  result
+    var string: content is "";
+  local
+    var cfgRecord: cfg is cfgRecord.value;
+    var string: normalizedPath is "";
+  begin
+    normalizedPath := normalizedAssetPath(cfgPath);
+    for cfg range cfgs do
+      if content = "" and cfg.path = normalizedPath then
+        content := cfg.content;
+      end if;
+    end for;
+  end func;
+
+const proc: noteExecutedCommand (inout consoleStats: stats,
+    in string: sourceName, in string: commandName) is func
+  local
+    var string: commandRef is "";
+  begin
+    commandRef := sourceName <& ":" <& commandName;
+    stats.commandBufferExecuted +:= 1;
+    if sourceName = "cfg" then
+      stats.commandBufferFromConfig +:= 1;
+    elsif sourceName = "cli" then
+      stats.commandBufferFromCli +:= 1;
+    elsif sourceName = "exec" then
+      stats.commandBufferFromExec +:= 1;
+    elsif sourceName = "alias" then
+      stats.commandBufferFromAlias +:= 1;
+    end if;
+    if stats.firstExecutedCommand = "" then
+      stats.firstExecutedCommand := commandRef;
+    end if;
+    if stats.commandPath = "" then
+      stats.commandPath := commandRef;
+    else
+      stats.commandPath &:= ">" <& commandRef;
+    end if;
+  end func;
+
+const func array string: splitConsoleCommands (inout consoleStats: stats,
+    in string: line) is func
+  result
+    var array string: commands is 0 times "";
+  local
+    var integer: idx is 1;
+    var string: current is "";
+    var boolean: inQuote is FALSE;
+    var char: ch is ' ';
+  begin
+    while idx <= length(line) do
+      ch := line[idx];
+      if ch = '"' then
+        inQuote := not inQuote;
+        current &:= ch;
+      elsif ch = ';' and not inQuote then
+        if trim(current) <> "" then
+          commands &:= trim(current);
+          stats.semicolonCommands +:= 1;
+        end if;
+        current := "";
+      elsif ch = '/' and idx < length(line) and line[succ(idx)] = '/' and
+          not inQuote then
+        idx := length(line) + 1;
+      else
+        current &:= ch;
+      end if;
+      incr(idx);
+    end while;
+    if trim(current) <> "" then
+      commands &:= trim(current);
+    end if;
+  end func;
+
+const func array string: tokenizeConsoleCommand (inout consoleStats: stats,
+    in string: commandText) is func
+  result
+    var array string: tokens is 0 times "";
+  local
+    var integer: idx is 1;
+    var integer: startIdx is 1;
+    var string: tokenText is "";
+    var char: ch is ' ';
+  begin
+    while idx <= length(commandText) do
+      ch := commandText[idx];
+      if ch = ' ' or ch = '\t' then
+        incr(idx);
+      elsif ch = '"' then
+        incr(idx);
+        startIdx := idx;
+        while idx <= length(commandText) and commandText[idx] <> '"' do
+          incr(idx);
+        end while;
+        if idx > startIdx then
+          tokenText := commandText[startIdx .. pred(idx)];
+          tokens &:= tokenText;
+          stats.quotedArguments +:= 1;
+        end if;
+        if idx <= length(commandText) and commandText[idx] = '"' then
+          incr(idx);
+        end if;
+      else
+        startIdx := idx;
+        while idx <= length(commandText) and commandText[idx] <> ' ' and
+            commandText[idx] <> '\t' do
+          incr(idx);
+        end while;
+        tokenText := commandText[startIdx .. pred(idx)];
+        if tokenText <> "" then
+          tokens &:= tokenText;
+        end if;
+      end if;
+    end while;
+  end func;
+
+const proc: executeCommandText (inout consoleStats: stats,
+    in string: sourceName, in string: commandText) is forward;
+
+const proc: executeConfigText (inout consoleStats: stats,
+    in string: sourceName, in string: content) is func
+  local
+    var array string: lines is 0 times "";
+    var array string: commands is 0 times "";
+    var string: line is "";
+    var string: commandText is "";
+  begin
+    lines := split(content, '\n');
+    for line range lines do
+      if sourceName = "cfg" then
+        stats.configLines +:= 1;
+      end if;
+      commands := splitConsoleCommands(stats, line);
+      for commandText range commands do
+        executeCommandText(stats, sourceName, commandText);
+      end for;
+    end for;
+  end func;
+
+const proc: executeCommandText (inout consoleStats: stats,
+    in string: sourceName, in string: commandText) is func
+  local
+    var array string: tokens is 0 times "";
+    var array string: expandedCommands is 0 times "";
+    var string: expandedPart is "";
+    var string: commandName is "";
+    var string: expandedCommand is "";
+    var string: execContent is "";
+  begin
+    tokens := tokenizeConsoleCommand(stats, commandText);
+    if length(tokens) <> 0 then
+      commandName := lower(tokens[1]);
+      expandedCommand := aliasCommand(stats.aliases, commandName);
+      if expandedCommand <> "" then
+        stats.aliasExpansions +:= 1;
+        if stats.firstAliasExpansion = "" then
+          stats.firstAliasExpansion := commandName <& "=" <& expandedCommand;
+        end if;
+        expandedCommands := splitConsoleCommands(stats, expandedCommand);
+        for expandedPart range expandedCommands do
+          executeCommandText(stats, "alias", expandedPart);
+        end for;
+      elsif (commandName = "set" or commandName = "seta") and length(tokens) >= 3 then
+        setCvar(stats.cvars, tokens[2], tokens[3]);
+        stats.cvarSets +:= 1;
+        noteExecutedCommand(stats, sourceName, "set");
+        if stats.firstCvar = "" then
+          stats.firstCvar := tokens[2] <& "=" <& tokens[3];
+        end if;
+      elsif commandName = "bind" and length(tokens) >= 3 then
+        addBind(stats.bindsByKey, tokens[2], tokens[3]);
+        stats.binds +:= 1;
+        noteExecutedCommand(stats, sourceName, "bind");
+        if stats.firstBind = "" then
+          stats.firstBind := tokens[2] <& "=" <& tokens[3];
+        end if;
+      elsif commandName = "unbind" and length(tokens) >= 2 then
+        removeBind(stats.bindsByKey, tokens[2]);
+        stats.unbinds +:= 1;
+        noteExecutedCommand(stats, sourceName, "unbind");
+      elsif commandName = "map" and length(tokens) >= 2 then
+        stats.finalMap := tokens[2];
+        stats.mapCommands +:= 1;
+        stats.devmapMode := FALSE;
+        noteExecutedCommand(stats, sourceName, "map");
+      elsif commandName = "devmap" and length(tokens) >= 2 then
+        stats.finalMap := tokens[2];
+        stats.devmapCommands +:= 1;
+        stats.devmapMode := TRUE;
+        noteExecutedCommand(stats, sourceName, "devmap");
+      elsif commandName = "exec" and length(tokens) >= 2 then
+        stats.execCommands +:= 1;
+        noteExecutedCommand(stats, sourceName, "exec");
+        if stats.firstExec = "" then
+          stats.firstExec := normalizedAssetPath(tokens[2]);
+        end if;
+        execContent := cfgContentForPath(stats.cfgs, tokens[2]);
+        if execContent <> "" then
+          executeConfigText(stats, "exec", execContent);
+        end if;
+      elsif commandName = "echo" then
+        stats.echoCommands +:= 1;
+        noteExecutedCommand(stats, sourceName, "echo");
+      elsif commandName = "wait" then
+        stats.waitCommands +:= 1;
+        noteExecutedCommand(stats, sourceName, "wait");
+      elsif commandName = "alias" and length(tokens) >= 3 then
+        setAlias(stats.aliases, tokens[2], tokens[3]);
+        stats.aliasDecls +:= 1;
+        noteExecutedCommand(stats, sourceName, "alias");
+        if stats.firstAlias = "" then
+          stats.firstAlias := tokens[2] <& "=" <& tokens[3];
+        end if;
+      else
+        stats.unsupportedCommands +:= 1;
+        noteExecutedCommand(stats, sourceName, "unsupported");
+        if stats.firstUnsupportedCommand = "" then
+          stats.firstUnsupportedCommand := commandName;
+        end if;
+      end if;
+    end if;
+  end func;
+
+const proc: catalogConfig (inout consoleStats: stats,
+    in string: path, in string: content) is func
+  local
+    var cfgRecord: cfg is cfgRecord.value;
+  begin
+    cfg.path := normalizedAssetPath(path);
+    cfg.content := content;
+    stats.cfgs &:= cfg;
+    stats.configFiles +:= 1;
+    if stats.firstConfigFile = "" then
+      stats.firstConfigFile := cfg.path;
+    end if;
+  end func;
+
+const proc: scanArchive (inout consoleStats: stats,
+    in string: pk4File) is func
+  local
+    var fileSys: zipFs is fileSys.value;
+    var array string: paths is 0 times "";
+    var string: path is "";
+    var string: pathLower is "";
+  begin
+    zipFs := openZip(pk4File);
+    if zipFs = fileSys.value then
+      logError("could not open pk4 archive: " <& pk4File);
+    else
+      paths := sort(readDir(zipFs, RECURSIVE));
+      for path range paths do
+        pathLower := normalizedAssetPath(path);
+        if endsWith(pathLower, ".cfg") then
+          catalogConfig(stats, pathLower, getFile(zipFs, path));
+        end if;
+      end for;
+      close(zipFs);
+    end if;
+  end func;
+
+const func array string: findPk4Archives (in string: basePath) is func
+  result
+    var array string: pk4Files is 0 times "";
+  local
+    var array string: names is 0 times "";
+    var string: name is "";
+  begin
+    if fileType(basePath) = FILE_DIR then
+      names := readDir(basePath);
+      for name range names do
+        if isPk4Name(name) and fileType(joinPath(basePath, name)) = FILE_REGULAR then
+          pk4Files &:= joinPath(basePath, name);
+        end if;
+      end for;
+    end if;
+  end func;
+
+const proc: parseArgs (inout consoleConfig: config,
+    inout consoleStats: stats) is func
+  local
+    var array string: args is 0 times "";
+    var integer: argIdx is 1;
+    var string: commandText is "";
+  begin
+    args := argv(PROGRAM);
+    while argIdx <= length(args) do
+      if args[argIdx] = "--help" or args[argIdx] = "-h" then
+        config.showHelp := TRUE;
+      elsif args[argIdx] = "--doom3_data_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.dataPath := convDosPath(args[argIdx]);
+      elsif args[argIdx] = "--doom3_base_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.basePath := convDosPath(args[argIdx]);
+      elsif args[argIdx] = "--doom3_start_map" and argIdx < length(args) then
+        incr(argIdx);
+        config.startMap := args[argIdx];
+      elsif args[argIdx] = "+set" and argIdx + 2 <= length(args) then
+        commandText := "set " <& args[argIdx + 1] <& " " <& args[argIdx + 2];
+        appendQueuedCommand(config.startupCommands, "cli", commandText);
+        argIdx +:= 2;
+      elsif args[argIdx] = "+bind" and argIdx + 2 <= length(args) then
+        commandText := "bind " <& args[argIdx + 1] <& " " <& args[argIdx + 2];
+        appendQueuedCommand(config.startupCommands, "cli", commandText);
+        argIdx +:= 2;
+      elsif args[argIdx] = "+map" and argIdx < length(args) then
+        incr(argIdx);
+        appendQueuedCommand(config.startupCommands, "cli", "map " <& args[argIdx]);
+      elsif args[argIdx] = "+devmap" and argIdx < length(args) then
+        incr(argIdx);
+        appendQueuedCommand(config.startupCommands, "cli", "devmap " <& args[argIdx]);
+      elsif args[argIdx] = "+exec" and argIdx < length(args) then
+        incr(argIdx);
+        appendQueuedCommand(config.startupCommands, "cli", "exec " <& args[argIdx]);
+      elsif args[argIdx] = "+wait" then
+        appendQueuedCommand(config.startupCommands, "cli", "wait");
+      elsif args[argIdx] = "+echo" and argIdx < length(args) then
+        incr(argIdx);
+        appendQueuedCommand(config.startupCommands, "cli", "echo \"" <& args[argIdx] <& "\"");
+      elsif args[argIdx] = "+alias" and argIdx + 2 <= length(args) then
+        commandText := "alias " <& args[argIdx + 1] <& " \"" <&
+            args[argIdx + 2] <& "\"";
+        appendQueuedCommand(config.startupCommands, "cli", commandText);
+        argIdx +:= 2;
+      elsif startsWith(args[argIdx], "+") then
+        commandText := args[argIdx][2 ..];
+        if argIdx < length(args) and not startsWith(args[succ(argIdx)], "+") then
+          incr(argIdx);
+          commandText &:= " " <& args[argIdx];
+        end if;
+        appendQueuedCommand(config.startupCommands, "cli", commandText);
+      end if;
+      incr(argIdx);
+    end while;
+    if config.basePath = "" then
+      config.basePath := joinPath(config.dataPath, DEFAULT_BASE_DIR);
+    end if;
+    stats.finalMap := config.startMap;
+  end func;
+
+const proc: executeStartup (in consoleConfig: config,
+    inout consoleStats: stats) is func
+  local
+    var queuedCommand: command is queuedCommand.value;
+    var string: defaultCfg is "";
+  begin
+    defaultCfg := cfgContentForPath(stats.cfgs, "config/default.cfg");
+    if defaultCfg <> "" then
+      executeConfigText(stats, "cfg", defaultCfg);
+    end if;
+    for command range config.startupCommands do
+      stats.commandBufferQueued +:= 1;
+      if stats.firstQueuedCommand = "" then
+        stats.firstQueuedCommand := command.sourceName <& ":" <&
+            command.commandText;
+      end if;
+      executeCommandText(stats, command.sourceName, command.commandText);
+    end for;
+    stats.totalCvars := length(stats.cvars);
+    stats.totalBinds := length(stats.bindsByKey);
+    stats.totalAliases := length(stats.aliases);
+  end func;
+
+const proc: showUsage is func
+  begin
+    writeln("Usage:");
+    writeln("  s7 doom3_seed7_console.s7 --doom3_data_path <doom3-root>");
+    writeln("  s7 doom3_seed7_console.s7 +exec config/default.cfg +devmap game/mars_city1");
+    writeln("");
+    writeln("Scans user-owned Doom 3 pk4 files for console command-buffer readiness.");
+  end func;
+
+const proc: printStats (in consoleConfig: config,
+    in consoleStats: stats) is func
+  begin
+    logInfo("pk4_archives=" <& stats.pk4Archives);
+    logInfo("config_files=" <& stats.configFiles);
+    logInfo("config_lines=" <& stats.configLines);
+    logInfo("command_buffer queued=" <& stats.commandBufferQueued <&
+        " executed=" <& stats.commandBufferExecuted <&
+        " cfg=" <& stats.commandBufferFromConfig <&
+        " cli=" <& stats.commandBufferFromCli <&
+        " exec=" <& stats.commandBufferFromExec <&
+        " alias=" <& stats.commandBufferFromAlias);
+    logInfo("command_parse semicolon=" <& stats.semicolonCommands <&
+        " quoted_args=" <& stats.quotedArguments);
+    logInfo("command_kinds set=" <& stats.cvarSets <&
+        " bind=" <& stats.binds <& " unbind=" <& stats.unbinds <&
+        " map=" <& stats.mapCommands <& " devmap=" <&
+        stats.devmapCommands <& " exec=" <& stats.execCommands <&
+        " echo=" <& stats.echoCommands <& " wait=" <&
+        stats.waitCommands <& " alias=" <& stats.aliasDecls <&
+        " unsupported=" <& stats.unsupportedCommands);
+    logInfo("console_state cvars=" <& stats.totalCvars <&
+        " binds=" <& stats.totalBinds <& " aliases=" <&
+        stats.totalAliases <& " final_map=" <& stats.finalMap <&
+        " devmap=" <& stats.devmapMode);
+    if stats.firstConfigFile <> "" then
+      logInfo("first_config_file=" <& stats.firstConfigFile);
+    end if;
+    if stats.firstQueuedCommand <> "" then
+      logInfo("first_queued_command=" <& stats.firstQueuedCommand);
+    end if;
+    if stats.firstExecutedCommand <> "" then
+      logInfo("first_executed_command=" <& stats.firstExecutedCommand);
+    end if;
+    if stats.firstCvar <> "" then
+      logInfo("first_console_cvar=" <& stats.firstCvar);
+    end if;
+    if stats.firstBind <> "" then
+      logInfo("first_console_bind=" <& stats.firstBind);
+    end if;
+    if stats.firstAlias <> "" then
+      logInfo("first_alias=" <& stats.firstAlias);
+    end if;
+    if stats.firstAliasExpansion <> "" then
+      logInfo("first_alias_expansion=" <& stats.firstAliasExpansion);
+    end if;
+    if stats.firstExec <> "" then
+      logInfo("first_exec=" <& stats.firstExec);
+    end if;
+    if stats.firstUnsupportedCommand <> "" then
+      logInfo("first_unsupported_command=" <& stats.firstUnsupportedCommand);
+    end if;
+    if stats.commandPath <> "" then
+      logInfo("command_path=" <& stats.commandPath);
+    end if;
+    logInfo("console_probe_ready=" <& (stats.pk4Archives <> 0 and
+        stats.configFiles <> 0 and stats.commandBufferExecuted <> 0 and
+        stats.cvarSets <> 0 and stats.binds <> 0 and
+        stats.execCommands <> 0 and stats.aliasDecls <> 0 and
+        stats.aliasExpansions <> 0 and stats.waitCommands <> 0 and
+        stats.devmapCommands <> 0 and stats.unsupportedCommands <> 0));
+  end func;
+
+const proc: main is func
+  local
+    var consoleConfig: config is consoleConfig.value;
+    var consoleStats: stats is consoleStats.value;
+    var array string: pk4Files is 0 times "";
+    var string: pk4File is "";
+  begin
+    parseArgs(config, stats);
+    if config.showHelp then
+      showUsage;
+    else
+      if fileType(config.basePath) <> FILE_DIR then
+        logError("Doom 3 base directory not found: " <& config.basePath);
+      else
+        pk4Files := sort(findPk4Archives(config.basePath));
+        stats.pk4Archives := length(pk4Files);
+        if length(pk4Files) = 0 then
+          logError("No .pk4 archives found in: " <& config.basePath);
+        else
+          for pk4File range pk4Files do
+            scanArchive(stats, pk4File);
+          end for;
+          executeStartup(config, stats);
+          printStats(config, stats);
+        end if;
+      end if;
+    end if;
+  end func;

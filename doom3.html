@@ -1,0 +1,670 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate, max-age=0" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
+    <title>Doom 3 Seed7 Port Foundation</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #111412;
+      --panel: #1a201d;
+      --line: #354139;
+      --text: #e6ece7;
+      --muted: #a7b4aa;
+      --accent: #8ed3c0;
+      --warn: #d99058;
+      --error: #f08c8c;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    main {
+      width: min(980px, calc(100vw - 32px));
+      margin: 0 auto;
+      padding: 24px 0;
+    }
+
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 16px;
+      margin-bottom: 18px;
+      border-bottom: 1px solid var(--line);
+      padding-bottom: 14px;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 24px;
+      font-weight: 650;
+      letter-spacing: 0;
+    }
+
+    a { color: var(--accent); }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 16px;
+      margin-bottom: 16px;
+    }
+
+    .controls {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 12px;
+      align-items: end;
+    }
+
+    label {
+      display: block;
+      color: var(--muted);
+      font-size: 13px;
+      margin-bottom: 6px;
+    }
+
+    input[type="file"],
+    input[type="text"],
+    select {
+      width: 100%;
+      min-height: 38px;
+      color: var(--text);
+      background: #101311;
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      padding: 8px;
+    }
+
+    button {
+      min-height: 38px;
+      border: 1px solid #5d7f74;
+      border-radius: 4px;
+      padding: 0 14px;
+      color: #06110d;
+      background: var(--accent);
+      font-weight: 650;
+      cursor: pointer;
+    }
+
+    button:disabled {
+      cursor: not-allowed;
+      opacity: 0.55;
+    }
+
+    .button-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      justify-content: flex-end;
+    }
+
+    .secondary {
+      color: var(--text);
+      background: #27312d;
+      border-color: var(--line);
+    }
+
+    .hint {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.45;
+      margin: 10px 0 0;
+    }
+
+    .field-grid {
+      display: grid;
+      grid-template-columns: 1fr minmax(190px, 260px);
+      gap: 12px;
+    }
+
+    #status {
+      color: var(--muted);
+      font-size: 14px;
+      min-height: 22px;
+      margin-bottom: 10px;
+    }
+
+    #status.error { color: var(--error); }
+    #status.warn { color: var(--warn); }
+
+    pre {
+      min-height: 360px;
+      max-height: calc(100vh - 320px);
+      overflow: auto;
+      margin: 0;
+      padding: 12px;
+      background: #060806;
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      color: #cfe4d8;
+      font: 12px/1.45 Consolas, "Liberation Mono", monospace;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    @media (max-width: 720px) {
+      header,
+      .controls,
+      .field-grid {
+        grid-template-columns: 1fr;
+        display: grid;
+      }
+
+      button { width: 100%; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>Doom 3 Seed7 Port Foundation</h1>
+    </header>
+
+    <section class="panel">
+      <div class="controls">
+        <div class="field-grid">
+          <div>
+            <label for="pk4Files">Optional user-owned Doom 3 pk4 files</label>
+            <input id="pk4Files" type="file" accept=".pk4,.zip" multiple />
+          </div>
+          <div>
+            <label>Run mode</label>
+            <div>doom3_seed7_runtime.s7</div>
+          </div>
+        </div>
+        <div class="button-row">
+          <button id="syntheticButton" class="secondary" type="button">Run Synthetic Fixture</button>
+          <button id="runButton" type="button">Run Runtime</button>
+        </div>
+      </div>
+      <p class="hint">
+        Click <strong>Run Synthetic Fixture</strong> or <strong>Run Runtime</strong> to use generated placeholder data.
+        Selecting legal Doom 3 files from a local install is optional and mounts them only in browser memory under
+        <code>/doom3/base</code>; this page does not upload or bundle commercial assets.
+      </p>
+      <div class="controls" style="margin-top: 12px;">
+        <div>
+          <label for="startMap">Start map metadata target</label>
+          <input id="startMap" type="text" value="game/mars_city1" />
+        </div>
+        <button id="helpButton" type="button">Show Help</button>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div id="status">Ready to run with the generated synthetic fixture.</div>
+      <pre id="log" aria-live="polite"></pre>
+    </section>
+  </main>
+
+    <script>
+    (function() {
+      function clearHttpCaches() {
+        if (!window.caches || !window.caches.keys) {
+          return;
+        }
+        window.caches.keys()
+          .then(function(keys) {
+            return Promise.all(keys.map(function(key) {
+              return window.caches.delete(key);
+            }));
+          })
+          .catch(function() {});
+      }
+
+      function clearServiceWorkers() {
+        if (!window.navigator || !window.navigator.serviceWorker) {
+          return;
+        }
+        window.navigator.serviceWorker.getRegistrations().then(function(registrations) {
+          registrations.forEach(function(registration) {
+            registration.unregister();
+          });
+        }).catch(function() {});
+      }
+
+      clearServiceWorkers();
+      clearHttpCaches();
+
+      var WASM_DIR = 'wasm';
+      var runButton = document.getElementById('runButton');
+      var syntheticButton = document.getElementById('syntheticButton');
+      var helpButton = document.getElementById('helpButton');
+      var pk4Input = document.getElementById('pk4Files');
+      var startMapInput = document.getElementById('startMap');
+      var statusEl = document.getElementById('status');
+      var logEl = document.getElementById('log');
+      var hasStarted = false;
+      var DEFAULT_ENTRY = 'doom3_seed7_runtime.s7';
+      var isFileProtocol = window.location.protocol === 'file:';
+      var fetchDiagnostics = [];
+      var launcherUrl = (window.location.protocol === 'file:'
+          ? 'http://localhost:8080/doom3.html?entry=' + encodeURIComponent(DEFAULT_ENTRY)
+          : new URL('doom3.html?entry=' + encodeURIComponent(DEFAULT_ENTRY), window.location.href).href);
+
+      function canonicalizeEntry(entry) {
+        var normalized = (entry || '').trim().toLowerCase();
+        if (!/^\w*doom3_seed7_runtime\.s7$/.test(normalized)) {
+          if (normalized.length > 0 && /raycaster/i.test(normalized)) {
+            appendLog('Legacy raycaster entry detected: ' + entry + '. Switching to Doom 3 runtime launcher.');
+          }
+          return DEFAULT_ENTRY;
+        }
+        return normalized;
+      }
+
+      function resolveEntryRequest(entry) {
+        var requested = (entry || '').trim();
+        var normalized = canonicalizeEntry(requested);
+        if (normalized !== requested.toLowerCase()) {
+          appendLog('Runtime entry "' + requested + '" normalized to canonical entry: ' + normalized);
+        }
+        return normalized;
+      }
+
+      function restoreControls() {
+        hasStarted = false;
+        runButton.disabled = false;
+        syntheticButton.disabled = false;
+        helpButton.disabled = false;
+        pk4Input.disabled = false;
+        startMapInput.disabled = false;
+      }
+
+      function logModeNotice(requestedEntry) {
+        if (!requestedEntry) {
+          return;
+        }
+        var normalized = (requestedEntry || '').trim().toLowerCase();
+        if (normalized !== DEFAULT_ENTRY) {
+          appendLog('Launcher entry "' + requestedEntry + '" is not the Doom3 runtime.');
+          appendLog('Entry has been normalized to ' + DEFAULT_ENTRY + '.');
+        }
+      }
+
+      function applyQueryEntryAlias() {
+        try {
+          var requestedEntry = new URL(window.location.href).searchParams.get('entry');
+          if (requestedEntry && requestedEntry.toLowerCase() !== DEFAULT_ENTRY) {
+            appendLog('Legacy query detected: ' + requestedEntry +
+                '. This launch path is Doom3-only; switching to doom3_seed7_runtime.s7.');
+          }
+          logModeNotice(requestedEntry);
+          if (requestedEntry && requestedEntry.toLowerCase() !== DEFAULT_ENTRY) {
+            appendLog('Launcher entry is forced to Doom3 runtime: ' + DEFAULT_ENTRY + '.');
+          }
+          var normalizedRequest = canonicalizeEntry(requestedEntry || '');
+          var normalizedUrl = new URL(window.location.href);
+          if (!requestedEntry || requestedEntry.toLowerCase() !== normalizedRequest) {
+            appendLog('Launcher query normalized to Doom3-only mode: ' + DEFAULT_ENTRY + '.');
+          } else {
+            appendLog('Browser launcher is Doom3-only; current mode is Doom3 runtime.');
+          }
+          normalizedUrl.searchParams.set('entry', normalizedRequest);
+          window.history.replaceState({}, '', normalizedUrl.href);
+          appendLog('Active launcher entry is set to "' + normalizedRequest + '".');
+          appendLog('Open the current launcher at ' + launcherUrl + ' (or the active local equivalent).');
+        } catch (error) {
+          // best effort only
+        }
+      }
+      function appendLog(line) {
+        logEl.textContent += line + '\n';
+        logEl.scrollTop = logEl.scrollHeight;
+      }
+
+      function setStatus(message, state) {
+        statusEl.textContent = message;
+        statusEl.className = state || '';
+      }
+
+      function isFileProtocolError() {
+        return isFileProtocol;
+      }
+
+      function enforceHttpOnly() {
+        if (!isFileProtocolError()) {
+          return true;
+        }
+        setStatus('Run this page via HTTP: python -m http.server 8080 then open http://localhost:8080/doom3.html', 'error');
+        appendLog('Seed7 browser launcher requires HTTP; file:// cannot fetch runtime source files.');
+        runButton.disabled = true;
+        syntheticButton.disabled = true;
+        helpButton.disabled = true;
+        pk4Input.disabled = true;
+        startMapInput.disabled = true;
+        return false;
+      }
+
+      function loadScript(src) {
+        return new Promise(function(resolve, reject) {
+          var script = document.createElement('script');
+          var cacheBust = String(Date.now());
+          script.src = src + (src.indexOf('?') === -1 ? '?' : '&') + 's7cache=' + cacheBust;
+          script.setAttribute('crossorigin', 'anonymous');
+          script.onload = resolve;
+          script.onerror = function() { reject(new Error('Failed to load ' + src)); };
+          document.body.appendChild(script);
+        });
+      }
+
+      function readFileBytes(file) {
+        return new Promise(function(resolve, reject) {
+          var reader = new FileReader();
+          reader.onload = function() {
+            resolve(new Uint8Array(reader.result));
+          };
+          reader.onerror = function() {
+            reject(new Error('Failed to read ' + file.name));
+          };
+          reader.readAsArrayBuffer(file);
+        });
+      }
+
+      function cleanPk4Name(fileName, index) {
+        var name = fileName.replace(/[^A-Za-z0-9._-]/g, '_');
+        if (!/\.(pk4|zip)$/i.test(name)) {
+          name = 'pak' + String(index).padStart(3, '0') + '.pk4';
+        }
+        return name.replace(/\.zip$/i, '.pk4');
+      }
+
+      function selectedEntry() {
+        return resolveEntryRequest(DEFAULT_ENTRY);
+      }
+
+      function selectedModeName() {
+        return 'Doom3 runtime';
+      }
+
+      function updateRunButtonLabel() {
+        runButton.textContent = 'Run Runtime';
+      }
+
+      function fetchSourceCandidates(entryUrl) {
+        var baseUrl = new URL('.', window.location.href);
+        var cacheBust = String(Date.now());
+        var candidates = [
+          new URL(entryUrl, baseUrl).href,
+          new URL('./' + entryUrl, baseUrl).href
+        ];
+        if (window.location.protocol !== 'file:') {
+          candidates.push(new URL('/' + entryUrl, window.location.href).href);
+        }
+        candidates = candidates.reduce(function(accumulator, candidate) {
+          accumulator.push(candidate);
+          accumulator.push(candidate + (candidate.indexOf('?') === -1 ? '?' : '&') + 's7cache=' + cacheBust);
+          return accumulator;
+        }, []);
+        candidates = candidates.map(function(candidate) {
+          return candidate;
+        });
+        return candidates.filter(function(item, index, arr) {
+          return arr.indexOf(item) === index;
+        });
+      }
+
+      function fetchSourceWithFallback(entryUrl) {
+        return attemptSourceFetch(resolveEntryRequest(entryUrl), false);
+      }
+
+      function addLauncherHint() {
+        appendLog('If you see this message, your browser may still have a stale launcher cache.');
+        appendLog('Open this direct launcher URL and hard-refresh (Ctrl+Shift+R):');
+        appendLog(launcherUrl);
+      }
+
+      function recoverFromStaleLauncher() {
+        if (!window.sessionStorage || !window.sessionStorage.getItem) {
+          return;
+        }
+        var recoveryToken = 'doom3-clear-launcher-recovery-v2';
+        if (window.sessionStorage.getItem(recoveryToken) === '1') {
+          return;
+        }
+        window.sessionStorage.setItem(recoveryToken, '1');
+        clearServiceWorkers();
+        clearHttpCaches();
+        appendLog('Running stale-launcher recovery: cache/state reset requested.');
+      }
+
+      function redirectToCleanLauncher() {
+        if (!window.sessionStorage || !window.sessionStorage.getItem) {
+          return;
+        }
+        if (window.sessionStorage.getItem('doom3-clean-launcher-redirect') === '1') {
+          return;
+        }
+        window.sessionStorage.setItem('doom3-clean-launcher-redirect', '1');
+        var cleanUrl = new URL('doom3.html', window.location.href);
+        cleanUrl.searchParams.set('entry', DEFAULT_ENTRY);
+        cleanUrl.searchParams.set('src', String(Date.now()));
+        appendLog('Attempting automatic recovery by reloading a clean Doom3 launcher URL.');
+        appendLog(cleanUrl.href);
+        setTimeout(function() {
+          window.location.replace(cleanUrl.href);
+        }, 150);
+      }
+
+      function attemptSourceFetch(entryUrl, fallbackAttempted) {
+        if (!/\\.s7$/i.test(entryUrl)) {
+          appendLog('Non-runtime entry "' + entryUrl + '" is not a runtime source; defaulting to Doom3 runtime.');
+          return attemptSourceFetch(DEFAULT_ENTRY, fallbackAttempted);
+        }
+        var candidates = fetchSourceCandidates(entryUrl);
+        fetchDiagnostics = [];
+        if (fallbackAttempted) {
+          appendLog('Retrying source fetch with Doom3 runtime entry: ' + entryUrl);
+        }
+        function attempt(index) {
+          if (index >= candidates.length) {
+              if (!fallbackAttempted && entryUrl !== DEFAULT_ENTRY) {
+              appendLog('Primary entry fetch failed for ' + entryUrl + '; retrying Doom3 runtime fallback.');
+              return attemptSourceFetch(DEFAULT_ENTRY, true);
+            }
+            var aliasHint =
+                'Open this page at ' + launcherUrl + ', then hard-refresh with Ctrl+Shift+R (or clear cache) if the page still looks stale.';
+            var recoveryGuide =
+                'Launcher recovery: open this exact URL and hard-refresh (Ctrl+Shift+R): ' + launcherUrl + '. ' +
+                'If this page came from cache, reopen /doom3.html?entry=doom3_seed7_runtime.s7 directly.';
+            var staleLauncherHint = 'If the browser still shows a cached launcher page, clear cache and open ' +
+                'the Doom 3 launcher directly: ' + launcherUrl + '.';
+            var staleLauncherTextHint =
+                'If the page still shows an older launcher layout, it is from cached UI state.';
+            addLauncherHint();
+            recoverFromStaleLauncher();
+            redirectToCleanLauncher();
+            throw new Error('Failed to fetch entry "' + entryUrl + '" from ' + candidates.join(', ') + '. ' +
+                aliasHint + ' ' + recoveryGuide + ' Details: ' + fetchDiagnostics.join(' | ') + '. ' +
+                staleLauncherHint + ' ' + staleLauncherTextHint);
+          }
+          return fetch(candidates[index]).then(function(response) {
+            if (!response.ok) {
+              fetchDiagnostics.push('HTTP ' + response.status + ' ' + response.statusText + ' for ' + candidates[index]);
+              appendLog('Retrying source fetch, ' + response.status + ' ' + response.statusText + ' for ' + candidates[index]);
+              return attempt(index + 1);
+            }
+            fetchDiagnostics.push('HTTP ' + response.status + ' ' + response.statusText + ' for ' + candidates[index]);
+            return response.text().then(function(source) {
+              return {source: source, entry: entryUrl};
+            });
+          }).catch(function(error) {
+            fetchDiagnostics.push('Network error for ' + candidates[index] + ': ' + (error && error.message ? error.message : String(error)));
+            appendLog('Retrying source fetch for ' + candidates[index]);
+            return attempt(index + 1);
+          });
+        }
+        return attempt(0);
+      }
+
+      function startSeed7(args, filesToMount, entryUrl) {
+        if (hasStarted) {
+          setStatus('Seed7 runtime already started. Reload the page to run another mode.', 'warn');
+          return Promise.resolve();
+        }
+        var safeEntry = resolveEntryRequest(entryUrl);
+        if (safeEntry !== entryUrl) {
+          appendLog('Non-runtime entry "' + (entryUrl || '') + '" normalized to ' + safeEntry + '.');
+          entryUrl = safeEntry;
+        }
+        hasStarted = true;
+        runButton.disabled = true;
+        syntheticButton.disabled = true;
+        helpButton.disabled = true;
+        pk4Input.disabled = true;
+        startMapInput.disabled = true;
+
+        return fetchSourceWithFallback(entryUrl)
+          .then(function(sourceResult) {
+            var resolvedEntry = sourceResult.entry || entryUrl;
+            var resolvedArgs = args.slice(0);
+            for (var i = resolvedArgs.length - 1; i >= 0; i--) {
+              if (typeof resolvedArgs[i] === 'string' && resolvedArgs[i].charAt(0) === '/') {
+                resolvedArgs[i] = '/' + resolvedEntry;
+                break;
+              }
+            }
+            window.Module = {
+              arguments: resolvedArgs,
+              preRun: [function() {
+                function ensureDir(path) {
+                  try {
+                    FS.mkdir(path);
+                  } catch (error) {
+                    if (!error || error.errno !== 20) throw error;
+                  }
+                }
+                ensureDir('/doom3');
+                ensureDir('/doom3/base');
+                FS.writeFile('/' + resolvedEntry, sourceResult.source);
+                filesToMount.forEach(function(item) {
+                  FS.writeFile('/doom3/base/' + item.name, item.bytes);
+                });
+              }],
+              print: appendLog,
+              printErr: appendLog,
+              locateFile: function(path) {
+                if (path.endsWith('.wasm')) return new URL(WASM_DIR + '/s7.wasm', window.location.href).href;
+                return path;
+              }
+            };
+            return loadScript(new URL(WASM_DIR + '/s7.js', window.location.href).href);
+          })
+          .catch(function(error) {
+            restoreControls();
+            throw error;
+          });
+      }
+
+      helpButton.addEventListener('click', function() {
+        if (!enforceHttpOnly()) {
+          return;
+        }
+        var entryUrl = selectedEntry();
+        logEl.textContent = '';
+        setStatus('Starting Seed7 help for ' + selectedModeName() + ' in browser memory.');
+        startSeed7(['-l', '/seed7/lib', '/' + entryUrl, '--help'], [], entryUrl)
+          .then(function() { setStatus('Help finished. Reload to run another mode.'); })
+          .catch(function(error) {
+            setStatus('Error: ' + error.message, 'error');
+            appendLog(String(error.stack || error));
+          });
+      });
+
+      syntheticButton.addEventListener('click', function() {
+        if (!enforceHttpOnly()) {
+          return;
+        }
+        var entryUrl = selectedEntry();
+        var startMap = startMapInput.value.trim() || 'game/mars_city1';
+        var fixtureUrl = new URL('fixtures/base/pak000.pk4', window.location.href).href;
+
+        logEl.textContent = '';
+        setStatus('Loading generated placeholder fixture.');
+        appendLog('Synthetic fixture mode uses generated test data, not commercial Doom 3 assets.');
+        fetch(fixtureUrl + (fixtureUrl.indexOf('?') === -1 ? '?' : '&') + 's7cache=' + String(Date.now()))
+          .then(function(response) {
+            if (!response.ok) {
+              throw new Error('Synthetic fixture not found at fixtures/base/pak000.pk4. Run: powershell -ExecutionPolicy Bypass -File .\\tools\\smoke_doom3_seed7.ps1 -GenerateFixtureOnly');
+            }
+            return response.arrayBuffer();
+          })
+          .then(function(buffer) {
+            setStatus('Starting Seed7 ' + selectedModeName() + ' with synthetic fixture.');
+            return startSeed7([
+              '-l', '/seed7/lib',
+              '/' + entryUrl,
+              '--doom3_data_path', '/doom3',
+              '--doom3_start_map', startMap
+            ], [{ name: 'pak000.pk4', bytes: new Uint8Array(buffer) }], entryUrl);
+          })
+          .then(function() {
+            setStatus('Synthetic fixture run finished. Reload the page to run another mode.');
+          })
+          .catch(function(error) {
+            setStatus('Error: ' + error.message, 'error');
+            appendLog(String(error.stack || error));
+            restoreControls();
+          });
+      });
+
+      runButton.addEventListener('click', function() {
+        if (!enforceHttpOnly()) {
+          return;
+        }
+        var entryUrl = selectedEntry();
+        var files = Array.prototype.slice.call(pk4Input.files || []);
+        var startMap = startMapInput.value.trim() || 'game/mars_city1';
+        if (files.length === 0) {
+          syntheticButton.click();
+          return;
+        }
+
+        logEl.textContent = '';
+        setStatus('Reading ' + files.length + ' pk4 file(s) into browser memory.');
+        Promise.all(files.map(function(file, index) {
+          return readFileBytes(file).then(function(bytes) {
+            return { name: cleanPk4Name(file.name, index), bytes: bytes };
+          });
+        }))
+          .then(function(mountedFiles) {
+            setStatus('Starting Seed7 ' + selectedModeName() + '.');
+            return startSeed7([
+              '-l', '/seed7/lib',
+              '/' + entryUrl,
+              '--doom3_data_path', '/doom3',
+              '--doom3_start_map', startMap
+            ], mountedFiles, entryUrl);
+          })
+          .then(function() {
+            setStatus('Run finished. Reload the page to run another mode.');
+          })
+          .catch(function(error) {
+            setStatus('Error: ' + error.message, 'error');
+            appendLog(String(error.stack || error));
+          });
+      });
+
+      updateRunButtonLabel();
+      applyQueryEntryAlias();
+      if (isFileProtocol) {
+        enforceHttpOnly();
+      }
+    })();
+  </script>
+</body>
+</html>
+

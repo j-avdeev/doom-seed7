@@ -1,0 +1,686 @@
+(********************************************************************)
+(*  doom3_seed7_combat.s7                                           *)
+(*                                                                  *)
+(*  Focused Doom 3 / id Tech 4 gameplay subsystem probe for Seed7.  *)
+(*  It reads user-owned pk4 archives, extracts a selected .map,      *)
+(*  recognizes player, monster, ammo, and weapon entities, then      *)
+(*  simulates one basic weapon attack. No commercial data is bundled.*)
+(********************************************************************)
+
+$ include "seed7_05.s7i";
+$ include "osfiles.s7i";
+$ include "zip.s7i";
+
+const string: DEFAULT_DATA_PATH is ".";
+const string: DEFAULT_BASE_DIR is "base";
+const string: DEFAULT_START_MAP is "game/mars_city1";
+const integer: DEFAULT_MONSTER_HEALTH is 100;
+const integer: DEFAULT_PLAYER_HEALTH is 100;
+const integer: DEFAULT_AMMO_ON_PICKUP is 12;
+const integer: DEFAULT_SHOT_DAMAGE is 25;
+const integer: DEFAULT_MONSTER_DAMAGE is 12;
+const float: DEFAULT_MONSTER_ATTACK_RANGE is 80.0;
+const integer: ENTITY_DEF_INHERIT_LIMIT is 8;
+
+const type: combatConfig is new struct
+    var string: dataPath is DEFAULT_DATA_PATH;
+    var string: basePath is "";
+    var string: startMap is DEFAULT_START_MAP;
+    var boolean: showHelp is FALSE;
+  end struct;
+
+const type: combatStats is new struct
+    var integer: pk4Archives is 0;
+    var string: requestedMapPath is "";
+    var boolean: requestedMapFound is FALSE;
+    var string: requestedCollisionPath is "";
+    var boolean: requestedCollisionFound is FALSE;
+    var integer: collisionModels is 0;
+    var integer: collisionPolygons is 0;
+    var integer: entityDefs is 0;
+    var integer: entityDefHealthValues is 0;
+    var integer: entityDefInheritValues is 0;
+    var integer: mapEntities is 0;
+    var integer: playerStarts is 0;
+    var integer: monsters is 0;
+    var integer: ammoPickups is 0;
+    var integer: weaponPickups is 0;
+    var boolean: playerReady is FALSE;
+    var boolean: weaponReady is FALSE;
+    var integer: ammo is 0;
+    var integer: playerHealth is DEFAULT_PLAYER_HEALTH;
+    var boolean: playerHasOrigin is FALSE;
+    var float: playerX is 0.0;
+    var float: playerY is 0.0;
+    var boolean: monsterReady is FALSE;
+    var boolean: monsterHasOrigin is FALSE;
+    var float: monsterX is 0.0;
+    var float: monsterY is 0.0;
+    var string: firstMonsterClass is "";
+    var string: firstMonsterName is "";
+    var integer: firstMonsterHealth is DEFAULT_MONSTER_HEALTH;
+    var integer: shotsFired is 0;
+    var integer: hits is 0;
+    var integer: firstMonsterHealthAfter is DEFAULT_MONSTER_HEALTH;
+    var boolean: firstMonsterAliveAfter is TRUE;
+    var boolean: monsterInAttackRange is FALSE;
+    var integer: monsterAttacks is 0;
+    var integer: monsterHits is 0;
+    var integer: playerHealthAfter is DEFAULT_PLAYER_HEALTH;
+    var array string: entityDefNames is 0 times "";
+    var array integer: entityDefHealthValuesByIndex is 0 times 0;
+    var array string: entityDefParents is 0 times "";
+  end struct;
+
+const proc: logInfo (in string: msg) is func
+  begin
+    writeln("[combat] " <& msg);
+  end func;
+
+const proc: logError (in string: msg) is func
+  begin
+    writeln("[combat-error] " <& msg);
+  end func;
+
+const func string: joinPath (in string: leftPath, in string: rightPath) is func
+  result
+    var string: joined is "";
+  begin
+    if leftPath = "" then
+      joined := rightPath;
+    elsif endsWith(leftPath, "/") or endsWith(leftPath, "\\") then
+      joined := leftPath <& rightPath;
+    else
+      joined := leftPath <& "/" <& rightPath;
+    end if;
+  end func;
+
+const func boolean: isPk4Name (in string: fileName) is
+    return endsWith(lower(fileName), ".pk4");
+
+const func string: normalizedAssetPath (in string: filePath) is
+    return replace(lower(filePath), "\\", "/");
+
+const func string: mapNameToAssetPath (in string: mapName) is func
+  result
+    var string: assetPath is "";
+  begin
+    assetPath := normalizedAssetPath(mapName);
+    if not startsWith(assetPath, "maps/") then
+      assetPath := "maps/" <& assetPath;
+    end if;
+    if not endsWith(assetPath, ".map") then
+      assetPath &:= ".map";
+    end if;
+  end func;
+
+const func string: compiledSiblingPath (in string: mapPath,
+    in string: suffix) is func
+  result
+    var string: siblingPath is "";
+  begin
+    if endsWith(mapPath, ".map") then
+      siblingPath := mapPath[.. length(mapPath) - 4] <& suffix;
+    else
+      siblingPath := mapPath <& suffix;
+    end if;
+  end func;
+
+const func string: cleanedToken (in string: token) is func
+  result
+    var string: clean is "";
+  local
+    var integer: idx is 1;
+    var char: ch is ' ';
+  begin
+    clean := token;
+    while idx <= length(clean) do
+      ch := clean[idx];
+      if ch = '"' or ch = '(' or ch = ')' or ch = '{' or ch = '}' or
+          ch = ',' or ch = ';' then
+        clean := clean[.. pred(idx)] & clean[succ(idx) ..];
+      else
+        incr(idx);
+      end if;
+    end while;
+  end func;
+
+const func integer: countOccurrences (in string: content,
+    in string: token) is func
+  result
+    var integer: count is 0;
+  local
+    var integer: searchPos is 1;
+    var integer: foundPos is 0;
+  begin
+    foundPos := pos(content, token, searchPos);
+    while foundPos <> 0 do
+      count +:= 1;
+      searchPos := foundPos + length(token);
+      foundPos := pos(content, token, searchPos);
+    end while;
+  end func;
+
+const func integer: sumIntegersAfterWord (in string: content,
+    in string: keyName) is func
+  result
+    var integer: total is 0;
+  local
+    var array string: tokens is 0 times "";
+    var integer: tokenIndex is 1;
+    var integer: valueIndex is 0;
+    var integer: value is 0;
+    var boolean: foundValue is FALSE;
+  begin
+    tokens := noEmptyStrings(split(replace(replace(replace(content, "\n", " "),
+        "\r", " "), "\t", " "), ' '));
+    while tokenIndex < length(tokens) do
+      if lower(cleanedToken(tokens[tokenIndex])) = lower(keyName) then
+        foundValue := FALSE;
+        valueIndex := succ(tokenIndex);
+        while valueIndex <= length(tokens) and valueIndex <= tokenIndex + 4 and
+            not foundValue do
+          block
+            value := integer(cleanedToken(tokens[valueIndex]));
+            total +:= value;
+            foundValue := TRUE;
+          exception
+            catch RANGE_ERROR:
+              noop;
+          end block;
+          incr(valueIndex);
+        end while;
+      end if;
+      incr(tokenIndex);
+    end while;
+  end func;
+
+const func string: quotedValueAfter (in string: content, in string: keyName) is func
+  result
+    var string: value is "";
+  local
+    var string: keyText is "";
+    var integer: keyPos is 0;
+    var integer: keyEnd is 0;
+    var integer: valueStart is 0;
+    var integer: valueEnd is 0;
+  begin
+    keyText := "\"" <& keyName <& "\"";
+    keyPos := pos(lower(content), lower(keyText), 1);
+    if keyPos <> 0 then
+      keyEnd := pos(content, "\"", succ(keyPos));
+      if keyEnd <> 0 then
+        valueStart := pos(content, "\"", succ(keyEnd));
+        if valueStart <> 0 then
+          valueEnd := pos(content, "\"", succ(valueStart));
+          if valueEnd <> 0 then
+            value := content[succ(valueStart) .. pred(valueEnd)];
+          end if;
+        end if;
+      end if;
+    end if;
+  end func;
+
+const func string: declNameAfter (in string: content, in integer: startPos) is func
+  result
+    var string: declName is "";
+  local
+    var integer: idx is 0;
+    var char: ch is ' ';
+  begin
+    idx := startPos;
+    while idx <= length(content) and declName = "" do
+      ch := content[idx];
+      if ch <> ' ' and ch <> '\t' and ch <> '\n' and ch <> '\r' then
+        while idx <= length(content) and content[idx] <> ' ' and
+            content[idx] <> '\t' and content[idx] <> '\n' and
+            content[idx] <> '\r' and content[idx] <> '{' do
+          declName &:= content[idx];
+          incr(idx);
+        end while;
+      end if;
+      incr(idx);
+    end while;
+  end func;
+
+const func integer: previousCharPos (in string: content, in char: needle,
+    in integer: startPos) is func
+  result
+    var integer: foundPos is 0;
+  local
+    var integer: idx is 0;
+  begin
+    idx := startPos;
+    while idx >= 1 and foundPos = 0 do
+      if content[idx] = needle then
+        foundPos := idx;
+      end if;
+      decr(idx);
+    end while;
+  end func;
+
+const func integer: matchingBlockEnd (in string: content,
+    in integer: blockStart) is func
+  result
+    var integer: blockEnd is 0;
+  local
+    var integer: idx is 0;
+    var integer: depth is 0;
+  begin
+    if blockStart <> 0 then
+      idx := blockStart;
+      while idx <= length(content) and blockEnd = 0 do
+        if content[idx] = '{' then
+          incr(depth);
+        elsif content[idx] = '}' then
+          decr(depth);
+          if depth = 0 then
+            blockEnd := idx;
+          end if;
+        end if;
+        incr(idx);
+      end while;
+    end if;
+  end func;
+
+const func integer: parsedHealthOrDefault (
+    in string: entityBlock, in integer: defaultHealth) is func
+  result
+    var integer: health is 0;
+  local
+    var string: healthText is "";
+  begin
+    health := defaultHealth;
+    healthText := quotedValueAfter(entityBlock, "health");
+    if healthText <> "" then
+      block
+        health := integer(healthText);
+      exception
+        catch RANGE_ERROR:
+          health := defaultHealth;
+      end block;
+    end if;
+  end func;
+
+const func float: vectorComponentOrDefault (
+    in string: vectorText, in integer: componentIndex,
+    in float: defaultValue) is func
+  result
+    var float: component is 0.0;
+  local
+    var array string: parts is 0 times "";
+  begin
+    component := defaultValue;
+    parts := noEmptyStrings(split(vectorText, ' '));
+    if length(parts) >= componentIndex then
+      block
+        component := float(parts[componentIndex]);
+      exception
+        catch RANGE_ERROR:
+          component := defaultValue;
+      end block;
+    end if;
+  end func;
+
+const proc: addEntityDefInfo (inout combatStats: stats,
+    in string: className, in string: entityBlock) is func
+  local
+    var string: healthText is "";
+    var integer: healthValue is 0;
+    var string: parentName is "";
+  begin
+    stats.entityDefs +:= 1;
+    stats.entityDefNames &:= lower(className);
+    healthText := quotedValueAfter(entityBlock, "health");
+    if healthText <> "" then
+      block
+        healthValue := integer(healthText);
+        stats.entityDefHealthValues +:= 1;
+      exception
+        catch RANGE_ERROR:
+          healthValue := 0;
+      end block;
+    end if;
+    parentName := lower(quotedValueAfter(entityBlock, "inherit"));
+    if parentName <> "" then
+      stats.entityDefInheritValues +:= 1;
+    end if;
+    stats.entityDefHealthValuesByIndex &:= healthValue;
+    stats.entityDefParents &:= parentName;
+  end func;
+
+const proc: inspectDefContent (inout combatStats: stats,
+    in string: content) is func
+  local
+    var string: contentLower is "";
+    var integer: searchPos is 1;
+    var integer: defPos is 0;
+    var string: className is "";
+    var integer: blockStart is 0;
+    var integer: blockEnd is 0;
+  begin
+    contentLower := lower(content);
+    defPos := pos(contentLower, "entitydef ", searchPos);
+    while defPos <> 0 do
+      className := lower(declNameAfter(content, defPos + length("entitydef ")));
+      blockStart := pos(content, "{", defPos);
+      blockEnd := matchingBlockEnd(content, blockStart);
+      if className <> "" and blockStart <> 0 and blockEnd <> 0 then
+        addEntityDefInfo(stats, className, content[blockStart .. blockEnd]);
+      end if;
+      searchPos := defPos + length("entitydef ");
+      defPos := pos(contentLower, "entitydef ", searchPos);
+    end while;
+  end func;
+
+const func integer: entityDefHealthForClass (
+    in combatStats: stats, in string: className,
+    in integer: defaultHealth) is func
+  result
+    var integer: health is 0;
+  local
+    var string: currentClass is "";
+    var integer: inheritDepth is 0;
+    var integer: defIndex is 1;
+    var boolean: found is FALSE;
+  begin
+    health := defaultHealth;
+    currentClass := lower(className);
+    while currentClass <> "" and inheritDepth < ENTITY_DEF_INHERIT_LIMIT and
+        not found do
+      defIndex := 1;
+      while defIndex <= length(stats.entityDefNames) and not found do
+        if stats.entityDefNames[defIndex] = currentClass then
+          if stats.entityDefHealthValuesByIndex[defIndex] <> 0 then
+            health := stats.entityDefHealthValuesByIndex[defIndex];
+            found := TRUE;
+          else
+            currentClass := stats.entityDefParents[defIndex];
+          end if;
+        end if;
+        incr(defIndex);
+      end while;
+      incr(inheritDepth);
+    end while;
+  end func;
+
+const proc: inspectMapEntity (inout combatStats: stats,
+    in string: entityBlock) is func
+  local
+    var string: className is "";
+    var string: entityName is "";
+    var string: originText is "";
+  begin
+    className := lower(quotedValueAfter(entityBlock, "classname"));
+    entityName := quotedValueAfter(entityBlock, "name");
+    originText := quotedValueAfter(entityBlock, "origin");
+    if className <> "" then
+      stats.mapEntities +:= 1;
+      if className = "info_player_start" then
+        stats.playerStarts +:= 1;
+        stats.playerReady := TRUE;
+        if originText <> "" then
+          stats.playerHasOrigin := TRUE;
+          stats.playerX := vectorComponentOrDefault(originText, 1, 0.0);
+          stats.playerY := vectorComponentOrDefault(originText, 2, 0.0);
+        end if;
+      elsif startsWith(className, "monster_") then
+        stats.monsters +:= 1;
+        if not stats.monsterReady then
+          stats.monsterReady := TRUE;
+          if originText <> "" then
+            stats.monsterHasOrigin := TRUE;
+            stats.monsterX := vectorComponentOrDefault(originText, 1, 0.0);
+            stats.monsterY := vectorComponentOrDefault(originText, 2, 0.0);
+          end if;
+          stats.firstMonsterClass := className;
+          stats.firstMonsterName := entityName;
+          stats.firstMonsterHealth := parsedHealthOrDefault(
+              entityBlock, entityDefHealthForClass(stats, className,
+              DEFAULT_MONSTER_HEALTH));
+          stats.firstMonsterHealthAfter := stats.firstMonsterHealth;
+        end if;
+      elsif startsWith(className, "ammo_") then
+        stats.ammoPickups +:= 1;
+        stats.ammo +:= DEFAULT_AMMO_ON_PICKUP;
+      elsif startsWith(className, "weapon_") then
+        stats.weaponPickups +:= 1;
+        stats.weaponReady := TRUE;
+      end if;
+    end if;
+  end func;
+
+const proc: inspectMapContent (inout combatStats: stats,
+    in string: content) is func
+  local
+    var string: contentLower is "";
+    var integer: searchPos is 1;
+    var integer: classPos is 0;
+    var integer: blockStart is 0;
+    var integer: blockEnd is 0;
+  begin
+    contentLower := lower(content);
+    classPos := pos(contentLower, "\"classname\"", searchPos);
+    while classPos <> 0 do
+      blockStart := previousCharPos(content, '{', classPos);
+      blockEnd := matchingBlockEnd(content, blockStart);
+      if blockStart <> 0 and blockEnd <> 0 then
+        inspectMapEntity(stats, content[blockStart .. blockEnd]);
+      end if;
+      searchPos := classPos + length("\"classname\"");
+      classPos := pos(contentLower, "\"classname\"", searchPos);
+    end while;
+  end func;
+
+const proc: inspectCollisionContent (inout combatStats: stats,
+    in string: content) is func
+  begin
+    stats.collisionModels +:= countOccurrences(lower(content), "collisionmodel");
+    stats.collisionPolygons +:= sumIntegersAfterWord(lower(content), "polygons");
+  end func;
+
+const proc: simulateCombat (inout combatStats: stats) is func
+  local
+    var float: deltaX is 0.0;
+    var float: deltaY is 0.0;
+    var boolean: traceWorldReady is FALSE;
+  begin
+    traceWorldReady := stats.requestedCollisionFound and
+        stats.collisionModels <> 0 and stats.collisionPolygons <> 0;
+    if stats.playerReady and stats.weaponReady and stats.ammo > 0 and
+        stats.monsterReady and traceWorldReady then
+      stats.shotsFired := 1;
+      stats.ammo -:= 1;
+      stats.hits := 1;
+      stats.firstMonsterHealthAfter := stats.firstMonsterHealth -
+          DEFAULT_SHOT_DAMAGE;
+      stats.firstMonsterAliveAfter := stats.firstMonsterHealthAfter > 0;
+    end if;
+    stats.playerHealthAfter := stats.playerHealth;
+    if stats.playerReady and stats.monsterReady and stats.firstMonsterAliveAfter and
+        stats.playerHasOrigin and stats.monsterHasOrigin then
+      deltaX := stats.monsterX - stats.playerX;
+      deltaY := stats.monsterY - stats.playerY;
+      stats.monsterInAttackRange := deltaX * deltaX + deltaY * deltaY <=
+          DEFAULT_MONSTER_ATTACK_RANGE * DEFAULT_MONSTER_ATTACK_RANGE;
+      if stats.monsterInAttackRange then
+        stats.monsterAttacks := 1;
+        stats.monsterHits := 1;
+        stats.playerHealthAfter := stats.playerHealth - DEFAULT_MONSTER_DAMAGE;
+      end if;
+    end if;
+  end func;
+
+const func array string: findPk4Archives (in string: basePath) is func
+  result
+    var array string: pk4Files is 0 times "";
+  local
+    var array string: names is 0 times "";
+    var string: name is "";
+  begin
+    if fileType(basePath) = FILE_DIR then
+      names := readDir(basePath);
+      for name range names do
+        if isPk4Name(name) and fileType(joinPath(basePath, name)) = FILE_REGULAR then
+          pk4Files &:= joinPath(basePath, name);
+        end if;
+      end for;
+    end if;
+  end func;
+
+const proc: scanArchive (inout combatStats: stats,
+    in string: pk4File, in string: targetMapPath) is func
+  local
+    var fileSys: zipFs is fileSys.value;
+    var array string: paths is 0 times "";
+    var string: path is "";
+    var string: pathLower is "";
+  begin
+    zipFs := openZip(pk4File);
+    if zipFs = fileSys.value then
+      logError("could not open pk4 archive: " <& pk4File);
+    else
+      paths := readDir(zipFs, RECURSIVE);
+      for path range paths do
+        pathLower := normalizedAssetPath(path);
+        if endsWith(pathLower, ".def") or endsWith(pathLower, ".decl") then
+          inspectDefContent(stats, getFile(zipFs, path));
+        end if;
+        if not stats.requestedMapFound and
+            pathLower = targetMapPath then
+          stats.requestedMapFound := TRUE;
+          inspectMapContent(stats, getFile(zipFs, path));
+        elsif pathLower = stats.requestedCollisionPath then
+          stats.requestedCollisionFound := TRUE;
+          inspectCollisionContent(stats, getFile(zipFs, path));
+        end if;
+      end for;
+      close(zipFs);
+    end if;
+  end func;
+
+const proc: parseArgs (inout combatConfig: config) is func
+  local
+    var array string: args is 0 times "";
+    var integer: argIdx is 1;
+  begin
+    args := argv(PROGRAM);
+    while argIdx <= length(args) do
+      if args[argIdx] = "--help" or args[argIdx] = "-h" then
+        config.showHelp := TRUE;
+      elsif args[argIdx] = "--doom3_data_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.dataPath := convDosPath(args[argIdx]);
+      elsif args[argIdx] = "--doom3_base_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.basePath := convDosPath(args[argIdx]);
+      elsif args[argIdx] = "--doom3_start_map" and argIdx < length(args) then
+        incr(argIdx);
+        config.startMap := args[argIdx];
+      elsif args[argIdx] = "+set" and argIdx + 2 <= length(args) then
+        if args[argIdx + 1] = "fs_basepath" then
+          config.dataPath := convDosPath(args[argIdx + 2]);
+        elsif args[argIdx + 1] = "fs_game" then
+          config.basePath := convDosPath(args[argIdx + 2]);
+        end if;
+        argIdx +:= 2;
+      elsif args[argIdx] = "+map" and argIdx < length(args) then
+        incr(argIdx);
+        config.startMap := args[argIdx];
+      end if;
+      incr(argIdx);
+    end while;
+    if config.basePath = "" then
+      config.basePath := joinPath(config.dataPath, DEFAULT_BASE_DIR);
+    end if;
+  end func;
+
+const proc: showUsage is func
+  begin
+    writeln("Usage:");
+    writeln("  s7 doom3_seed7_combat.s7 --doom3_data_path <doom3-root>");
+    writeln("  s7 doom3_seed7_combat.s7 +set fs_basepath <doom3-root> +map <map>");
+    writeln("");
+    writeln("Scans user-owned Doom 3 pk4 files for combat readiness.");
+  end func;
+
+const proc: printStats (in combatStats: stats) is func
+  begin
+    logInfo("pk4_archives=" <& stats.pk4Archives);
+    logInfo("requested_map=" <& stats.requestedMapPath);
+    logInfo("requested_map_found=" <& stats.requestedMapFound);
+    logInfo("combat_collision cm=" <& stats.requestedCollisionPath <&
+        " found=" <& stats.requestedCollisionFound <& " models=" <&
+        stats.collisionModels <& " polygons=" <& stats.collisionPolygons);
+    logInfo("entity_defs=" <& stats.entityDefs <&
+        " health=" <& stats.entityDefHealthValues <&
+        " inherit=" <& stats.entityDefInheritValues);
+    logInfo("map_entities=" <& stats.mapEntities <&
+        " player_start=" <& stats.playerStarts <&
+        " monster=" <& stats.monsters);
+    logInfo("combat_pickups weapon=" <& stats.weaponPickups <&
+        " ammo=" <& stats.ammoPickups);
+    logInfo("combat_ready player=" <& stats.playerReady <&
+        " weapon=" <& stats.weaponReady <&
+        " ammo=" <& (stats.ammo > 0) <&
+        " monster=" <& stats.monsterReady);
+    logInfo("combat_origins player=" <& stats.playerHasOrigin <&
+        " monster=" <& stats.monsterHasOrigin);
+    logInfo("combat_ammo_after_pickups=" <& stats.ammo + stats.shotsFired);
+    logInfo("combat_shots_fired=" <& stats.shotsFired <&
+        " hits=" <& stats.hits <&
+        " ammo_after=" <& stats.ammo);
+    logInfo("combat_trace hitscan_ready=" <& (stats.requestedCollisionFound and
+        stats.collisionModels <> 0 and stats.collisionPolygons <> 0) <&
+        " collision_models=" <& stats.collisionModels <&
+        " collision_polygons=" <& stats.collisionPolygons);
+    if stats.firstMonsterName <> "" then
+      logInfo("first_monster=" <& stats.firstMonsterName);
+      logInfo("first_monster_class=" <& stats.firstMonsterClass);
+    end if;
+    logInfo("first_monster_health_before=" <& stats.firstMonsterHealth);
+    logInfo("first_monster_health_after=" <& stats.firstMonsterHealthAfter);
+    logInfo("first_monster_alive_after=" <& stats.firstMonsterAliveAfter);
+    logInfo("monster_ai in_range=" <& stats.monsterInAttackRange <&
+        " attacks=" <& stats.monsterAttacks <&
+        " hits=" <& stats.monsterHits);
+    logInfo("player_health_before=" <& stats.playerHealth);
+    logInfo("player_health_after=" <& stats.playerHealthAfter);
+    logInfo("combat_probe_ready=" <& (stats.requestedMapFound and
+        stats.requestedCollisionFound and stats.collisionModels <> 0 and
+        stats.collisionPolygons <> 0 and stats.playerReady and
+        stats.weaponReady and stats.monsterReady and stats.shotsFired <> 0 and
+        stats.hits <> 0));
+  end func;
+
+const proc: main is func
+  local
+    var combatConfig: config is combatConfig.value;
+    var combatStats: stats is combatStats.value;
+    var array string: pk4Files is 0 times "";
+    var string: pk4File is "";
+  begin
+    parseArgs(config);
+    if config.showHelp then
+      showUsage;
+    else
+      stats.requestedMapPath := mapNameToAssetPath(config.startMap);
+      stats.requestedCollisionPath := compiledSiblingPath(stats.requestedMapPath,
+          ".cm");
+      if fileType(config.basePath) <> FILE_DIR then
+        logError("Doom 3 base directory not found: " <& config.basePath);
+      else
+        pk4Files := sort(findPk4Archives(config.basePath));
+        stats.pk4Archives := length(pk4Files);
+        if length(pk4Files) = 0 then
+          logError("No .pk4 archives found in: " <& config.basePath);
+        else
+          for pk4File range pk4Files do
+            scanArchive(stats, pk4File, stats.requestedMapPath);
+          end for;
+          simulateCombat(stats);
+          printStats(stats);
+        end if;
+      end if;
+    end if;
+  end func;

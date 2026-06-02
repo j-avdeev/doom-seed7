@@ -1,0 +1,713 @@
+(********************************************************************)
+(*  doom3_seed7_resource.s7                                         *)
+(*                                                                  *)
+(*  Focused Doom 3 / id Tech 4 resource-manager probe for Seed7.    *)
+(*  It catalogs asset classes, resolves references from declarations *)
+(*  and maps, and reports placeholder fallbacks for missing assets.  *)
+(********************************************************************)
+
+$ include "seed7_05.s7i";
+$ include "osfiles.s7i";
+$ include "zip.s7i";
+
+const string: DEFAULT_DATA_PATH is ".";
+const string: DEFAULT_BASE_DIR is "base";
+const string: DEFAULT_START_MAP is "game/mars_city1";
+
+const type: resourceConfig is new struct
+    var string: dataPath is DEFAULT_DATA_PATH;
+    var string: basePath is "";
+    var string: startMap is DEFAULT_START_MAP;
+    var boolean: showHelp is FALSE;
+  end struct;
+
+const type: resourceStats is new struct
+    var integer: pk4Archives is 0;
+    var string: requestedMapPath is "";
+    var boolean: requestedMapFound is FALSE;
+    var integer: imageAssets is 0;
+    var integer: soundAssets is 0;
+    var integer: modelAssets is 0;
+    var integer: guiAssets is 0;
+    var integer: scriptAssets is 0;
+    var integer: skinDecls is 0;
+    var integer: soundShaderDecls is 0;
+    var integer: materialTextureRefs is 0;
+    var integer: resolvedMaterialTextures is 0;
+    var integer: missingMaterialTextures is 0;
+    var integer: modelRefs is 0;
+    var integer: resolvedModelRefs is 0;
+    var integer: missingModelRefs is 0;
+    var integer: soundRefs is 0;
+    var integer: resolvedSoundRefs is 0;
+    var integer: missingSoundRefs is 0;
+    var integer: guiRefs is 0;
+    var integer: resolvedGuiRefs is 0;
+    var integer: missingGuiRefs is 0;
+    var integer: skinRefs is 0;
+    var integer: resolvedSkinRefs is 0;
+    var integer: missingSkinRefs is 0;
+    var integer: placeholderResources is 0;
+    var string: firstImageAsset is "";
+    var string: firstSoundAsset is "";
+    var string: firstModelAsset is "";
+    var string: firstGuiAsset is "";
+    var string: firstScriptAsset is "";
+    var string: firstResolvedTexture is "";
+    var string: firstMissingTexture is "";
+    var string: firstResolvedModel is "";
+    var string: firstMissingModel is "";
+    var string: firstResolvedSound is "";
+    var string: firstMissingSound is "";
+    var string: firstResolvedGui is "";
+    var string: firstMissingGui is "";
+    var string: firstResolvedSkin is "";
+    var string: firstMissingSkin is "";
+    var array string: imageAssetStems is 0 times "";
+    var array string: soundAssetStems is 0 times "";
+    var array string: modelAssetStems is 0 times "";
+    var array string: guiAssetPaths is 0 times "";
+    var array string: scriptAssetPaths is 0 times "";
+    var array string: skinNames is 0 times "";
+    var array string: skinAssetStems is 0 times "";
+    var array string: soundShaderNames is 0 times "";
+  end struct;
+
+const proc: logInfo (in string: msg) is func
+  begin
+    writeln("[resource] " <& msg);
+  end func;
+
+const proc: logError (in string: msg) is func
+  begin
+    writeln("[resource-error] " <& msg);
+  end func;
+
+const func string: joinPath (in string: leftPath, in string: rightPath) is func
+  result
+    var string: joined is "";
+  begin
+    if leftPath = "" then
+      joined := rightPath;
+    elsif endsWith(leftPath, "/") or endsWith(leftPath, "\\") then
+      joined := leftPath <& rightPath;
+    else
+      joined := leftPath <& "/" <& rightPath;
+    end if;
+  end func;
+
+const func boolean: isPk4Name (in string: fileName) is
+    return endsWith(lower(fileName), ".pk4");
+
+const func string: normalizedAssetPath (in string: filePath) is
+    return replace(lower(filePath), "\\", "/");
+
+const func string: assetStem (in string: filePath) is func
+  result
+    var string: stem is "";
+  local
+    var string: path is "";
+    var integer: dotPos is 0;
+  begin
+    path := normalizedAssetPath(filePath);
+    dotPos := rpos(path, ".");
+    if dotPos <> 0 then
+      stem := path[.. pred(dotPos)];
+    else
+      stem := path;
+    end if;
+  end func;
+
+const func string: mapNameToAssetPath (in string: mapName) is func
+  result
+    var string: assetPath is "";
+  begin
+    assetPath := normalizedAssetPath(mapName);
+    if not startsWith(assetPath, "maps/") then
+      assetPath := "maps/" <& assetPath;
+    end if;
+    if not endsWith(assetPath, ".map") then
+      assetPath &:= ".map";
+    end if;
+  end func;
+
+const func boolean: containsString (in array string: values,
+    in string: value) is func
+  result
+    var boolean: found is FALSE;
+  local
+    var string: current is "";
+  begin
+    for current range values do
+      if current = value then
+        found := TRUE;
+      end if;
+    end for;
+  end func;
+
+const proc: appendUnique (inout array string: values, in string: value) is func
+  begin
+    if value <> "" and not containsString(values, value) then
+      values &:= value;
+    end if;
+  end func;
+
+const func string: cleanedToken (in string: token) is func
+  result
+    var string: clean is "";
+  local
+    var integer: idx is 1;
+    var char: ch is ' ';
+  begin
+    clean := trim(token);
+    while idx <= length(clean) do
+      ch := clean[idx];
+      if ch = '"' or ch = '(' or ch = ')' or ch = '{' or ch = '}' or
+          ch = ',' or ch = ';' then
+        clean := clean[.. pred(idx)] & clean[succ(idx) ..];
+      else
+        incr(idx);
+      end if;
+    end while;
+  end func;
+
+const func boolean: isImageAsset (in string: path) is func
+  result
+    var boolean: isImage is FALSE;
+  local
+    var string: lowerPath is "";
+  begin
+    lowerPath := normalizedAssetPath(path);
+    isImage := endsWith(lowerPath, ".tga") or endsWith(lowerPath, ".dds") or
+        endsWith(lowerPath, ".png") or endsWith(lowerPath, ".jpg");
+  end func;
+
+const func boolean: isSoundAsset (in string: path) is func
+  result
+    var boolean: isSound is FALSE;
+  local
+    var string: lowerPath is "";
+  begin
+    lowerPath := normalizedAssetPath(path);
+    isSound := startsWith(lowerPath, "sound/") and
+        (endsWith(lowerPath, ".wav") or endsWith(lowerPath, ".ogg"));
+  end func;
+
+const func boolean: isModelAsset (in string: path) is func
+  result
+    var boolean: isModel is FALSE;
+  local
+    var string: lowerPath is "";
+  begin
+    lowerPath := normalizedAssetPath(path);
+    isModel := endsWith(lowerPath, ".md5mesh") or
+        endsWith(lowerPath, ".md5anim") or endsWith(lowerPath, ".lwo") or
+        endsWith(lowerPath, ".ase");
+  end func;
+
+const func boolean: isGuiAsset (in string: path) is
+    return endsWith(normalizedAssetPath(path), ".gui");
+
+const func boolean: isScriptAsset (in string: path) is
+    return endsWith(normalizedAssetPath(path), ".script");
+
+const func string: quotedValueAfter (in string: content,
+    in string: keyName, in integer: startPos) is func
+  result
+    var string: value is "";
+  local
+    var string: keyText is "";
+    var integer: keyPos is 0;
+    var integer: keyEnd is 0;
+    var integer: valueStart is 0;
+    var integer: valueEnd is 0;
+  begin
+    keyText := "\"" <& keyName <& "\"";
+    keyPos := pos(lower(content), lower(keyText), startPos);
+    if keyPos <> 0 then
+      keyEnd := pos(content, "\"", succ(keyPos));
+      if keyEnd <> 0 then
+        valueStart := pos(content, "\"", succ(keyEnd));
+        if valueStart <> 0 then
+          valueEnd := pos(content, "\"", succ(valueStart));
+          if valueEnd <> 0 then
+            value := content[succ(valueStart) .. pred(valueEnd)];
+          end if;
+        end if;
+      end if;
+    end if;
+  end func;
+
+const proc: resolveImageRef (inout resourceStats: stats,
+    in string: refText) is func
+  local
+    var string: stem is "";
+  begin
+    stem := assetStem(cleanedToken(refText));
+    if stem <> "" then
+      stats.materialTextureRefs +:= 1;
+      if containsString(stats.imageAssetStems, stem) then
+        stats.resolvedMaterialTextures +:= 1;
+        if stats.firstResolvedTexture = "" then
+          stats.firstResolvedTexture := stem;
+        end if;
+      else
+        stats.missingMaterialTextures +:= 1;
+        stats.placeholderResources +:= 1;
+        if stats.firstMissingTexture = "" then
+          stats.firstMissingTexture := stem;
+        end if;
+      end if;
+    end if;
+  end func;
+
+const proc: resolveModelRef (inout resourceStats: stats,
+    in string: refText) is func
+  local
+    var string: stem is "";
+  begin
+    stem := assetStem(cleanedToken(refText));
+    if stem <> "" and (startsWith(stem, "models/") or pos(stem, ".md5", 1) <> 0) then
+      stats.modelRefs +:= 1;
+      if containsString(stats.modelAssetStems, stem) then
+        stats.resolvedModelRefs +:= 1;
+        if stats.firstResolvedModel = "" then
+          stats.firstResolvedModel := stem;
+        end if;
+      else
+        stats.missingModelRefs +:= 1;
+        stats.placeholderResources +:= 1;
+        if stats.firstMissingModel = "" then
+          stats.firstMissingModel := stem;
+        end if;
+      end if;
+    end if;
+  end func;
+
+const proc: resolveSoundRef (inout resourceStats: stats,
+    in string: refText) is func
+  local
+    var string: refValue is "";
+    var string: stem is "";
+  begin
+    refValue := cleanedToken(refText);
+    stem := assetStem(refValue);
+    if refValue <> "" and startsWith(stem, "sound/") then
+      stats.soundRefs +:= 1;
+      if containsString(stats.soundAssetStems, stem) or
+          containsString(stats.soundShaderNames, stem) then
+        stats.resolvedSoundRefs +:= 1;
+        if stats.firstResolvedSound = "" then
+          stats.firstResolvedSound := stem;
+        end if;
+      else
+        stats.missingSoundRefs +:= 1;
+        stats.placeholderResources +:= 1;
+        if stats.firstMissingSound = "" then
+          stats.firstMissingSound := stem;
+        end if;
+      end if;
+    end if;
+  end func;
+
+const proc: resolveGuiRef (inout resourceStats: stats,
+    in string: refText) is func
+  local
+    var string: refValue is "";
+  begin
+    refValue := normalizedAssetPath(cleanedToken(refText));
+    if refValue <> "" and endsWith(refValue, ".gui") then
+      stats.guiRefs +:= 1;
+      if containsString(stats.guiAssetPaths, refValue) then
+        stats.resolvedGuiRefs +:= 1;
+        if stats.firstResolvedGui = "" then
+          stats.firstResolvedGui := refValue;
+        end if;
+      else
+        stats.missingGuiRefs +:= 1;
+        stats.placeholderResources +:= 1;
+        if stats.firstMissingGui = "" then
+          stats.firstMissingGui := refValue;
+        end if;
+      end if;
+    end if;
+  end func;
+
+const proc: resolveSkinRef (inout resourceStats: stats,
+    in string: refText) is func
+  local
+    var string: refValue is "";
+  begin
+    refValue := lower(cleanedToken(refText));
+    if refValue <> "" then
+      stats.skinRefs +:= 1;
+      if containsString(stats.skinNames, refValue) or startsWith(refValue, "skin_") or
+          containsString(stats.skinAssetStems, assetStem(refValue)) then
+        stats.resolvedSkinRefs +:= 1;
+        if stats.firstResolvedSkin = "" then
+          stats.firstResolvedSkin := refValue;
+        end if;
+      else
+        stats.missingSkinRefs +:= 1;
+        stats.placeholderResources +:= 1;
+        if stats.firstMissingSkin = "" then
+          stats.firstMissingSkin := refValue;
+        end if;
+      end if;
+    end if;
+  end func;
+
+const proc: inspectMtr (inout resourceStats: stats, in string: content) is func
+  local
+    var string: normalizedContent is "";
+    var array string: tokens is 0 times "";
+    var integer: idx is 1;
+    var string: token is "";
+  begin
+    normalizedContent := replace(content, "\n", " ");
+    normalizedContent := replace(normalizedContent, "\r", " ");
+    normalizedContent := replace(normalizedContent, "\t", " ");
+    tokens := noEmptyStrings(split(normalizedContent, ' '));
+    while idx < length(tokens) do
+      token := lower(cleanedToken(tokens[idx]));
+      if token = "map" or token = "qer_editorimage" or token = "diffusemap" or
+          token = "bumpmap" or token = "specularmap" then
+        resolveImageRef(stats, tokens[succ(idx)]);
+        incr(idx);
+      end if;
+      incr(idx);
+    end while;
+  end func;
+
+const proc: inspectSkin (inout resourceStats: stats,
+    in string: content) is func
+  local
+    var integer: skinPos is 0;
+    var string: skinName is "";
+  begin
+    skinPos := pos(lower(content), "skin ", 1);
+    if skinPos <> 0 then
+      skinName := cleanedToken(content[skinPos + length("skin ") .. pos(content, "{", skinPos) - 1]);
+    else
+      skinName := cleanedToken(content[.. pos(content, "{", 1) - 1]);
+    end if;
+    if skinName <> "" then
+      stats.skinDecls +:= 1;
+      appendUnique(stats.skinNames, lower(skinName));
+    end if;
+  end func;
+
+const proc: inspectSoundShader (inout resourceStats: stats,
+    in string: content) is func
+  local
+    var string: normalizedContent is "";
+    var array string: tokens is 0 times "";
+    var integer: idx is 1;
+    var string: token is "";
+    var string: previous is "";
+  begin
+    normalizedContent := replace(content, "\n", " ");
+    normalizedContent := replace(normalizedContent, "\r", " ");
+    normalizedContent := replace(normalizedContent, "\t", " ");
+    tokens := noEmptyStrings(split(normalizedContent, ' '));
+    while idx <= length(tokens) do
+      token := lower(cleanedToken(tokens[idx]));
+      if startsWith(token, "sound/") and not endsWith(token, ".wav") and
+          not endsWith(token, ".ogg") and idx < length(tokens) and
+          tokens[succ(idx)] = "{" then
+        stats.soundShaderDecls +:= 1;
+        appendUnique(stats.soundShaderNames, assetStem(token));
+      elsif startsWith(token, "sound/") and
+          (endsWith(token, ".wav") or endsWith(token, ".ogg")) then
+        resolveSoundRef(stats, token);
+      elsif previous = "{" and startsWith(token, "sound/") then
+        appendUnique(stats.soundShaderNames, assetStem(token));
+      end if;
+      previous := token;
+      incr(idx);
+    end while;
+  end func;
+
+const proc: inspectDef (inout resourceStats: stats, in string: content) is func
+  local
+    var string: lowerContent is "";
+    var integer: searchPos is 1;
+    var integer: keyPos is 0;
+    var string: keyName is "";
+    var string: value is "";
+  begin
+    lowerContent := lower(content);
+    for keyName range [] ("model", "anim") do
+      searchPos := 1;
+      keyPos := pos(lowerContent, "\"" <& keyName <& "\"", searchPos);
+      while keyPos <> 0 do
+        value := quotedValueAfter(content, keyName, keyPos);
+        resolveModelRef(stats, value);
+        searchPos := keyPos + length(keyName) + 2;
+        keyPos := pos(lowerContent, "\"" <& keyName <& "\"", searchPos);
+      end while;
+    end for;
+    searchPos := 1;
+    keyPos := pos(lowerContent, "\"skin\"", searchPos);
+    while keyPos <> 0 do
+      resolveSkinRef(stats, quotedValueAfter(content, "skin", keyPos));
+      searchPos := keyPos + length("\"skin\"");
+      keyPos := pos(lowerContent, "\"skin\"", searchPos);
+    end while;
+    searchPos := 1;
+    keyPos := pos(lowerContent, "\"gui\"", searchPos);
+    while keyPos <> 0 do
+      resolveGuiRef(stats, quotedValueAfter(content, "gui", keyPos));
+      searchPos := keyPos + length("\"gui\"");
+      keyPos := pos(lowerContent, "\"gui\"", searchPos);
+    end while;
+    for keyName range [] ("snd_sight", "snd_fire") do
+      searchPos := 1;
+      keyPos := pos(lowerContent, "\"" <& keyName <& "\"", searchPos);
+      while keyPos <> 0 do
+        resolveSoundRef(stats, quotedValueAfter(content, keyName, keyPos));
+        searchPos := keyPos + length(keyName) + 2;
+        keyPos := pos(lowerContent, "\"" <& keyName <& "\"", searchPos);
+      end while;
+    end for;
+  end func;
+
+const proc: inspectMap (inout resourceStats: stats, in string: content) is func
+  local
+    var string: lowerContent is "";
+    var integer: searchPos is 1;
+    var integer: keyPos is 0;
+    var string: keyName is "";
+  begin
+    lowerContent := lower(content);
+    keyPos := pos(lowerContent, "\"gui\"", searchPos);
+    while keyPos <> 0 do
+      resolveGuiRef(stats, quotedValueAfter(content, "gui", keyPos));
+      searchPos := keyPos + length("\"gui\"");
+      keyPos := pos(lowerContent, "\"gui\"", searchPos);
+    end while;
+    for keyName range [] ("snd_sight", "snd_open") do
+      searchPos := 1;
+      keyPos := pos(lowerContent, "\"" <& keyName <& "\"", searchPos);
+      while keyPos <> 0 do
+        resolveSoundRef(stats, quotedValueAfter(content, keyName, keyPos));
+        searchPos := keyPos + length(keyName) + 2;
+        keyPos := pos(lowerContent, "\"" <& keyName <& "\"", searchPos);
+      end while;
+    end for;
+  end func;
+
+const proc: catalogAssetPath (inout resourceStats: stats, in string: path) is func
+  local
+    var string: pathLower is "";
+  begin
+    pathLower := normalizedAssetPath(path);
+    if isImageAsset(pathLower) then
+      stats.imageAssets +:= 1;
+      appendUnique(stats.imageAssetStems, assetStem(pathLower));
+      if stats.firstImageAsset = "" then stats.firstImageAsset := pathLower; end if;
+    elsif isSoundAsset(pathLower) then
+      stats.soundAssets +:= 1;
+      appendUnique(stats.soundAssetStems, assetStem(pathLower));
+      if stats.firstSoundAsset = "" then stats.firstSoundAsset := pathLower; end if;
+    elsif isModelAsset(pathLower) then
+      stats.modelAssets +:= 1;
+      appendUnique(stats.modelAssetStems, assetStem(pathLower));
+      if stats.firstModelAsset = "" then stats.firstModelAsset := pathLower; end if;
+    elsif isGuiAsset(pathLower) then
+      stats.guiAssets +:= 1;
+      appendUnique(stats.guiAssetPaths, pathLower);
+      if stats.firstGuiAsset = "" then stats.firstGuiAsset := pathLower; end if;
+    elsif isScriptAsset(pathLower) then
+      stats.scriptAssets +:= 1;
+      appendUnique(stats.scriptAssetPaths, pathLower);
+      if stats.firstScriptAsset = "" then stats.firstScriptAsset := pathLower; end if;
+    elsif endsWith(pathLower, ".skin") then
+      appendUnique(stats.skinAssetStems, assetStem(pathLower));
+    end if;
+  end func;
+
+const proc: scanArchiveCatalog (inout resourceStats: stats,
+    in string: pk4File) is func
+  local
+    var fileSys: zipFs is fileSys.value;
+    var array string: paths is 0 times "";
+    var string: path is "";
+  begin
+    zipFs := openZip(pk4File);
+    if zipFs <> fileSys.value then
+      paths := readDir(zipFs, RECURSIVE);
+      for path range paths do
+        catalogAssetPath(stats, path);
+      end for;
+      close(zipFs);
+    end if;
+  end func;
+
+const proc: scanArchiveRefs (inout resourceStats: stats,
+    in string: pk4File) is func
+  local
+    var fileSys: zipFs is fileSys.value;
+    var array string: paths is 0 times "";
+    var string: path is "";
+    var string: pathLower is "";
+    var string: content is "";
+  begin
+    zipFs := openZip(pk4File);
+    if zipFs = fileSys.value then
+      logError("could not open pk4 archive: " <& pk4File);
+    else
+      paths := readDir(zipFs, RECURSIVE);
+      for path range paths do
+        pathLower := normalizedAssetPath(path);
+        if endsWith(pathLower, ".mtr") or endsWith(pathLower, ".def") or
+            endsWith(pathLower, ".skin") or endsWith(pathLower, ".sndshd") or
+            pathLower = stats.requestedMapPath then
+          content := getFile(zipFs, path);
+          if endsWith(pathLower, ".mtr") then
+            inspectMtr(stats, content);
+          elsif endsWith(pathLower, ".def") then
+            inspectDef(stats, content);
+          elsif endsWith(pathLower, ".skin") then
+            inspectSkin(stats, content);
+          elsif endsWith(pathLower, ".sndshd") then
+            inspectSoundShader(stats, content);
+          elsif pathLower = stats.requestedMapPath then
+            stats.requestedMapFound := TRUE;
+            inspectMap(stats, content);
+          end if;
+        end if;
+      end for;
+      close(zipFs);
+    end if;
+  end func;
+
+const func array string: findPk4Archives (in string: basePath) is func
+  result
+    var array string: pk4Files is 0 times "";
+  local
+    var array string: names is 0 times "";
+    var string: name is "";
+  begin
+    if fileType(basePath) = FILE_DIR then
+      names := readDir(basePath);
+      for name range names do
+        if isPk4Name(name) and fileType(joinPath(basePath, name)) = FILE_REGULAR then
+          pk4Files &:= joinPath(basePath, name);
+        end if;
+      end for;
+    end if;
+  end func;
+
+const proc: parseArgs (inout resourceConfig: config) is func
+  local
+    var array string: args is 0 times "";
+    var integer: argIdx is 1;
+  begin
+    args := argv(PROGRAM);
+    while argIdx <= length(args) do
+      if args[argIdx] = "--help" or args[argIdx] = "-h" then
+        config.showHelp := TRUE;
+      elsif args[argIdx] = "--doom3_data_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.dataPath := convDosPath(args[argIdx]);
+      elsif args[argIdx] = "--doom3_base_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.basePath := convDosPath(args[argIdx]);
+      elsif args[argIdx] = "--doom3_start_map" and argIdx < length(args) then
+        incr(argIdx);
+        config.startMap := args[argIdx];
+      elsif args[argIdx] = "+set" and argIdx + 2 <= length(args) then
+        if args[argIdx + 1] = "fs_basepath" then
+          config.dataPath := convDosPath(args[argIdx + 2]);
+        elsif args[argIdx + 1] = "fs_game" then
+          config.basePath := convDosPath(args[argIdx + 2]);
+        end if;
+        argIdx +:= 2;
+      elsif args[argIdx] = "+map" and argIdx < length(args) then
+        incr(argIdx);
+        config.startMap := args[argIdx];
+      end if;
+      incr(argIdx);
+    end while;
+    if config.basePath = "" then
+      config.basePath := joinPath(config.dataPath, DEFAULT_BASE_DIR);
+    end if;
+  end func;
+
+const proc: showUsage is func
+  begin
+    writeln("Usage:");
+    writeln("  s7 doom3_seed7_resource.s7 --doom3_data_path <doom3-root>");
+    writeln("  s7 doom3_seed7_resource.s7 +set fs_basepath <doom3-root> +map <map>");
+    writeln("");
+    writeln("Scans user-owned Doom 3 pk4 files for resource manager readiness.");
+  end func;
+
+const proc: printStats (in resourceStats: stats) is func
+  begin
+    logInfo("pk4_archives=" <& stats.pk4Archives);
+    logInfo("requested_map=" <& stats.requestedMapPath);
+    logInfo("requested_map_found=" <& stats.requestedMapFound);
+    logInfo("asset_catalog images=" <& stats.imageAssets <& " sounds=" <&
+        stats.soundAssets <& " models=" <& stats.modelAssets <& " guis=" <&
+        stats.guiAssets <& " scripts=" <& stats.scriptAssets);
+    logInfo("resource_decls skins=" <& stats.skinDecls <&
+        " sound_shaders=" <& stats.soundShaderDecls);
+    logInfo("resource_textures refs=" <& stats.materialTextureRefs <&
+        " resolved=" <& stats.resolvedMaterialTextures <& " missing=" <&
+        stats.missingMaterialTextures);
+    logInfo("resource_models refs=" <& stats.modelRefs <& " resolved=" <&
+        stats.resolvedModelRefs <& " missing=" <& stats.missingModelRefs);
+    logInfo("resource_sounds refs=" <& stats.soundRefs <& " resolved=" <&
+        stats.resolvedSoundRefs <& " missing=" <& stats.missingSoundRefs);
+    logInfo("resource_gui refs=" <& stats.guiRefs <& " resolved=" <&
+        stats.resolvedGuiRefs <& " missing=" <& stats.missingGuiRefs);
+    logInfo("resource_skins refs=" <& stats.skinRefs <& " resolved=" <&
+        stats.resolvedSkinRefs <& " missing=" <& stats.missingSkinRefs);
+    logInfo("placeholder_resources=" <& stats.placeholderResources);
+    if stats.firstResolvedTexture <> "" then logInfo("first_resolved_texture=" <& stats.firstResolvedTexture); end if;
+    if stats.firstMissingTexture <> "" then logInfo("first_missing_texture=" <& stats.firstMissingTexture); end if;
+    if stats.firstResolvedModel <> "" then logInfo("first_resolved_model=" <& stats.firstResolvedModel); end if;
+    if stats.firstResolvedSound <> "" then logInfo("first_resolved_sound=" <& stats.firstResolvedSound); end if;
+    if stats.firstResolvedGui <> "" then logInfo("first_resolved_gui=" <& stats.firstResolvedGui); end if;
+    if stats.firstResolvedSkin <> "" then logInfo("first_resolved_skin=" <& stats.firstResolvedSkin); end if;
+    logInfo("resource_probe_ready=" <& (stats.pk4Archives <> 0 and
+        stats.requestedMapFound and stats.imageAssets <> 0 and
+        stats.soundAssets <> 0 and stats.modelAssets <> 0 and
+        stats.guiAssets <> 0 and stats.resolvedMaterialTextures <> 0 and
+        stats.resolvedModelRefs <> 0 and stats.resolvedSoundRefs <> 0 and
+        stats.resolvedGuiRefs <> 0 and stats.resolvedSkinRefs <> 0));
+  end func;
+
+const proc: main is func
+  local
+    var resourceConfig: config is resourceConfig.value;
+    var resourceStats: stats is resourceStats.value;
+    var array string: pk4Files is 0 times "";
+    var string: pk4File is "";
+  begin
+    parseArgs(config);
+    if config.showHelp then
+      showUsage;
+    else
+      stats.requestedMapPath := mapNameToAssetPath(config.startMap);
+      if fileType(config.basePath) <> FILE_DIR then
+        logError("Doom 3 base directory not found: " <& config.basePath);
+      else
+        pk4Files := sort(findPk4Archives(config.basePath));
+        stats.pk4Archives := length(pk4Files);
+        if length(pk4Files) = 0 then
+          logError("No .pk4 archives found in: " <& config.basePath);
+        else
+          for pk4File range pk4Files do
+            scanArchiveCatalog(stats, pk4File);
+          end for;
+          for pk4File range pk4Files do
+            scanArchiveRefs(stats, pk4File);
+          end for;
+          printStats(stats);
+        end if;
+      end if;
+    end if;
+  end func;

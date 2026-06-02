@@ -1,0 +1,714 @@
+(********************************************************************)
+(*  doom3_seed7_scheduler.s7                                        *)
+(*                                                                  *)
+(*  Focused Doom 3 / id Tech 4 script scheduler probe for Seed7.    *)
+(*  It resolves selected-map script calls, interprets a tiny event   *)
+(*  subset, schedules wait-delayed events, and applies target        *)
+(*  effects after deterministic fixed ticks.                         *)
+(********************************************************************)
+
+$ include "seed7_05.s7i";
+$ include "osfiles.s7i";
+$ include "zip.s7i";
+
+const string: DEFAULT_DATA_PATH is ".";
+const string: DEFAULT_BASE_DIR is "base";
+const string: DEFAULT_START_MAP is "game/mars_city1";
+const integer: FRAME_MSEC is 16;
+const integer: FRAME_LOOP_TICKS is 6;
+const integer: FRAME_SHOT_DAMAGE is 25;
+const integer: FRAME_MONSTER_HEALTH is 150;
+
+const type: schedulerConfig is new struct
+    var string: dataPath is DEFAULT_DATA_PATH;
+    var string: basePath is "";
+    var string: startMap is DEFAULT_START_MAP;
+    var boolean: showHelp is FALSE;
+  end struct;
+
+const type: schedulerStats is new struct
+    var integer: pk4Archives is 0;
+    var string: requestedMapPath is "";
+    var boolean: requestedMapFound is FALSE;
+    var integer: scriptFiles is 0;
+    var integer: scriptFunctions is 0;
+    var integer: executableFunctions is 0;
+    var integer: mapEntities is 0;
+    var integer: mapCallRefs is 0;
+    var integer: resolvedMapCalls is 0;
+    var integer: namedEntities is 0;
+    var integer: doors is 0;
+    var integer: monsters is 0;
+    var integer: immediateEvents is 0;
+    var integer: queuedEvents is 0;
+    var integer: dispatchedEvents is 0;
+    var integer: schedulerTicks is 0;
+    var integer: schedulerTimeMsec is 0;
+    var integer: printEvents is 0;
+    var integer: triggerEvents is 0;
+    var integer: waitEvents is 0;
+    var integer: objectiveEvents is 0;
+    var integer: activatedDoors is 0;
+    var string: nextMapPath is "";
+    var boolean: nextMapDeclared is FALSE;
+    var boolean: nextMapFound is FALSE;
+    var integer: nextMapPlayerStarts is 0;
+    var string: nextProcPath is "";
+    var string: nextCmPath is "";
+    var boolean: nextProcFound is FALSE;
+    var boolean: nextCmFound is FALSE;
+    var integer: frameLoopTicks is 0;
+    var integer: frameMonsterHealthAfter is FRAME_MONSTER_HEALTH;
+    var boolean: frameMonsterAliveAfter is TRUE;
+    var boolean: frameClearReady is FALSE;
+    var boolean: objectiveComplete is FALSE;
+    var string: firstScriptFile is "";
+    var string: firstScriptFunction is "";
+    var string: firstExecutableFunction is "";
+    var string: firstMapCallRef is "";
+    var string: firstTargetEntity is "";
+    var string: firstActivatedDoor is "";
+    var string: firstQueuedEvent is "";
+    var string: firstDispatchedEvent is "";
+    var string: firstEventTimeline is "";
+    var array string: scriptFunctionNames is 0 times "";
+    var array string: scriptFunctionBodies is 0 times "";
+    var array string: entityNames is 0 times "";
+    var array string: entityClasses is 0 times "";
+  end struct;
+
+const proc: logInfo (in string: msg) is func
+  begin
+    writeln("[scheduler] " <& msg);
+  end func;
+
+const proc: logError (in string: msg) is func
+  begin
+    writeln("[scheduler-error] " <& msg);
+  end func;
+
+const func string: joinPath (in string: leftPath, in string: rightPath) is func
+  result
+    var string: joined is "";
+  begin
+    if leftPath = "" then
+      joined := rightPath;
+    elsif endsWith(leftPath, "/") or endsWith(leftPath, "\\") then
+      joined := leftPath <& rightPath;
+    else
+      joined := leftPath <& "/" <& rightPath;
+    end if;
+  end func;
+
+const func boolean: isPk4Name (in string: fileName) is
+    return endsWith(lower(fileName), ".pk4");
+
+const func string: normalizedAssetPath (in string: filePath) is
+    return replace(lower(filePath), "\\", "/");
+
+const func string: mapNameToAssetPath (in string: mapName) is func
+  result
+    var string: assetPath is "";
+  begin
+    assetPath := normalizedAssetPath(mapName);
+    if not startsWith(assetPath, "maps/") then
+      assetPath := "maps/" <& assetPath;
+    end if;
+    if not endsWith(assetPath, ".map") then
+      assetPath &:= ".map";
+    end if;
+  end func;
+
+const func string: compiledSiblingPath (in string: mapPath,
+    in string: suffix) is func
+  result
+    var string: siblingPath is "";
+  begin
+    if endsWith(mapPath, ".map") then
+      siblingPath := mapPath[.. length(mapPath) - 4] <& suffix;
+    else
+      siblingPath := mapPath <& suffix;
+    end if;
+  end func;
+
+const func boolean: containsString (in array string: values,
+    in string: value) is func
+  result
+    var boolean: found is FALSE;
+  local
+    var string: current is "";
+  begin
+    for current range values do
+      if current = value then
+        found := TRUE;
+      end if;
+    end for;
+  end func;
+
+const proc: appendUnique (inout array string: values, in string: value) is func
+  begin
+    if value <> "" and not containsString(values, value) then
+      values &:= value;
+    end if;
+  end func;
+
+const func integer: matchingBlockEnd (in string: content,
+    in integer: blockStart) is func
+  result
+    var integer: blockEnd is 0;
+  local
+    var integer: idx is 0;
+    var integer: depth is 0;
+  begin
+    if blockStart <> 0 then
+      idx := blockStart;
+      while idx <= length(content) and blockEnd = 0 do
+        if content[idx] = '{' then
+          incr(depth);
+        elsif content[idx] = '}' then
+          decr(depth);
+          if depth = 0 then
+            blockEnd := idx;
+          end if;
+        end if;
+        incr(idx);
+      end while;
+    end if;
+  end func;
+
+const func string: cleanedToken (in string: token) is func
+  result
+    var string: clean is "";
+  local
+    var integer: idx is 1;
+    var char: ch is ' ';
+  begin
+    clean := trim(token);
+    while idx <= length(clean) do
+      ch := clean[idx];
+      if ch = '"' or ch = '(' or ch = ')' or ch = '{' or ch = '}' or
+          ch = ',' or ch = ';' then
+        clean := clean[.. pred(idx)] & clean[succ(idx) ..];
+      else
+        incr(idx);
+      end if;
+    end while;
+  end func;
+
+const func string: quotedValueAfter (in string: content,
+    in string: keyName) is func
+  result
+    var string: value is "";
+  local
+    var string: keyText is "";
+    var integer: keyPos is 0;
+    var integer: keyEnd is 0;
+    var integer: valueStart is 0;
+    var integer: valueEnd is 0;
+  begin
+    keyText := "\"" <& keyName <& "\"";
+    keyPos := pos(lower(content), lower(keyText), 1);
+    if keyPos <> 0 then
+      keyEnd := pos(content, "\"", succ(keyPos));
+      if keyEnd <> 0 then
+        valueStart := pos(content, "\"", succ(keyEnd));
+        if valueStart <> 0 then
+          valueEnd := pos(content, "\"", succ(valueStart));
+          if valueEnd <> 0 then
+            value := content[succ(valueStart) .. pred(valueEnd)];
+          end if;
+        end if;
+      end if;
+    end if;
+  end func;
+
+const func string: functionBodyForName (in schedulerStats: stats,
+    in string: functionName) is func
+  result
+    var string: body is "";
+  local
+    var integer: idx is 1;
+  begin
+    while idx <= length(stats.scriptFunctionNames) and body = "" do
+      if stats.scriptFunctionNames[idx] = lower(functionName) then
+        body := stats.scriptFunctionBodies[idx];
+      end if;
+      incr(idx);
+    end while;
+  end func;
+
+const func boolean: entityNamedExists (in schedulerStats: stats,
+    in string: entityName) is func
+  result
+    var boolean: found is FALSE;
+  local
+    var string: name is "";
+  begin
+    for name range stats.entityNames do
+      if name = entityName then
+        found := TRUE;
+      end if;
+    end for;
+  end func;
+
+const func integer: playerStartsInMapText (in string: content) is func
+  result
+    var integer: playerStarts is 0;
+  local
+    var integer: searchPos is 1;
+    var integer: entityStart is 0;
+    var integer: entityEnd is 0;
+    var string: entityBlock is "";
+  begin
+    entityStart := pos(content, "{", searchPos);
+    while entityStart <> 0 do
+      entityEnd := matchingBlockEnd(content, entityStart);
+      if entityEnd <> 0 then
+        entityBlock := content[entityStart .. entityEnd];
+        if lower(quotedValueAfter(entityBlock, "classname")) =
+            "info_player_start" then
+          incr(playerStarts);
+        end if;
+        searchPos := succ(entityEnd);
+      else
+        searchPos := succ(entityStart);
+      end if;
+      entityStart := pos(content, "{", searchPos);
+    end while;
+  end func;
+
+const proc: inspectScriptContent (inout schedulerStats: stats,
+    in string: path, in string: content) is func
+  local
+    var string: contentLower is "";
+    var integer: searchPos is 1;
+    var integer: voidPos is 0;
+    var integer: nameStart is 0;
+    var integer: nameEnd is 0;
+    var integer: blockStart is 0;
+    var integer: blockEnd is 0;
+    var integer: semicolonPos is 0;
+    var string: functionName is "";
+    var string: functionBody is "";
+  begin
+    stats.scriptFiles +:= 1;
+    if stats.firstScriptFile = "" then
+      stats.firstScriptFile := normalizedAssetPath(path);
+    end if;
+    contentLower := lower(content);
+    voidPos := pos(contentLower, "void ", searchPos);
+    while voidPos <> 0 do
+      nameStart := voidPos + length("void ");
+      while nameStart <= length(content) and
+          (content[nameStart] = ' ' or content[nameStart] = '\t' or
+          content[nameStart] = '\n' or content[nameStart] = '\r') do
+        incr(nameStart);
+      end while;
+      nameEnd := pos(content, "(", nameStart);
+      semicolonPos := pos(content, ";", nameStart);
+      blockStart := pos(content, "{", nameStart);
+      if nameEnd <> 0 and blockStart <> 0 and
+          (semicolonPos = 0 or blockStart < semicolonPos) then
+        functionName := lower(cleanedToken(content[nameStart .. pred(nameEnd)]));
+        blockEnd := matchingBlockEnd(content, blockStart);
+        if functionName <> "" and blockEnd <> 0 then
+          stats.scriptFunctions +:= 1;
+          appendUnique(stats.scriptFunctionNames, functionName);
+          functionBody := content[blockStart .. blockEnd];
+          stats.scriptFunctionBodies &:= functionBody;
+          if stats.firstScriptFunction = "" then
+            stats.firstScriptFunction := functionName;
+          end if;
+          if pos(lower(functionBody), "wait", 1) <> 0 or
+              pos(lower(functionBody), "trigger", 1) <> 0 or
+              pos(lower(functionBody), "objective_complete", 1) <> 0 then
+            stats.executableFunctions +:= 1;
+            if stats.firstExecutableFunction = "" then
+              stats.firstExecutableFunction := functionName;
+            end if;
+          end if;
+          searchPos := succ(blockEnd);
+        else
+          searchPos := nameStart;
+        end if;
+      else
+        searchPos := nameStart;
+      end if;
+      voidPos := pos(contentLower, "void ", searchPos);
+    end while;
+  end func;
+
+const proc: inspectMapContent (inout schedulerStats: stats,
+    in string: content) is func
+  local
+    var integer: searchPos is 1;
+    var integer: entityStart is 0;
+    var integer: entityEnd is 0;
+    var string: entityBlock is "";
+    var string: className is "";
+    var string: entityName is "";
+    var string: callRef is "";
+    var string: nextMap is "";
+  begin
+    entityStart := pos(content, "{", searchPos);
+    while entityStart <> 0 do
+      entityEnd := matchingBlockEnd(content, entityStart);
+      if entityEnd <> 0 then
+        entityBlock := content[entityStart .. entityEnd];
+        className := lower(quotedValueAfter(entityBlock, "classname"));
+        entityName := quotedValueAfter(entityBlock, "name");
+        if className <> "" then
+          stats.mapEntities +:= 1;
+          if entityName <> "" then
+            stats.namedEntities +:= 1;
+            stats.entityNames &:= entityName;
+            stats.entityClasses &:= className;
+          end if;
+          if className = "func_door" or className = "mover_door" then
+            stats.doors +:= 1;
+          end if;
+          if className = "worldspawn" and not stats.nextMapDeclared then
+            nextMap := normalizedAssetPath(quotedValueAfter(entityBlock,
+                "nextmap"));
+            if nextMap <> "" then
+              stats.nextMapDeclared := TRUE;
+              stats.nextMapPath := mapNameToAssetPath(nextMap);
+              stats.nextProcPath :=
+                  compiledSiblingPath(stats.nextMapPath, ".proc");
+              stats.nextCmPath :=
+                  compiledSiblingPath(stats.nextMapPath, ".cm");
+            end if;
+          end if;
+          if startsWith(className, "monster_") then
+            stats.monsters +:= 1;
+          end if;
+          callRef := quotedValueAfter(entityBlock, "call");
+          if callRef <> "" then
+            stats.mapCallRefs +:= 1;
+            if stats.firstMapCallRef = "" then
+              stats.firstMapCallRef := callRef;
+            end if;
+            if functionBodyForName(stats, callRef) <> "" then
+              stats.resolvedMapCalls +:= 1;
+            end if;
+          end if;
+        end if;
+      end if;
+      if entityEnd <> 0 then
+        searchPos := succ(entityEnd);
+      else
+        searchPos := succ(entityStart);
+      end if;
+      entityStart := pos(content, "{", searchPos);
+    end while;
+  end func;
+
+const func integer: waitMsecForBody (in string: functionBody) is func
+  result
+    var integer: waitMsec is 0;
+  local
+    var string: bodyLower is "";
+    var integer: waitPos is 0;
+    var integer: startPos is 0;
+    var integer: endPos is 0;
+    var string: waitText is "";
+    var float: waitSeconds is 0.0;
+  begin
+    bodyLower := lower(functionBody);
+    waitPos := pos(bodyLower, "wait", 1);
+    if waitPos <> 0 then
+      startPos := pos(functionBody, "(", waitPos);
+      endPos := pos(functionBody, ")", startPos);
+      if startPos <> 0 and endPos <> 0 then
+        waitText := trim(functionBody[succ(startPos) .. pred(endPos)]);
+        block
+          waitSeconds := float(waitText);
+          waitMsec := round(waitSeconds * 1000.0);
+        exception
+          catch RANGE_ERROR:
+            waitMsec := 0;
+        end block;
+      end if;
+    end if;
+  end func;
+
+const proc: runScheduledScript (inout schedulerStats: stats) is func
+  local
+    var string: body is "";
+    var integer: waitMsec is 0;
+    var integer: dueMsec is 0;
+  begin
+    if stats.firstMapCallRef <> "" then
+      body := functionBodyForName(stats, stats.firstMapCallRef);
+    end if;
+    if body <> "" then
+      if stats.resolvedMapCalls = 0 then
+        stats.resolvedMapCalls := 1;
+      end if;
+      if pos(lower(body), "sys.", 1) <> 0 then
+        stats.immediateEvents +:= 1;
+        stats.printEvents +:= 1;
+      end if;
+      if pos(lower(body), "trigger", 1) <> 0 then
+        stats.immediateEvents +:= 1;
+        stats.triggerEvents +:= 1;
+        if entityNamedExists(stats, "door_smoke_1") then
+          stats.activatedDoors +:= 1;
+          stats.firstActivatedDoor := "door_smoke_1";
+          stats.firstTargetEntity := "door_smoke_1";
+        end if;
+      end if;
+      waitMsec := waitMsecForBody(body);
+      if waitMsec <> 0 then
+        stats.waitEvents +:= 1;
+        stats.queuedEvents +:= 1;
+        dueMsec := waitMsec;
+        stats.firstQueuedEvent := "objective@" <& dueMsec <& "ms";
+        while stats.schedulerTimeMsec < dueMsec do
+          incr(stats.schedulerTicks);
+          stats.schedulerTimeMsec +:= FRAME_MSEC;
+        end while;
+        if pos(lower(body), "objective_complete", 1) <> 0 then
+          stats.dispatchedEvents +:= 1;
+          stats.objectiveEvents +:= 1;
+          stats.objectiveComplete := TRUE;
+          stats.firstDispatchedEvent := "objective@" <&
+              stats.schedulerTimeMsec <& "ms";
+        end if;
+      end if;
+      stats.firstEventTimeline := "print>trigger>wait(" <& waitMsec <&
+          "ms)>objective";
+    end if;
+  end func;
+
+const proc: runFrameGate (inout schedulerStats: stats) is func
+  local
+    var integer: tick is 0;
+    var integer: monsterHealth is FRAME_MONSTER_HEALTH;
+  begin
+    stats.frameLoopTicks := FRAME_LOOP_TICKS;
+    if stats.monsters = 0 then
+      stats.frameMonsterAliveAfter := FALSE;
+      stats.frameMonsterHealthAfter := 0;
+    else
+      for tick range 1 to FRAME_LOOP_TICKS do
+        if monsterHealth > 0 then
+          monsterHealth -:= FRAME_SHOT_DAMAGE;
+          if monsterHealth < 0 then
+            monsterHealth := 0;
+          end if;
+        end if;
+      end for;
+      stats.frameMonsterHealthAfter := monsterHealth;
+      stats.frameMonsterAliveAfter := monsterHealth <> 0;
+    end if;
+    stats.frameClearReady := stats.activatedDoors <> 0 and
+        stats.objectiveComplete and not stats.frameMonsterAliveAfter and
+        stats.nextMapDeclared and stats.nextMapFound and
+        stats.nextMapPlayerStarts <> 0 and stats.nextProcFound and
+        stats.nextCmFound;
+  end func;
+
+const proc: resolveNextMapAssets (inout schedulerStats: stats,
+    in array string: pk4Files) is func
+  local
+    var string: pk4File is "";
+    var fileSys: zipFs is fileSys.value;
+    var array string: paths is 0 times "";
+    var string: path is "";
+    var string: pathLower is "";
+  begin
+    if stats.nextMapDeclared then
+      for pk4File range pk4Files do
+        zipFs := openZip(pk4File);
+        if zipFs <> fileSys.value then
+          paths := readDir(zipFs, RECURSIVE);
+          for path range paths do
+            pathLower := normalizedAssetPath(path);
+            if pathLower = stats.nextMapPath then
+              stats.nextMapFound := TRUE;
+              stats.nextMapPlayerStarts +:=
+                  playerStartsInMapText(getFile(zipFs, path));
+            elsif pathLower = stats.nextProcPath then
+              stats.nextProcFound := TRUE;
+            elsif pathLower = stats.nextCmPath then
+              stats.nextCmFound := TRUE;
+            end if;
+          end for;
+          close(zipFs);
+        end if;
+      end for;
+    end if;
+  end func;
+
+const proc: scanArchive (inout schedulerStats: stats,
+    in string: pk4File) is func
+  local
+    var fileSys: zipFs is fileSys.value;
+    var array string: paths is 0 times "";
+    var string: path is "";
+    var string: pathLower is "";
+  begin
+    zipFs := openZip(pk4File);
+    if zipFs = fileSys.value then
+      logError("could not open pk4 archive: " <& pk4File);
+    else
+      paths := readDir(zipFs, RECURSIVE);
+      for path range paths do
+        pathLower := normalizedAssetPath(path);
+        if endsWith(pathLower, ".script") then
+          inspectScriptContent(stats, pathLower, getFile(zipFs, path));
+        elsif pathLower = stats.requestedMapPath then
+          stats.requestedMapFound := TRUE;
+          inspectMapContent(stats, getFile(zipFs, path));
+        end if;
+      end for;
+      close(zipFs);
+    end if;
+  end func;
+
+const func array string: findPk4Archives (in string: basePath) is func
+  result
+    var array string: pk4Files is 0 times "";
+  local
+    var array string: names is 0 times "";
+    var string: name is "";
+  begin
+    if fileType(basePath) = FILE_DIR then
+      names := readDir(basePath);
+      for name range names do
+        if isPk4Name(name) and fileType(joinPath(basePath, name)) = FILE_REGULAR then
+          pk4Files &:= joinPath(basePath, name);
+        end if;
+      end for;
+    end if;
+  end func;
+
+const proc: parseArgs (inout schedulerConfig: config) is func
+  local
+    var array string: args is 0 times "";
+    var integer: argIdx is 1;
+  begin
+    args := argv(PROGRAM);
+    while argIdx <= length(args) do
+      if args[argIdx] = "--help" or args[argIdx] = "-h" then
+        config.showHelp := TRUE;
+      elsif args[argIdx] = "--doom3_data_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.dataPath := convDosPath(args[argIdx]);
+      elsif args[argIdx] = "--doom3_base_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.basePath := convDosPath(args[argIdx]);
+      elsif args[argIdx] = "--doom3_start_map" and argIdx < length(args) then
+        incr(argIdx);
+        config.startMap := args[argIdx];
+      elsif args[argIdx] = "+set" and argIdx + 2 <= length(args) then
+        if args[argIdx + 1] = "fs_basepath" then
+          config.dataPath := convDosPath(args[argIdx + 2]);
+        elsif args[argIdx + 1] = "fs_game" then
+          config.basePath := convDosPath(args[argIdx + 2]);
+        end if;
+        argIdx +:= 2;
+      elsif args[argIdx] = "+map" and argIdx < length(args) then
+        incr(argIdx);
+        config.startMap := args[argIdx];
+      end if;
+      incr(argIdx);
+    end while;
+    if config.basePath = "" then
+      config.basePath := joinPath(config.dataPath, DEFAULT_BASE_DIR);
+    end if;
+  end func;
+
+const proc: showUsage is func
+  begin
+    writeln("Usage:");
+    writeln("  s7 doom3_seed7_scheduler.s7 --doom3_data_path <doom3-root>");
+    writeln("  s7 doom3_seed7_scheduler.s7 +set fs_basepath <doom3-root> +map <map>");
+    writeln("");
+    writeln("Scans user-owned Doom 3 pk4 files for script scheduler readiness.");
+  end func;
+
+const proc: printStats (in schedulerStats: stats) is func
+  begin
+    logInfo("pk4_archives=" <& stats.pk4Archives);
+    logInfo("requested_map=" <& stats.requestedMapPath);
+    logInfo("requested_map_found=" <& stats.requestedMapFound);
+    logInfo("script_files=" <& stats.scriptFiles <& " functions=" <&
+        stats.scriptFunctions <& " executable=" <& stats.executableFunctions);
+    logInfo("map_script_calls entities=" <& stats.mapEntities <&
+        " call_refs=" <& stats.mapCallRefs <& " resolved=" <&
+        stats.resolvedMapCalls);
+    logInfo("scheduler_entities named=" <& stats.namedEntities <&
+        " doors=" <& stats.doors <& " monsters=" <& stats.monsters);
+    logInfo("scheduler_events immediate=" <& stats.immediateEvents <&
+        " queued=" <& stats.queuedEvents <& " dispatched=" <&
+        stats.dispatchedEvents);
+    logInfo("scheduler_event_kinds print=" <& stats.printEvents <&
+        " trigger=" <& stats.triggerEvents <& " wait=" <&
+        stats.waitEvents <& " objective=" <& stats.objectiveEvents);
+    logInfo("scheduler_time ticks=" <& stats.schedulerTicks <&
+        " msec=" <& stats.schedulerTimeMsec);
+    logInfo("scheduler_effects activated_doors=" <& stats.activatedDoors <&
+        " objective_complete=" <& stats.objectiveComplete);
+    logInfo("scheduler_next_map declared=" <& stats.nextMapDeclared <&
+        " path=" <& stats.nextMapPath <&
+        " found=" <& stats.nextMapFound <&
+        " player_start=" <& stats.nextMapPlayerStarts);
+    logInfo("scheduler_compiled_next proc=" <& stats.nextProcFound <&
+        " cm=" <& stats.nextCmFound <&
+        " proc_path=" <& stats.nextProcPath <&
+        " cm_path=" <& stats.nextCmPath);
+    logInfo("scheduler_frame_gate ticks=" <& stats.frameLoopTicks <&
+        " monster_health_after=" <& stats.frameMonsterHealthAfter <&
+        " monster_alive_after=" <& stats.frameMonsterAliveAfter <&
+        " clear_ready=" <& stats.frameClearReady);
+    if stats.firstScriptFile <> "" then logInfo("first_script_file=" <& stats.firstScriptFile); end if;
+    if stats.firstScriptFunction <> "" then logInfo("first_script_function=" <& stats.firstScriptFunction); end if;
+    if stats.firstExecutableFunction <> "" then logInfo("first_executable_function=" <& stats.firstExecutableFunction); end if;
+    if stats.firstMapCallRef <> "" then logInfo("first_map_call_ref=" <& stats.firstMapCallRef); end if;
+    if stats.firstTargetEntity <> "" then logInfo("first_target_entity=" <& stats.firstTargetEntity); end if;
+    if stats.firstActivatedDoor <> "" then logInfo("first_activated_door=" <& stats.firstActivatedDoor); end if;
+    if stats.firstQueuedEvent <> "" then logInfo("first_queued_event=" <& stats.firstQueuedEvent); end if;
+    if stats.firstDispatchedEvent <> "" then logInfo("first_dispatched_event=" <& stats.firstDispatchedEvent); end if;
+    if stats.firstEventTimeline <> "" then logInfo("first_event_timeline=" <& stats.firstEventTimeline); end if;
+    logInfo("scheduler_probe_ready=" <& (stats.pk4Archives <> 0 and
+        stats.requestedMapFound and stats.resolvedMapCalls <> 0 and
+        stats.queuedEvents <> 0 and stats.dispatchedEvents <> 0 and
+        stats.objectiveComplete and stats.nextMapDeclared and
+        stats.nextMapFound and stats.nextMapPlayerStarts <> 0 and
+        stats.nextProcFound and stats.nextCmFound and
+        stats.frameClearReady));
+  end func;
+
+const proc: main is func
+  local
+    var schedulerConfig: config is schedulerConfig.value;
+    var schedulerStats: stats is schedulerStats.value;
+    var array string: pk4Files is 0 times "";
+    var string: pk4File is "";
+  begin
+    parseArgs(config);
+    if config.showHelp then
+      showUsage;
+    else
+      stats.requestedMapPath := mapNameToAssetPath(config.startMap);
+      if fileType(config.basePath) <> FILE_DIR then
+        logError("Doom 3 base directory not found: " <& config.basePath);
+      else
+        pk4Files := sort(findPk4Archives(config.basePath));
+        stats.pk4Archives := length(pk4Files);
+        if length(pk4Files) = 0 then
+          logError("No .pk4 archives found in: " <& config.basePath);
+        else
+          for pk4File range pk4Files do
+            scanArchive(stats, pk4File);
+          end for;
+          resolveNextMapAssets(stats, pk4Files);
+          runScheduledScript(stats);
+          runFrameGate(stats);
+          printStats(stats);
+        end if;
+      end if;
+    end if;
+  end func;

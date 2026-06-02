@@ -1,0 +1,557 @@
+(********************************************************************)
+(*  doom3_seed7_objective.s7                                       *)
+(*                                                                  *)
+(*  Focused Doom 3 / id Tech 4 objective/progression probe for     *)
+(*  Seed7. It reads user-owned pk4 archives, scans selected-map     *)
+(*  objective metadata, resolves trigger target links, and reports  *)
+(*  readiness for a future level-flow/objective system. No          *)
+(*  commercial data is bundled.                                     *)
+(********************************************************************)
+
+$ include "seed7_05.s7i";
+$ include "osfiles.s7i";
+$ include "zip.s7i";
+
+const string: DEFAULT_DATA_PATH is ".";
+const string: DEFAULT_BASE_DIR is "base";
+const string: DEFAULT_START_MAP is "game/mars_city1";
+const float: TRIGGER_RADIUS is 32.0;
+
+const type: objectiveConfig is new struct
+    var string: dataPath is DEFAULT_DATA_PATH;
+    var string: basePath is "";
+    var string: startMap is DEFAULT_START_MAP;
+    var boolean: showHelp is FALSE;
+  end struct;
+
+const type: mapEntity is new struct
+    var string: className is "";
+    var string: entityName is "";
+    var string: targetName is "";
+    var string: objectiveText is "";
+    var string: nextMap is "";
+    var float: x is 0.0;
+    var float: y is 0.0;
+    var boolean: hasOrigin is FALSE;
+  end struct;
+
+const type: objectiveStats is new struct
+    var integer: pk4Archives is 0;
+    var string: requestedMapPath is "";
+    var boolean: requestedMapFound is FALSE;
+    var integer: mapEntities is 0;
+    var integer: worldspawnObjectives is 0;
+    var integer: nextMapRefs is 0;
+    var integer: targetRefs is 0;
+    var integer: resolvedTargetRefs is 0;
+    var integer: missingTargetRefs is 0;
+    var integer: triggerEntities is 0;
+    var integer: doorEntities is 0;
+    var integer: monsterEntities is 0;
+    var integer: playerStarts is 0;
+    var integer: touchedTriggers is 0;
+    var integer: activatedDoors is 0;
+    var integer: completedObjectives is 0;
+    var boolean: clearConditionReady is FALSE;
+    var string: firstNextMapPath is "";
+    var boolean: nextMapFound is FALSE;
+    var integer: nextMapPlayerStarts is 0;
+    var string: nextProcPath is "";
+    var string: nextCmPath is "";
+    var boolean: nextProcFound is FALSE;
+    var boolean: nextCmFound is FALSE;
+    var string: firstObjectiveText is "";
+    var string: firstNextMap is "";
+    var string: firstTrigger is "";
+    var string: firstTriggerTarget is "";
+    var string: firstActivatedDoor is "";
+    var string: firstProgressionPath is "";
+    var array mapEntity: entities is 0 times mapEntity.value;
+  end struct;
+
+const proc: logInfo (in string: msg) is func
+  begin
+    writeln("[objective] " <& msg);
+  end func;
+
+const proc: logError (in string: msg) is func
+  begin
+    writeln("[objective-error] " <& msg);
+  end func;
+
+const func string: joinPath (in string: leftPath, in string: rightPath) is func
+  result
+    var string: joined is "";
+  begin
+    if leftPath = "" then
+      joined := rightPath;
+    elsif endsWith(leftPath, "/") or endsWith(leftPath, "\\") then
+      joined := leftPath <& rightPath;
+    else
+      joined := leftPath <& "/" <& rightPath;
+    end if;
+  end func;
+
+const func boolean: isPk4Name (in string: fileName) is
+    return endsWith(lower(fileName), ".pk4");
+
+const func string: normalizedAssetPath (in string: filePath) is
+    return replace(lower(filePath), "\\", "/");
+
+const func string: mapNameToAssetPath (in string: mapName) is func
+  result
+    var string: assetPath is "";
+  begin
+    assetPath := normalizedAssetPath(mapName);
+    if not startsWith(assetPath, "maps/") then
+      assetPath := "maps/" <& assetPath;
+    end if;
+    if not endsWith(assetPath, ".map") then
+      assetPath &:= ".map";
+    end if;
+  end func;
+
+const func string: compiledSiblingPath (in string: mapPath,
+    in string: suffix) is func
+  result
+    var string: siblingPath is "";
+  begin
+    if endsWith(mapPath, ".map") then
+      siblingPath := mapPath[.. length(mapPath) - 4] <& suffix;
+    else
+      siblingPath := mapPath <& suffix;
+    end if;
+  end func;
+
+const func string: quotedValueAfter (in string: content, in string: keyName) is func
+  result
+    var string: value is "";
+  local
+    var string: keyText is "";
+    var integer: keyPos is 0;
+    var integer: keyEnd is 0;
+    var integer: valueStart is 0;
+    var integer: valueEnd is 0;
+  begin
+    keyText := "\"" <& keyName <& "\"";
+    keyPos := pos(lower(content), lower(keyText), 1);
+    if keyPos <> 0 then
+      keyEnd := pos(content, "\"", succ(keyPos));
+      if keyEnd <> 0 then
+        valueStart := pos(content, "\"", succ(keyEnd));
+        if valueStart <> 0 then
+          valueEnd := pos(content, "\"", succ(valueStart));
+          if valueEnd <> 0 then
+            value := content[succ(valueStart) .. pred(valueEnd)];
+          end if;
+        end if;
+      end if;
+    end if;
+  end func;
+
+const func integer: matchingBlockEnd (in string: content,
+    in integer: blockStart) is func
+  result
+    var integer: blockEnd is 0;
+  local
+    var integer: idx is 0;
+    var integer: depth is 0;
+  begin
+    if blockStart <> 0 then
+      idx := blockStart;
+      while idx <= length(content) and blockEnd = 0 do
+        if content[idx] = '{' then
+          incr(depth);
+        elsif content[idx] = '}' then
+          decr(depth);
+          if depth = 0 then
+            blockEnd := idx;
+          end if;
+        end if;
+        incr(idx);
+      end while;
+    end if;
+  end func;
+
+const func float: vectorComponentOrDefault (in string: text,
+    in integer: component, in float: defaultValue) is func
+  result
+    var float: value is 0.0;
+  local
+    var array string: parts is 0 times "";
+  begin
+    value := defaultValue;
+    parts := noEmptyStrings(split(trim(text), ' '));
+    if component <= length(parts) then
+      block
+        value := float(parts[component]);
+      exception
+        catch RANGE_ERROR:
+          value := defaultValue;
+      end block;
+    end if;
+  end func;
+
+const func boolean: entityNameExists (in array mapEntity: entities,
+    in string: entityName) is func
+  result
+    var boolean: exists is FALSE;
+  local
+    var mapEntity: entity is mapEntity.value;
+  begin
+    for entity range entities do
+      if entity.entityName = entityName then
+        exists := TRUE;
+      end if;
+    end for;
+  end func;
+
+const func boolean: pointTouchesEntity (in mapEntity: entity,
+    in float: x, in float: y, in float: radius) is func
+  result
+    var boolean: touches is FALSE;
+  local
+    var float: dx is 0.0;
+    var float: dy is 0.0;
+  begin
+    if entity.hasOrigin then
+      dx := entity.x - x;
+      dy := entity.y - y;
+      touches := dx * dx + dy * dy <= radius * radius;
+    end if;
+  end func;
+
+const func integer: playerStartsInMapText (in string: content) is func
+  result
+    var integer: playerStarts is 0;
+  local
+    var integer: searchPos is 1;
+    var integer: blockStart is 0;
+    var integer: blockEnd is 0;
+    var string: blockText is "";
+  begin
+    blockStart := pos(content, "{", searchPos);
+    while blockStart <> 0 do
+      blockEnd := matchingBlockEnd(content, blockStart);
+      if blockEnd <> 0 then
+        blockText := content[blockStart .. blockEnd];
+        if lower(quotedValueAfter(blockText, "classname")) = "info_player_start" then
+          incr(playerStarts);
+        end if;
+        searchPos := succ(blockEnd);
+      else
+        searchPos := succ(blockStart);
+      end if;
+      blockStart := pos(content, "{", searchPos);
+    end while;
+  end func;
+
+const proc: inspectMapText (inout objectiveStats: stats,
+    in string: content) is func
+  local
+    var integer: searchPos is 1;
+    var integer: blockStart is 0;
+    var integer: blockEnd is 0;
+    var string: blockText is "";
+    var string: originText is "";
+    var mapEntity: entity is mapEntity.value;
+  begin
+    blockStart := pos(content, "{", searchPos);
+    while blockStart <> 0 do
+      blockEnd := matchingBlockEnd(content, blockStart);
+      if blockEnd <> 0 then
+        blockText := content[blockStart .. blockEnd];
+        entity := mapEntity.value;
+        entity.className := lower(quotedValueAfter(blockText, "classname"));
+        entity.entityName := quotedValueAfter(blockText, "name");
+        entity.targetName := quotedValueAfter(blockText, "target");
+        entity.objectiveText := quotedValueAfter(blockText, "objective");
+        entity.nextMap := normalizedAssetPath(quotedValueAfter(blockText, "nextmap"));
+        originText := quotedValueAfter(blockText, "origin");
+        if originText <> "" then
+          entity.hasOrigin := TRUE;
+          entity.x := vectorComponentOrDefault(originText, 1, 0.0);
+          entity.y := vectorComponentOrDefault(originText, 2, 0.0);
+        end if;
+        stats.entities &:= entity;
+        stats.mapEntities +:= 1;
+        if entity.className = "worldspawn" then
+          if entity.objectiveText <> "" then
+            stats.worldspawnObjectives +:= 1;
+            if stats.firstObjectiveText = "" then
+              stats.firstObjectiveText := entity.objectiveText;
+            end if;
+          end if;
+          if entity.nextMap <> "" then
+            stats.nextMapRefs +:= 1;
+            if stats.firstNextMap = "" then
+              stats.firstNextMap := entity.nextMap;
+              stats.firstNextMapPath := mapNameToAssetPath(entity.nextMap);
+              stats.nextProcPath :=
+                  compiledSiblingPath(stats.firstNextMapPath, ".proc");
+              stats.nextCmPath :=
+                  compiledSiblingPath(stats.firstNextMapPath, ".cm");
+            end if;
+          end if;
+        elsif startsWith(entity.className, "trigger_") then
+          stats.triggerEntities +:= 1;
+        elsif entity.className = "func_door" then
+          stats.doorEntities +:= 1;
+        elsif startsWith(entity.className, "monster_") then
+          stats.monsterEntities +:= 1;
+        elsif entity.className = "info_player_start" then
+          stats.playerStarts +:= 1;
+        end if;
+        if entity.targetName <> "" then
+          stats.targetRefs +:= 1;
+          if stats.firstTrigger = "" and startsWith(entity.className, "trigger_") then
+            stats.firstTrigger := entity.entityName;
+            stats.firstTriggerTarget := entity.targetName;
+          end if;
+        end if;
+        searchPos := succ(blockEnd);
+      else
+        searchPos := succ(blockStart);
+      end if;
+      blockStart := pos(content, "{", searchPos);
+    end while;
+  end func;
+
+const proc: resolveProgression (inout objectiveStats: stats) is func
+  local
+    var mapEntity: entity is mapEntity.value;
+    var mapEntity: triggerEntity is mapEntity.value;
+  begin
+    for entity range stats.entities do
+      if entity.targetName <> "" then
+        if entityNameExists(stats.entities, entity.targetName) then
+          stats.resolvedTargetRefs +:= 1;
+        else
+          stats.missingTargetRefs +:= 1;
+        end if;
+      end if;
+    end for;
+    for triggerEntity range stats.entities do
+      if startsWith(triggerEntity.className, "trigger_") and
+          triggerEntity.targetName <> "" and
+          pointTouchesEntity(triggerEntity, 80.0, 0.0, TRIGGER_RADIUS) then
+        stats.touchedTriggers +:= 1;
+        if entityNameExists(stats.entities, triggerEntity.targetName) then
+          stats.activatedDoors +:= 1;
+          if stats.firstActivatedDoor = "" then
+            stats.firstActivatedDoor := triggerEntity.targetName;
+          end if;
+        end if;
+      end if;
+    end for;
+    if stats.worldspawnObjectives <> 0 and stats.nextMapRefs <> 0 and
+        stats.touchedTriggers <> 0 and stats.activatedDoors <> 0 and
+        stats.monsterEntities <> 0 and stats.nextMapFound and
+        stats.nextMapPlayerStarts <> 0 and stats.nextProcFound and
+        stats.nextCmFound then
+      stats.completedObjectives := 1;
+      stats.clearConditionReady := TRUE;
+      stats.firstProgressionPath := "spawn>trigger>door>clear>" <&
+          stats.firstNextMap;
+    end if;
+  end func;
+
+const proc: resolveNextMapAssets (inout objectiveStats: stats,
+    in array string: pk4Files) is func
+  local
+    var string: pk4File is "";
+    var fileSys: zipFs is fileSys.value;
+    var array string: paths is 0 times "";
+    var string: path is "";
+    var string: pathLower is "";
+  begin
+    if stats.firstNextMapPath <> "" then
+      for pk4File range pk4Files do
+        zipFs := openZip(pk4File);
+        if zipFs <> fileSys.value then
+          paths := readDir(zipFs, RECURSIVE);
+          for path range paths do
+            pathLower := normalizedAssetPath(path);
+            if pathLower = stats.firstNextMapPath then
+              stats.nextMapFound := TRUE;
+              stats.nextMapPlayerStarts +:= playerStartsInMapText(getFile(zipFs, path));
+            elsif pathLower = stats.nextProcPath then
+              stats.nextProcFound := TRUE;
+            elsif pathLower = stats.nextCmPath then
+              stats.nextCmFound := TRUE;
+            end if;
+          end for;
+          close(zipFs);
+        end if;
+      end for;
+    end if;
+  end func;
+
+const func array string: findPk4Archives (in string: basePath) is func
+  result
+    var array string: pk4Files is 0 times "";
+  local
+    var array string: names is 0 times "";
+    var string: name is "";
+  begin
+    if fileType(basePath) = FILE_DIR then
+      names := readDir(basePath);
+      for name range names do
+        if isPk4Name(name) and fileType(joinPath(basePath, name)) = FILE_REGULAR then
+          pk4Files &:= joinPath(basePath, name);
+        end if;
+      end for;
+    end if;
+  end func;
+
+const proc: scanArchive (inout objectiveStats: stats,
+    in string: pk4File, in string: requestedMapPath) is func
+  local
+    var fileSys: zipFs is fileSys.value;
+    var array string: paths is 0 times "";
+    var string: path is "";
+    var string: pathLower is "";
+  begin
+    zipFs := openZip(pk4File);
+    if zipFs = fileSys.value then
+      logError("could not open pk4 archive: " <& pk4File);
+    else
+      paths := readDir(zipFs, RECURSIVE);
+      for path range paths do
+        pathLower := normalizedAssetPath(path);
+        if pathLower = requestedMapPath then
+          stats.requestedMapFound := TRUE;
+          inspectMapText(stats, getFile(zipFs, path));
+        end if;
+      end for;
+      close(zipFs);
+    end if;
+  end func;
+
+const proc: parseArgs (inout objectiveConfig: config) is func
+  local
+    var array string: args is 0 times "";
+    var integer: argIdx is 1;
+  begin
+    args := argv(PROGRAM);
+    while argIdx <= length(args) do
+      if args[argIdx] = "--help" or args[argIdx] = "-h" then
+        config.showHelp := TRUE;
+      elsif args[argIdx] = "--doom3_data_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.dataPath := convDosPath(args[argIdx]);
+      elsif args[argIdx] = "--doom3_base_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.basePath := convDosPath(args[argIdx]);
+      elsif args[argIdx] = "--doom3_start_map" and argIdx < length(args) then
+        incr(argIdx);
+        config.startMap := args[argIdx];
+      elsif args[argIdx] = "+map" and argIdx < length(args) then
+        incr(argIdx);
+        config.startMap := args[argIdx];
+      elsif args[argIdx] = "+set" and argIdx + 2 <= length(args) then
+        if args[argIdx + 1] = "fs_basepath" then
+          config.dataPath := convDosPath(args[argIdx + 2]);
+        elsif args[argIdx + 1] = "fs_game" then
+          config.basePath := convDosPath(args[argIdx + 2]);
+        end if;
+        argIdx +:= 2;
+      end if;
+      incr(argIdx);
+    end while;
+    if config.basePath = "" then
+      config.basePath := joinPath(config.dataPath, DEFAULT_BASE_DIR);
+    end if;
+  end func;
+
+const proc: showUsage is func
+  begin
+    writeln("Usage:");
+    writeln("  s7 doom3_seed7_objective.s7 --doom3_data_path <doom3-root>");
+    writeln("  s7 doom3_seed7_objective.s7 +set fs_basepath <doom3-root> +map <map>");
+    writeln("");
+    writeln("Scans user-owned Doom 3 pk4 files for objective/progression readiness.");
+  end func;
+
+const proc: printStats (in objectiveStats: stats) is func
+  begin
+    logInfo("pk4_archives=" <& stats.pk4Archives);
+    logInfo("requested_map=" <& stats.requestedMapPath);
+    logInfo("requested_map_found=" <& stats.requestedMapFound);
+    logInfo("map_entities=" <& stats.mapEntities <&
+        " player_start=" <& stats.playerStarts <&
+        " triggers=" <& stats.triggerEntities <&
+        " doors=" <& stats.doorEntities <&
+        " monsters=" <& stats.monsterEntities);
+    logInfo("objective_metadata objectives=" <& stats.worldspawnObjectives <&
+        " next_maps=" <& stats.nextMapRefs);
+    logInfo("objective_next_map path=" <& stats.firstNextMapPath <&
+        " found=" <& stats.nextMapFound <&
+        " player_start=" <& stats.nextMapPlayerStarts);
+    logInfo("objective_compiled_next proc=" <& stats.nextProcFound <&
+        " cm=" <& stats.nextCmFound <&
+        " proc_path=" <& stats.nextProcPath <&
+        " cm_path=" <& stats.nextCmPath);
+    logInfo("target_resolution refs=" <& stats.targetRefs <&
+        " resolved=" <& stats.resolvedTargetRefs <&
+        " missing=" <& stats.missingTargetRefs);
+    logInfo("progression_sim touched_triggers=" <& stats.touchedTriggers <&
+        " activated_doors=" <& stats.activatedDoors <&
+        " completed_objectives=" <& stats.completedObjectives <&
+        " clear_ready=" <& stats.clearConditionReady);
+    if stats.firstObjectiveText <> "" then
+      logInfo("first_objective=" <& stats.firstObjectiveText);
+    end if;
+    if stats.firstNextMap <> "" then
+      logInfo("first_next_map=" <& stats.firstNextMap);
+    end if;
+    if stats.firstTrigger <> "" then
+      logInfo("first_trigger=" <& stats.firstTrigger);
+    end if;
+    if stats.firstTriggerTarget <> "" then
+      logInfo("first_trigger_target=" <& stats.firstTriggerTarget);
+    end if;
+    if stats.firstActivatedDoor <> "" then
+      logInfo("first_activated_door=" <& stats.firstActivatedDoor);
+    end if;
+    if stats.firstProgressionPath <> "" then
+      logInfo("first_progression_path=" <& stats.firstProgressionPath);
+    end if;
+    logInfo("objective_probe_ready=" <& (stats.requestedMapFound and
+        stats.worldspawnObjectives <> 0 and stats.nextMapRefs <> 0 and
+        stats.nextMapFound and stats.nextMapPlayerStarts <> 0 and
+        stats.nextProcFound and stats.nextCmFound and
+        stats.resolvedTargetRefs <> 0 and stats.completedObjectives <> 0 and
+        stats.clearConditionReady));
+  end func;
+
+const proc: main is func
+  local
+    var objectiveConfig: config is objectiveConfig.value;
+    var objectiveStats: stats is objectiveStats.value;
+    var array string: pk4Files is 0 times "";
+    var string: pk4File is "";
+  begin
+    parseArgs(config);
+    if config.showHelp then
+      showUsage;
+    else
+      stats.requestedMapPath := mapNameToAssetPath(config.startMap);
+      if fileType(config.basePath) <> FILE_DIR then
+        logError("Doom 3 base directory not found: " <& config.basePath);
+      else
+        pk4Files := sort(findPk4Archives(config.basePath));
+        stats.pk4Archives := length(pk4Files);
+        if length(pk4Files) = 0 then
+          logError("No .pk4 archives found in: " <& config.basePath);
+        else
+          for pk4File range pk4Files do
+            scanArchive(stats, pk4File, stats.requestedMapPath);
+          end for;
+          resolveNextMapAssets(stats, pk4Files);
+          resolveProgression(stats);
+          printStats(stats);
+        end if;
+      end if;
+    end if;
+  end func;

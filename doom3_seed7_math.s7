@@ -1,0 +1,286 @@
+(********************************************************************)
+(*  doom3_seed7_math.s7                                             *)
+(*                                                                  *)
+(*  Focused Doom 3 / id Tech 4 math probe for Seed7. It validates   *)
+(*  vector, plane, bounds, yaw-basis, segment, and frustum-style     *)
+(*  calculations used by later collision and renderer code.          *)
+(********************************************************************)
+
+$ include "seed7_05.s7i";
+$ include "math.s7i";
+
+const float: DEFAULT_YAW is 0.0;
+const float: DEFAULT_MOVE_DISTANCE is 32.0;
+
+const type: mathConfig is new struct
+    var float: yawDegrees is DEFAULT_YAW;
+    var float: moveDistance is DEFAULT_MOVE_DISTANCE;
+    var boolean: showHelp is FALSE;
+  end struct;
+
+const type: vec3 is new struct
+    var float: x is 0.0;
+    var float: y is 0.0;
+    var float: z is 0.0;
+  end struct;
+
+const type: plane3 is new struct
+    var vec3: normal is vec3.value;
+    var float: distance is 0.0;
+  end struct;
+
+const type: bounds3 is new struct
+    var vec3: mins is vec3.value;
+    var vec3: maxs is vec3.value;
+  end struct;
+
+const type: mathStats is new struct
+    var vec3: playerOrigin is vec3.value;
+    var vec3: targetOrigin is vec3.value;
+    var vec3: delta is vec3.value;
+    var vec3: forward is vec3.value;
+    var vec3: right is vec3.value;
+    var vec3: movedPoint is vec3.value;
+    var plane3: clipPlane is plane3.value;
+    var bounds3: roomBounds is bounds3.value;
+    var bounds3: expandedBounds is bounds3.value;
+    var float: deltaLengthSq is 0.0;
+    var float: forwardDot is 0.0;
+    var float: sideDot is 0.0;
+    var float: planeDistance is 0.0;
+    var float: segmentFractionPct is 0.0;
+    var boolean: segmentHitsPlane is FALSE;
+    var boolean: pointInsideBounds is FALSE;
+    var boolean: expandedIntersectsRoom is FALSE;
+    var boolean: frustumVisible is FALSE;
+  end struct;
+
+const proc: logInfo (in string: msg) is func
+  begin
+    writeln("[math] " <& msg);
+  end func;
+
+const func vec3: makeVec3 (in float: x, in float: y, in float: z) is func
+  result
+    var vec3: value is vec3.value;
+  begin
+    value.x := x;
+    value.y := y;
+    value.z := z;
+  end func;
+
+const func bounds3: makeBounds3 (in vec3: mins, in vec3: maxs) is func
+  result
+    var bounds3: value is bounds3.value;
+  begin
+    value.mins := mins;
+    value.maxs := maxs;
+  end func;
+
+const func vec3: subVec3 (in vec3: leftValue, in vec3: rightValue) is func
+  result
+    var vec3: value is vec3.value;
+  begin
+    value.x := leftValue.x - rightValue.x;
+    value.y := leftValue.y - rightValue.y;
+    value.z := leftValue.z - rightValue.z;
+  end func;
+
+const func vec3: addScaledVec3 (in vec3: origin, in vec3: direction,
+    in float: scale) is func
+  result
+    var vec3: value is vec3.value;
+  begin
+    value.x := origin.x + direction.x * scale;
+    value.y := origin.y + direction.y * scale;
+    value.z := origin.z + direction.z * scale;
+  end func;
+
+const func float: dotVec3 (in vec3: leftValue, in vec3: rightValue) is
+    return leftValue.x * rightValue.x + leftValue.y * rightValue.y +
+        leftValue.z * rightValue.z;
+
+const func float: lengthSqVec3 (in vec3: value) is
+    return dotVec3(value, value);
+
+const func float: degreesToRadians (in float: degrees) is
+    return degrees * PI / 180.0;
+
+const func vec3: yawForward (in float: yawDegrees) is func
+  result
+    var vec3: value is vec3.value;
+  local
+    var float: yawRadians is 0.0;
+  begin
+    yawRadians := degreesToRadians(yawDegrees);
+    value.x := cos(yawRadians);
+    value.y := sin(yawRadians);
+    value.z := 0.0;
+  end func;
+
+const func vec3: yawRight (in float: yawDegrees) is func
+  result
+    var vec3: value is vec3.value;
+  local
+    var float: yawRadians is 0.0;
+  begin
+    yawRadians := degreesToRadians(yawDegrees);
+    value.x := -sin(yawRadians);
+    value.y := cos(yawRadians);
+    value.z := 0.0;
+  end func;
+
+const func float: planeDistanceToPoint (in plane3: plane,
+    in vec3: point) is
+    return dotVec3(plane.normal, point) + plane.distance;
+
+const func boolean: boundsContainPoint (in bounds3: bounds,
+    in vec3: point) is
+    return point.x >= bounds.mins.x and point.x <= bounds.maxs.x and
+        point.y >= bounds.mins.y and point.y <= bounds.maxs.y and
+        point.z >= bounds.mins.z and point.z <= bounds.maxs.z;
+
+const func bounds3: expandBounds (in bounds3: bounds,
+    in float: amount) is func
+  result
+    var bounds3: value is bounds3.value;
+  begin
+    value.mins.x := bounds.mins.x - amount;
+    value.mins.y := bounds.mins.y - amount;
+    value.mins.z := bounds.mins.z - amount;
+    value.maxs.x := bounds.maxs.x + amount;
+    value.maxs.y := bounds.maxs.y + amount;
+    value.maxs.z := bounds.maxs.z + amount;
+  end func;
+
+const func boolean: boundsIntersect (in bounds3: leftBounds,
+    in bounds3: rightBounds) is
+    return leftBounds.maxs.x >= rightBounds.mins.x and
+        leftBounds.mins.x <= rightBounds.maxs.x and
+        leftBounds.maxs.y >= rightBounds.mins.y and
+        leftBounds.mins.y <= rightBounds.maxs.y and
+        leftBounds.maxs.z >= rightBounds.mins.z and
+        leftBounds.mins.z <= rightBounds.maxs.z;
+
+const proc: evaluateSegmentPlane (inout mathStats: stats,
+    in vec3: startPoint, in vec3: endPoint) is func
+  local
+    var float: startDistance is 0.0;
+    var float: endDistance is 0.0;
+    var float: fraction is 0.0;
+  begin
+    startDistance := planeDistanceToPoint(stats.clipPlane, startPoint);
+    endDistance := planeDistanceToPoint(stats.clipPlane, endPoint);
+    stats.segmentHitsPlane := startDistance <= 0.0 and endDistance >= 0.0;
+    if stats.segmentHitsPlane then
+      fraction := -startDistance / (endDistance - startDistance);
+      stats.segmentFractionPct := fraction * 100.0;
+    end if;
+  end func;
+
+const proc: evaluateMath (in mathConfig: config,
+    inout mathStats: stats) is func
+  local
+    var vec3: segmentStart is vec3.value;
+    var vec3: segmentEnd is vec3.value;
+  begin
+    stats.playerOrigin := makeVec3(128.0, 0.0, 64.0);
+    stats.targetOrigin := makeVec3(192.0, 32.0, 64.0);
+    stats.delta := subVec3(stats.targetOrigin, stats.playerOrigin);
+    stats.deltaLengthSq := lengthSqVec3(stats.delta);
+    stats.forward := yawForward(config.yawDegrees);
+    stats.right := yawRight(config.yawDegrees);
+    stats.movedPoint := addScaledVec3(stats.playerOrigin, stats.forward,
+        config.moveDistance);
+    stats.forwardDot := dotVec3(stats.delta, stats.forward);
+    stats.sideDot := dotVec3(stats.delta, stats.right);
+    stats.clipPlane.normal := makeVec3(1.0, 0.0, 0.0);
+    stats.clipPlane.distance := -64.0;
+    stats.planeDistance := planeDistanceToPoint(stats.clipPlane,
+        makeVec3(64.0, 0.0, 0.0));
+    stats.roomBounds := makeBounds3(makeVec3(0.0, 0.0, 0.0),
+        makeVec3(256.0, 128.0, 128.0));
+    stats.expandedBounds := expandBounds(makeBounds3(makeVec3(176.0, 16.0,
+        48.0), makeVec3(208.0, 48.0, 96.0)), 16.0);
+    stats.pointInsideBounds := boundsContainPoint(stats.roomBounds,
+        stats.playerOrigin);
+    stats.expandedIntersectsRoom := boundsIntersect(stats.roomBounds,
+        stats.expandedBounds);
+    stats.frustumVisible := stats.forwardDot > 0.0 and
+        stats.sideDot >= -64.0 and stats.sideDot <= 64.0;
+    segmentStart := makeVec3(32.0, 0.0, 0.0);
+    segmentEnd := makeVec3(96.0, 0.0, 0.0);
+    evaluateSegmentPlane(stats, segmentStart, segmentEnd);
+  end func;
+
+const proc: parseArgs (inout mathConfig: config) is func
+  local
+    var array string: args is 0 times "";
+    var integer: argIdx is 1;
+  begin
+    args := argv(PROGRAM);
+    while argIdx <= length(args) do
+      if args[argIdx] = "--help" or args[argIdx] = "-h" then
+        config.showHelp := TRUE;
+      elsif args[argIdx] = "--doom3_math_yaw" and argIdx < length(args) then
+        incr(argIdx);
+        config.yawDegrees := float(args[argIdx]);
+      elsif args[argIdx] = "--doom3_math_move" and argIdx < length(args) then
+        incr(argIdx);
+        config.moveDistance := float(args[argIdx]);
+      end if;
+      incr(argIdx);
+    end while;
+  end func;
+
+const proc: showUsage is func
+  begin
+    writeln("Usage:");
+    writeln("  s7 doom3_seed7_math.s7 [--doom3_math_yaw <degrees>]");
+    writeln("");
+    writeln("Checks vector, plane, bounds, yaw-basis, and frustum math readiness.");
+  end func;
+
+const proc: printStats (in mathConfig: config,
+    in mathStats: stats) is func
+  begin
+    logInfo("math_yaw=" <& config.yawDegrees);
+    logInfo("vec_delta=" <& stats.delta.x <& " " <& stats.delta.y <& " " <&
+        stats.delta.z);
+    logInfo("vec_delta_length_sq=" <& stats.deltaLengthSq);
+    logInfo("yaw_forward=" <& stats.forward.x <& " " <& stats.forward.y <&
+        " " <& stats.forward.z);
+    logInfo("yaw_right=" <& stats.right.x <& " " <& stats.right.y <& " " <&
+        stats.right.z);
+    logInfo("moved_point=" <& stats.movedPoint.x <& " " <&
+        stats.movedPoint.y <& " " <& stats.movedPoint.z);
+    logInfo("plane_distance_at_64=" <& stats.planeDistance);
+    logInfo("segment_plane_hit=" <& stats.segmentHitsPlane <&
+        " fraction_pct=" <& stats.segmentFractionPct);
+    logInfo("bounds_contains_player=" <& stats.pointInsideBounds);
+    logInfo("expanded_bounds_min=" <& stats.expandedBounds.mins.x <& " " <&
+        stats.expandedBounds.mins.y <& " " <& stats.expandedBounds.mins.z);
+    logInfo("expanded_bounds_max=" <& stats.expandedBounds.maxs.x <& " " <&
+        stats.expandedBounds.maxs.y <& " " <& stats.expandedBounds.maxs.z);
+    logInfo("bounds_intersect=" <& stats.expandedIntersectsRoom);
+    logInfo("frustum forward_dot=" <& stats.forwardDot <& " side_dot=" <&
+        stats.sideDot <& " visible=" <& stats.frustumVisible);
+    logInfo("math_probe_ready=" <& (stats.deltaLengthSq = 5120.0 and
+        stats.pointInsideBounds and stats.expandedIntersectsRoom and
+        stats.segmentHitsPlane and stats.segmentFractionPct = 50.0 and
+        stats.frustumVisible));
+  end func;
+
+const proc: main is func
+  local
+    var mathConfig: config is mathConfig.value;
+    var mathStats: stats is mathStats.value;
+  begin
+    parseArgs(config);
+    if config.showHelp then
+      showUsage;
+    else
+      evaluateMath(config, stats);
+      printStats(config, stats);
+    end if;
+  end func;

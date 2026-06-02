@@ -1,0 +1,558 @@
+(********************************************************************)
+(*  doom3_seed7_campaign.s7                                        *)
+(*                                                                  *)
+(*  Focused Doom 3 / id Tech 4 campaign-flow probe for Seed7. It   *)
+(*  validates the session contract that connects selected-map load, *)
+(*  clear-to-next-map, death-to-current-checkpoint restart, and     *)
+(*  save/restore metadata using user-owned pk4 data. No commercial  *)
+(*  data is bundled.                                                *)
+(********************************************************************)
+
+$ include "seed7_05.s7i";
+$ include "osfiles.s7i";
+$ include "zip.s7i";
+
+const string: DEFAULT_DATA_PATH is ".";
+const string: DEFAULT_BASE_DIR is "base";
+const string: DEFAULT_START_MAP is "game/mars_city1";
+const integer: CAMPAIGN_SAVE_VERSION is 1;
+
+const type: campaignConfig is new struct
+    var string: dataPath is DEFAULT_DATA_PATH;
+    var string: basePath is "";
+    var string: startMap is DEFAULT_START_MAP;
+    var boolean: showHelp is FALSE;
+  end struct;
+
+const type: campaignMap is new struct
+    var string: mapPath is "";
+    var integer: entities is 0;
+    var integer: worldspawns is 0;
+    var integer: playerStarts is 0;
+    var integer: objectives is 0;
+    var integer: nextMapRefs is 0;
+    var integer: monsters is 0;
+    var integer: doors is 0;
+    var integer: triggers is 0;
+    var string: firstPlayerStart is "";
+    var string: firstObjective is "";
+    var string: firstNextMap is "";
+  end struct;
+
+const type: campaignStats is new struct
+    var integer: pk4Archives is 0;
+    var integer: mapAssets is 0;
+    var integer: uniqueMapAssets is 0;
+    var string: requestedMapPath is "";
+    var string: nextMapPath is "";
+    var boolean: requestedMapFound is FALSE;
+    var boolean: nextMapDeclared is FALSE;
+    var boolean: nextMapFound is FALSE;
+    var string: nextProcPath is "";
+    var string: nextCmPath is "";
+    var boolean: nextProcFound is FALSE;
+    var boolean: nextCmFound is FALSE;
+    var campaignMap: currentMap is campaignMap.value;
+    var campaignMap: nextMap is campaignMap.value;
+    var string: loadState is "boot";
+    var string: clearAction is "none";
+    var string: deathAction is "none";
+    var string: clearTargetMap is "";
+    var string: deathTargetMap is "";
+    var boolean: clearTargetReady is FALSE;
+    var boolean: deathTargetReady is FALSE;
+    var integer: carriedHealth is 0;
+    var integer: carriedAmmo is 0;
+    var integer: checkpointHealth is 0;
+    var integer: checkpointAmmo is 0;
+    var string: campaignPath is "";
+    var string: clearSnapshot is "";
+    var string: deathSnapshot is "";
+    var integer: clearSnapshotChecksum is 0;
+    var integer: deathSnapshotChecksum is 0;
+    var boolean: clearRestoreVerified is FALSE;
+    var boolean: deathRestoreVerified is FALSE;
+    var array string: mapPaths is 0 times "";
+    var array string: mapContents is 0 times "";
+    var array string: procPaths is 0 times "";
+    var array string: cmPaths is 0 times "";
+  end struct;
+
+const proc: logInfo (in string: msg) is func
+  begin
+    writeln("[campaign] " <& msg);
+  end func;
+
+const proc: logError (in string: msg) is func
+  begin
+    writeln("[campaign-error] " <& msg);
+  end func;
+
+const func string: joinPath (in string: leftPath, in string: rightPath) is func
+  result
+    var string: joined is "";
+  begin
+    if leftPath = "" then
+      joined := rightPath;
+    elsif endsWith(leftPath, "/") or endsWith(leftPath, "\\") then
+      joined := leftPath <& rightPath;
+    else
+      joined := leftPath <& "/" <& rightPath;
+    end if;
+  end func;
+
+const func boolean: isPk4Name (in string: fileName) is
+    return endsWith(lower(fileName), ".pk4");
+
+const func string: normalizedAssetPath (in string: filePath) is
+    return replace(lower(filePath), "\\", "/");
+
+const func string: mapNameToAssetPath (in string: mapName) is func
+  result
+    var string: assetPath is "";
+  begin
+    assetPath := normalizedAssetPath(mapName);
+    if not startsWith(assetPath, "maps/") then
+      assetPath := "maps/" <& assetPath;
+    end if;
+    if not endsWith(assetPath, ".map") then
+      assetPath &:= ".map";
+    end if;
+  end func;
+
+const func string: compiledSiblingPath (in string: mapPath,
+    in string: suffix) is func
+  result
+    var string: sibling is "";
+  begin
+    sibling := mapPath[.. pred(pred(pred(pred(length(mapPath)))))] <& suffix;
+  end func;
+
+const func integer: checksumForText (in string: text) is func
+  result
+    var integer: checksum is 0;
+  local
+    var integer: idx is 1;
+  begin
+    while idx <= length(text) do
+      checksum +:= ord(text[idx]);
+      incr(idx);
+    end while;
+  end func;
+
+const func boolean: stringInArray (in array string: values,
+    in string: needle) is func
+  result
+    var boolean: found is FALSE;
+  local
+    var string: value is "";
+  begin
+    for value range values do
+      if value = needle then
+        found := TRUE;
+      end if;
+    end for;
+  end func;
+
+const proc: addMapAsset (inout campaignStats: stats, in string: path,
+    in string: content) is func
+  begin
+    stats.mapAssets +:= 1;
+    if not stringInArray(stats.mapPaths, path) then
+      stats.mapPaths &:= path;
+      stats.mapContents &:= content;
+      stats.uniqueMapAssets +:= 1;
+    end if;
+  end func;
+
+const func string: mapContentForPath (in campaignStats: stats,
+    in string: mapPath) is func
+  result
+    var string: content is "";
+  local
+    var integer: idx is 1;
+  begin
+    while idx <= length(stats.mapPaths) and content = "" do
+      if stats.mapPaths[idx] = mapPath then
+        content := stats.mapContents[idx];
+      end if;
+      incr(idx);
+    end while;
+  end func;
+
+const func string: quotedValueAfter (in string: content, in string: keyName) is func
+  result
+    var string: value is "";
+  local
+    var string: keyText is "";
+    var integer: keyPos is 0;
+    var integer: keyEnd is 0;
+    var integer: valueStart is 0;
+    var integer: valueEnd is 0;
+  begin
+    keyText := "\"" <& keyName <& "\"";
+    keyPos := pos(lower(content), lower(keyText), 1);
+    if keyPos <> 0 then
+      keyEnd := pos(content, "\"", succ(keyPos));
+      if keyEnd <> 0 then
+        valueStart := pos(content, "\"", succ(keyEnd));
+        if valueStart <> 0 then
+          valueEnd := pos(content, "\"", succ(valueStart));
+          if valueEnd <> 0 then
+            value := content[succ(valueStart) .. pred(valueEnd)];
+          end if;
+        end if;
+      end if;
+    end if;
+  end func;
+
+const func integer: matchingBlockEnd (in string: content,
+    in integer: blockStart) is func
+  result
+    var integer: blockEnd is 0;
+  local
+    var integer: idx is 0;
+    var integer: depth is 0;
+  begin
+    if blockStart <> 0 then
+      idx := blockStart;
+      while idx <= length(content) and blockEnd = 0 do
+        if content[idx] = '{' then
+          incr(depth);
+        elsif content[idx] = '}' then
+          decr(depth);
+          if depth = 0 then
+            blockEnd := idx;
+          end if;
+        end if;
+        incr(idx);
+      end while;
+    end if;
+  end func;
+
+const func campaignMap: summarizeMap (in string: mapPath,
+    in string: content) is func
+  result
+    var campaignMap: summary is campaignMap.value;
+  local
+    var integer: searchPos is 1;
+    var integer: blockStart is 0;
+    var integer: blockEnd is 0;
+    var string: blockText is "";
+    var string: className is "";
+    var string: entityName is "";
+    var string: objectiveText is "";
+    var string: nextMap is "";
+  begin
+    summary.mapPath := mapPath;
+    blockStart := pos(content, "{", searchPos);
+    while blockStart <> 0 do
+      blockEnd := matchingBlockEnd(content, blockStart);
+      if blockEnd <> 0 then
+        blockText := content[blockStart .. blockEnd];
+        className := lower(quotedValueAfter(blockText, "classname"));
+        entityName := quotedValueAfter(blockText, "name");
+        objectiveText := quotedValueAfter(blockText, "objective");
+        nextMap := normalizedAssetPath(quotedValueAfter(blockText, "nextmap"));
+        summary.entities +:= 1;
+        if className = "worldspawn" then
+          summary.worldspawns +:= 1;
+          if objectiveText <> "" then
+            summary.objectives +:= 1;
+            if summary.firstObjective = "" then
+              summary.firstObjective := objectiveText;
+            end if;
+          end if;
+          if nextMap <> "" then
+            summary.nextMapRefs +:= 1;
+            if summary.firstNextMap = "" then
+              summary.firstNextMap := nextMap;
+            end if;
+          end if;
+        elsif className = "info_player_start" then
+          summary.playerStarts +:= 1;
+          if summary.firstPlayerStart = "" then
+            summary.firstPlayerStart := entityName;
+          end if;
+        elsif startsWith(className, "monster_") then
+          summary.monsters +:= 1;
+        elsif className = "func_door" then
+          summary.doors +:= 1;
+        elsif startsWith(className, "trigger_") then
+          summary.triggers +:= 1;
+        end if;
+        searchPos := succ(blockEnd);
+      else
+        searchPos := succ(blockStart);
+      end if;
+      blockStart := pos(content, "{", searchPos);
+    end while;
+  end func;
+
+const proc: deriveCampaignFlow (inout campaignStats: stats) is func
+  local
+    var string: currentContent is "";
+    var string: nextContent is "";
+  begin
+    currentContent := mapContentForPath(stats, stats.requestedMapPath);
+    stats.requestedMapFound := currentContent <> "";
+    if stats.requestedMapFound then
+      stats.currentMap := summarizeMap(stats.requestedMapPath, currentContent);
+      if stats.currentMap.firstNextMap <> "" then
+        stats.nextMapDeclared := TRUE;
+        stats.nextMapPath := mapNameToAssetPath(stats.currentMap.firstNextMap);
+        stats.nextProcPath := compiledSiblingPath(stats.nextMapPath, ".proc");
+        stats.nextCmPath := compiledSiblingPath(stats.nextMapPath, ".cm");
+        stats.nextProcFound := stringInArray(stats.procPaths,
+            stats.nextProcPath);
+        stats.nextCmFound := stringInArray(stats.cmPaths, stats.nextCmPath);
+        nextContent := mapContentForPath(stats, stats.nextMapPath);
+        stats.nextMapFound := nextContent <> "";
+        if stats.nextMapFound then
+          stats.nextMap := summarizeMap(stats.nextMapPath, nextContent);
+        end if;
+      end if;
+    end if;
+
+    if stats.requestedMapFound and stats.currentMap.playerStarts <> 0 then
+      stats.loadState := "current_loaded";
+      stats.deathAction := "restart_current";
+      stats.deathTargetMap := stats.requestedMapPath;
+      stats.deathTargetReady := TRUE;
+      stats.checkpointHealth := 100;
+      stats.checkpointAmmo := 0;
+    else
+      stats.loadState := "blocked";
+    end if;
+
+    if stats.requestedMapFound and stats.currentMap.objectives <> 0 and
+        stats.currentMap.monsters <> 0 and stats.nextMapDeclared and
+        stats.nextMapFound and stats.nextMap.playerStarts <> 0 and
+        stats.nextProcFound and stats.nextCmFound then
+      stats.clearAction := "load_next";
+      stats.clearTargetMap := stats.nextMapPath;
+      stats.clearTargetReady := TRUE;
+      stats.carriedHealth := 75;
+      stats.carriedAmmo := 6;
+    else
+      stats.clearAction := "blocked";
+      stats.clearTargetMap := stats.nextMapPath;
+      stats.clearTargetReady := FALSE;
+    end if;
+
+    stats.campaignPath := "boot>load_current";
+    if stats.clearTargetReady then
+      stats.campaignPath &:= ">run_current>clear>autosave>load_next>spawn_next";
+    end if;
+    if stats.deathTargetReady then
+      stats.campaignPath &:= "|death>checkpoint>restart_current>spawn_current";
+    end if;
+
+    stats.clearSnapshot := "slot=autosave0;version=" <& CAMPAIGN_SAVE_VERSION <&
+        ";map=" <& stats.requestedMapPath <&
+        ";terminal=clear;post_action=" <& stats.clearAction <&
+        ";post_map=" <& stats.clearTargetMap <&
+        ";post_player_start=" <& stats.nextMap.firstPlayerStart <&
+        ";health=" <& stats.carriedHealth <&
+        ";ammo=" <& stats.carriedAmmo;
+    stats.deathSnapshot := "slot=checkpoint0;version=" <& CAMPAIGN_SAVE_VERSION <&
+        ";map=" <& stats.requestedMapPath <&
+        ";terminal=dead;post_action=" <& stats.deathAction <&
+        ";post_map=" <& stats.deathTargetMap <&
+        ";post_player_start=" <& stats.currentMap.firstPlayerStart <&
+        ";health=" <& stats.checkpointHealth <&
+        ";ammo=" <& stats.checkpointAmmo;
+    stats.clearSnapshotChecksum := checksumForText(stats.clearSnapshot);
+    stats.deathSnapshotChecksum := checksumForText(stats.deathSnapshot);
+    stats.clearRestoreVerified := stats.clearTargetReady and
+        stats.clearAction = "load_next" and
+        stats.clearTargetMap = stats.nextMapPath and
+        stats.nextMap.firstPlayerStart <> "" and
+        stats.clearSnapshotChecksum = checksumForText(stats.clearSnapshot);
+    stats.deathRestoreVerified := stats.deathTargetReady and
+        stats.deathAction = "restart_current" and
+        stats.deathTargetMap = stats.requestedMapPath and
+        stats.currentMap.firstPlayerStart <> "" and
+        stats.deathSnapshotChecksum = checksumForText(stats.deathSnapshot);
+  end func;
+
+const func array string: findPk4Archives (in string: basePath) is func
+  result
+    var array string: pk4Files is 0 times "";
+  local
+    var array string: names is 0 times "";
+    var string: name is "";
+  begin
+    if fileType(basePath) = FILE_DIR then
+      names := readDir(basePath);
+      for name range names do
+        if isPk4Name(name) and fileType(joinPath(basePath, name)) = FILE_REGULAR then
+          pk4Files &:= joinPath(basePath, name);
+        end if;
+      end for;
+    end if;
+  end func;
+
+const proc: scanArchive (inout campaignStats: stats, in string: pk4File) is func
+  local
+    var fileSys: zipFs is fileSys.value;
+    var array string: paths is 0 times "";
+    var string: path is "";
+    var string: pathLower is "";
+  begin
+    zipFs := openZip(pk4File);
+    if zipFs = fileSys.value then
+      logError("could not open pk4 archive: " <& pk4File);
+    else
+      paths := readDir(zipFs, RECURSIVE);
+      for path range paths do
+        pathLower := normalizedAssetPath(path);
+        if startsWith(pathLower, "maps/") and endsWith(pathLower, ".map") then
+          addMapAsset(stats, pathLower, getFile(zipFs, path));
+        elsif startsWith(pathLower, "maps/") and endsWith(pathLower, ".proc") then
+          if not stringInArray(stats.procPaths, pathLower) then
+            stats.procPaths &:= pathLower;
+          end if;
+        elsif startsWith(pathLower, "maps/") and endsWith(pathLower, ".cm") then
+          if not stringInArray(stats.cmPaths, pathLower) then
+            stats.cmPaths &:= pathLower;
+          end if;
+        end if;
+      end for;
+      close(zipFs);
+    end if;
+  end func;
+
+const proc: parseArgs (inout campaignConfig: config) is func
+  local
+    var array string: args is 0 times "";
+    var integer: argIdx is 1;
+  begin
+    args := argv(PROGRAM);
+    while argIdx <= length(args) do
+      if args[argIdx] = "--help" or args[argIdx] = "-h" then
+        config.showHelp := TRUE;
+      elsif args[argIdx] = "--doom3_data_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.dataPath := convDosPath(args[argIdx]);
+      elsif args[argIdx] = "--doom3_base_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.basePath := convDosPath(args[argIdx]);
+      elsif args[argIdx] = "--doom3_start_map" and argIdx < length(args) then
+        incr(argIdx);
+        config.startMap := args[argIdx];
+      elsif args[argIdx] = "+map" and argIdx < length(args) then
+        incr(argIdx);
+        config.startMap := args[argIdx];
+      elsif args[argIdx] = "+set" and argIdx + 2 <= length(args) then
+        if args[argIdx + 1] = "fs_basepath" then
+          config.dataPath := convDosPath(args[argIdx + 2]);
+        elsif args[argIdx + 1] = "fs_game" then
+          config.basePath := convDosPath(args[argIdx + 2]);
+        end if;
+        argIdx +:= 2;
+      end if;
+      incr(argIdx);
+    end while;
+    if config.basePath = "" then
+      config.basePath := joinPath(config.dataPath, DEFAULT_BASE_DIR);
+    end if;
+  end func;
+
+const proc: showUsage is func
+  begin
+    writeln("Usage:");
+    writeln("  s7 doom3_seed7_campaign.s7 --doom3_data_path <doom3-root>");
+    writeln("  s7 doom3_seed7_campaign.s7 +set fs_basepath <doom3-root> +map <map>");
+    writeln("");
+    writeln("Scans user-owned Doom 3 pk4 files for campaign load/restart flow readiness.");
+  end func;
+
+const proc: printStats (in campaignStats: stats) is func
+  begin
+    logInfo("pk4_archives=" <& stats.pk4Archives);
+    logInfo("map_catalog assets=" <& stats.mapAssets <& " unique=" <&
+        stats.uniqueMapAssets);
+    logInfo("requested_map=" <& stats.requestedMapPath);
+    logInfo("requested_map_found=" <& stats.requestedMapFound);
+    logInfo("current_map entities=" <& stats.currentMap.entities <&
+        " player_start=" <& stats.currentMap.playerStarts <&
+        " objectives=" <& stats.currentMap.objectives <&
+        " monsters=" <& stats.currentMap.monsters <&
+        " doors=" <& stats.currentMap.doors <&
+        " triggers=" <& stats.currentMap.triggers);
+    logInfo("next_map declared=" <& stats.nextMapDeclared <&
+        " path=" <& stats.nextMapPath <&
+        " found=" <& stats.nextMapFound <&
+        " player_start=" <& stats.nextMap.playerStarts);
+    logInfo("campaign_compiled_next proc=" <&
+        stats.nextProcFound <& " cm=" <& stats.nextCmFound <&
+        " proc_path=" <& stats.nextProcPath <&
+        " cm_path=" <& stats.nextCmPath);
+    logInfo("campaign_load state=" <& stats.loadState <&
+        " first_player_start=" <& stats.currentMap.firstPlayerStart);
+    logInfo("campaign_clear action=" <& stats.clearAction <&
+        " target=" <& stats.clearTargetMap <&
+        " target_ready=" <& stats.clearTargetReady <&
+        " carry_health=" <& stats.carriedHealth <&
+        " carry_ammo=" <& stats.carriedAmmo);
+    logInfo("campaign_death action=" <& stats.deathAction <&
+        " target=" <& stats.deathTargetMap <&
+        " target_ready=" <& stats.deathTargetReady <&
+        " checkpoint_health=" <& stats.checkpointHealth <&
+        " checkpoint_ammo=" <& stats.checkpointAmmo);
+    logInfo("campaign_path=" <& stats.campaignPath);
+    logInfo("campaign_clear_snapshot bytes=" <& length(stats.clearSnapshot) <&
+        " checksum=" <& stats.clearSnapshotChecksum);
+    logInfo("campaign_death_snapshot bytes=" <& length(stats.deathSnapshot) <&
+        " checksum=" <& stats.deathSnapshotChecksum);
+    logInfo("campaign_restore clear=" <& stats.clearRestoreVerified <&
+        " death=" <& stats.deathRestoreVerified);
+    if stats.currentMap.firstObjective <> "" then
+      logInfo("first_campaign_objective=" <& stats.currentMap.firstObjective);
+    end if;
+    if stats.nextMap.firstPlayerStart <> "" then
+      logInfo("first_campaign_next_player_start=" <&
+          stats.nextMap.firstPlayerStart);
+    end if;
+    if stats.clearSnapshot <> "" then
+      logInfo("first_campaign_clear_snapshot=" <& stats.clearSnapshot);
+    end if;
+    if stats.deathSnapshot <> "" then
+      logInfo("first_campaign_death_snapshot=" <& stats.deathSnapshot);
+    end if;
+    logInfo("campaign_probe_ready=" <& (stats.pk4Archives <> 0 and
+        stats.requestedMapFound and stats.currentMap.playerStarts <> 0 and
+        stats.clearTargetReady and stats.deathTargetReady and
+        stats.clearRestoreVerified and stats.deathRestoreVerified));
+  end func;
+
+const proc: main is func
+  local
+    var campaignConfig: config is campaignConfig.value;
+    var campaignStats: stats is campaignStats.value;
+    var array string: pk4Files is 0 times "";
+    var string: pk4File is "";
+  begin
+    parseArgs(config);
+    if config.showHelp then
+      showUsage;
+    else
+      stats.requestedMapPath := mapNameToAssetPath(config.startMap);
+      if fileType(config.basePath) <> FILE_DIR then
+        logError("Doom 3 base directory not found: " <& config.basePath);
+      else
+        pk4Files := sort(findPk4Archives(config.basePath));
+        stats.pk4Archives := length(pk4Files);
+        if length(pk4Files) = 0 then
+          logError("No .pk4 archives found in: " <& config.basePath);
+        else
+          for pk4File range pk4Files do
+            scanArchive(stats, pk4File);
+          end for;
+          deriveCampaignFlow(stats);
+          printStats(stats);
+        end if;
+      end if;
+    end if;
+  end func;

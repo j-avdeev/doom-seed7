@@ -1,0 +1,754 @@
+(********************************************************************)
+(*  doom3_seed7_lighting.s7                                        *)
+(*                                                                  *)
+(*  Focused Doom 3 / id Tech 4 lighting and shadow-readiness probe  *)
+(*  for Seed7. It reads user-owned pk4 archives, binds selected-map *)
+(*  light entities to material-tagged map surfaces, and reports the *)
+(*  first shadow-caster/suppressed-shadow contract for the renderer. *)
+(********************************************************************)
+
+$ include "seed7_05.s7i";
+$ include "osfiles.s7i";
+$ include "zip.s7i";
+
+const string: DEFAULT_DATA_PATH is ".";
+const string: DEFAULT_BASE_DIR is "base";
+const string: DEFAULT_START_MAP is "game/mars_city1";
+
+const type: lightingConfig is new struct
+    var string: dataPath is DEFAULT_DATA_PATH;
+    var string: basePath is "";
+    var string: startMap is DEFAULT_START_MAP;
+    var boolean: showHelp is FALSE;
+  end struct;
+
+const type: lightRec is new struct
+    var string: name is "";
+    var float: x is 0.0;
+    var float: y is 0.0;
+    var float: radius is 0.0;
+    var string: colorText is "";
+    var boolean: hasOrigin is FALSE;
+    var boolean: hasRadius is FALSE;
+    var boolean: hasColor is FALSE;
+  end struct;
+
+const type: surfaceRec is new struct
+    var string: materialName is "";
+    var float: x is 0.0;
+    var float: y is 0.0;
+    var boolean: complete is FALSE;
+    var boolean: isPatch is FALSE;
+  end struct;
+
+const type: lightingStats is new struct
+    var integer: pk4Archives is 0;
+    var string: requestedMapPath is "";
+    var boolean: requestedMapFound is FALSE;
+    var integer: materialFiles is 0;
+    var integer: materialDecls is 0;
+    var integer: mapEntities is 0;
+    var integer: lights is 0;
+    var integer: lightsWithRadius is 0;
+    var integer: lightsWithColor is 0;
+    var integer: surfaces is 0;
+    var integer: brushSurfaces is 0;
+    var integer: patchSurfaces is 0;
+    var integer: litSurfaces is 0;
+    var integer: shadowCasters is 0;
+    var integer: shadowSuppressed is 0;
+    var integer: shadowVolumesPlanned is 0;
+    var integer: shadowFallbacks is 0;
+    var integer: noShadowMaterials is 0;
+    var integer: translucentMaterials is 0;
+    var integer: nonsolidMaterials is 0;
+    var integer: twoSidedMaterials is 0;
+    var integer: shadowCastingMaterials is 0;
+    var string: firstLightName is "";
+    var string: firstLightOrigin is "";
+    var string: firstLightRadius is "";
+    var string: firstLightColor is "";
+    var string: firstMaterial is "";
+    var string: firstShadowCaster is "";
+    var string: firstShadowSuppressed is "";
+    var string: firstShadowPlan is "";
+    var array string: materialNames is 0 times "";
+    var array boolean: materialNoShadows is 0 times FALSE;
+    var array boolean: materialTranslucent is 0 times FALSE;
+    var array boolean: materialNonsolid is 0 times FALSE;
+    var array boolean: materialTwoSided is 0 times FALSE;
+    var array lightRec: lightRecords is 0 times lightRec.value;
+    var array surfaceRec: surfaceRecords is 0 times surfaceRec.value;
+  end struct;
+
+const proc: logInfo (in string: msg) is func
+  begin
+    writeln("[lighting] " <& msg);
+  end func;
+
+const proc: logError (in string: msg) is func
+  begin
+    writeln("[lighting-error] " <& msg);
+  end func;
+
+const func string: joinPath (in string: leftPath, in string: rightPath) is func
+  result
+    var string: joined is "";
+  begin
+    if leftPath = "" then
+      joined := rightPath;
+    elsif endsWith(leftPath, "/") or endsWith(leftPath, "\\") then
+      joined := leftPath <& rightPath;
+    else
+      joined := leftPath <& "/" <& rightPath;
+    end if;
+  end func;
+
+const func boolean: isPk4Name (in string: fileName) is
+    return endsWith(lower(fileName), ".pk4");
+
+const func string: normalizedAssetPath (in string: filePath) is
+    return replace(lower(filePath), "\\", "/");
+
+const func string: mapNameToAssetPath (in string: mapName) is func
+  result
+    var string: assetPath is "";
+  begin
+    assetPath := normalizedAssetPath(mapName);
+    if not startsWith(assetPath, "maps/") then
+      assetPath := "maps/" <& assetPath;
+    end if;
+    if not endsWith(assetPath, ".map") then
+      assetPath &:= ".map";
+    end if;
+  end func;
+
+const func string: cleanedToken (in string: token) is func
+  result
+    var string: clean is "";
+  local
+    var integer: idx is 1;
+    var char: ch is ' ';
+  begin
+    clean := trim(token);
+    while idx <= length(clean) do
+      ch := clean[idx];
+      if ch = '"' or ch = '(' or ch = ')' or ch = '{' or ch = '}' or
+          ch = ',' or ch = ';' then
+        clean := clean[.. pred(idx)] & clean[succ(idx) ..];
+      else
+        incr(idx);
+      end if;
+    end while;
+  end func;
+
+const func integer: indexOfString (in array string: values,
+    in string: value) is func
+  result
+    var integer: foundIndex is 0;
+  local
+    var integer: idx is 1;
+  begin
+    while idx <= length(values) and foundIndex = 0 do
+      if values[idx] = value then
+        foundIndex := idx;
+      end if;
+      incr(idx);
+    end while;
+  end func;
+
+const func integer: matchingBlockEnd (in string: content,
+    in integer: blockStart) is func
+  result
+    var integer: blockEnd is 0;
+  local
+    var integer: idx is 0;
+    var integer: depth is 0;
+  begin
+    if blockStart <> 0 then
+      idx := blockStart;
+      while idx <= length(content) and blockEnd = 0 do
+        if content[idx] = '{' then
+          incr(depth);
+        elsif content[idx] = '}' then
+          decr(depth);
+          if depth = 0 then
+            blockEnd := idx;
+          end if;
+        end if;
+        incr(idx);
+      end while;
+    end if;
+  end func;
+
+const func integer: previousCharPos (in string: content, in char: needle,
+    in integer: startPos) is func
+  result
+    var integer: foundPos is 0;
+  local
+    var integer: idx is 0;
+  begin
+    idx := startPos;
+    while idx >= 1 and foundPos = 0 do
+      if content[idx] = needle then
+        foundPos := idx;
+      end if;
+      decr(idx);
+    end while;
+  end func;
+
+const func string: declNameBeforeBlock (in string: content,
+    in integer: blockStart) is func
+  result
+    var string: declName is "";
+  local
+    var integer: idx is 0;
+    var integer: endPos is 0;
+    var integer: startPos is 0;
+  begin
+    idx := pred(blockStart);
+    while idx >= 1 and
+        (content[idx] = ' ' or content[idx] = '\t' or
+        content[idx] = '\n' or content[idx] = '\r') do
+      decr(idx);
+    end while;
+    endPos := idx;
+    while idx >= 1 and content[idx] <> ' ' and content[idx] <> '\t' and
+        content[idx] <> '\n' and content[idx] <> '\r' and
+        content[idx] <> '}' do
+      decr(idx);
+    end while;
+    startPos := succ(idx);
+    if startPos <= endPos then
+      declName := lower(cleanedToken(content[startPos .. endPos]));
+    end if;
+  end func;
+
+const func string: quotedValueAfter (in string: content,
+    in string: keyName) is func
+  result
+    var string: value is "";
+  local
+    var string: keyText is "";
+    var integer: keyPos is 0;
+    var integer: keyEnd is 0;
+    var integer: valueStart is 0;
+    var integer: valueEnd is 0;
+  begin
+    keyText := "\"" <& keyName <& "\"";
+    keyPos := pos(lower(content), lower(keyText), 1);
+    if keyPos <> 0 then
+      keyEnd := pos(content, "\"", succ(keyPos));
+      if keyEnd <> 0 then
+        valueStart := pos(content, "\"", succ(keyEnd));
+        if valueStart <> 0 then
+          valueEnd := pos(content, "\"", succ(valueStart));
+          if valueEnd <> 0 then
+            value := content[succ(valueStart) .. pred(valueEnd)];
+          end if;
+        end if;
+      end if;
+    end if;
+  end func;
+
+const func float: vectorComponentOrDefault (
+    in string: vectorText, in integer: componentIndex,
+    in float: defaultValue) is func
+  result
+    var float: component is 0.0;
+  local
+    var array string: parts is 0 times "";
+  begin
+    component := defaultValue;
+    parts := noEmptyStrings(split(vectorText, ' '));
+    if length(parts) >= componentIndex then
+      block
+        component := float(parts[componentIndex]);
+      exception
+        catch RANGE_ERROR:
+          component := defaultValue;
+      end block;
+    end if;
+  end func;
+
+const func string: firstMaterialToken (in string: content) is func
+  result
+    var string: materialName is "";
+  local
+    var string: normalized is "";
+    var array string: tokens is 0 times "";
+    var string: token is "";
+  begin
+    normalized := replace(content, "\n", " ");
+    normalized := replace(normalized, "\r", " ");
+    normalized := replace(normalized, "\t", " ");
+    tokens := noEmptyStrings(split(normalized, ' '));
+    for token range tokens do
+      token := lower(cleanedToken(token));
+      if materialName = "" and startsWith(token, "textures/") then
+        materialName := token;
+      end if;
+    end for;
+  end func;
+
+const proc: inspectMaterialContent (inout lightingStats: stats,
+    in string: content) is func
+  local
+    var integer: searchPos is 1;
+    var integer: blockStart is 0;
+    var integer: blockEnd is 0;
+    var string: materialName is "";
+    var string: blockLower is "";
+    var boolean: noShadows is FALSE;
+    var boolean: translucent is FALSE;
+    var boolean: nonsolid is FALSE;
+    var boolean: twoSided is FALSE;
+    var integer: existingIndex is 0;
+  begin
+    blockStart := pos(content, "{", searchPos);
+    while blockStart <> 0 do
+      materialName := declNameBeforeBlock(content, blockStart);
+      blockEnd := matchingBlockEnd(content, blockStart);
+      if materialName <> "" and blockEnd <> 0 then
+        stats.materialDecls +:= 1;
+        blockLower := lower(content[blockStart .. blockEnd]);
+        noShadows := pos(blockLower, "noshadows", 1) <> 0;
+        translucent := pos(blockLower, "translucent", 1) <> 0;
+        nonsolid := pos(blockLower, "nonsolid", 1) <> 0;
+        twoSided := pos(blockLower, "twosided", 1) <> 0;
+        existingIndex := indexOfString(stats.materialNames, materialName);
+        if existingIndex = 0 then
+          stats.materialNames &:= materialName;
+          stats.materialNoShadows &:= noShadows;
+          stats.materialTranslucent &:= translucent;
+          stats.materialNonsolid &:= nonsolid;
+          stats.materialTwoSided &:= twoSided;
+          if stats.firstMaterial = "" then
+            stats.firstMaterial := materialName;
+          end if;
+          if noShadows then stats.noShadowMaterials +:= 1; end if;
+          if translucent then stats.translucentMaterials +:= 1; end if;
+          if nonsolid then stats.nonsolidMaterials +:= 1; end if;
+          if twoSided then stats.twoSidedMaterials +:= 1; end if;
+          if not noShadows and not translucent and not nonsolid then
+            stats.shadowCastingMaterials +:= 1;
+          end if;
+        else
+          stats.materialNoShadows[existingIndex] := noShadows;
+          stats.materialTranslucent[existingIndex] := translucent;
+          stats.materialNonsolid[existingIndex] := nonsolid;
+          stats.materialTwoSided[existingIndex] := twoSided;
+        end if;
+      end if;
+      if blockEnd <> 0 then
+        searchPos := succ(blockEnd);
+      else
+        searchPos := succ(blockStart);
+      end if;
+      blockStart := pos(content, "{", searchPos);
+    end while;
+  end func;
+
+const proc: addSurface (inout lightingStats: stats,
+    in string: materialName, in boolean: isPatch) is func
+  local
+    var surfaceRec: surface is surfaceRec.value;
+  begin
+    if materialName <> "" then
+      surface.materialName := materialName;
+      surface.x := 64.0 + float(length(stats.surfaceRecords)) * 32.0;
+      surface.y := 0.0;
+      surface.complete := TRUE;
+      surface.isPatch := isPatch;
+      stats.surfaceRecords &:= surface;
+      stats.surfaces +:= 1;
+      if isPatch then
+        stats.patchSurfaces +:= 1;
+      else
+        stats.brushSurfaces +:= 1;
+      end if;
+    end if;
+  end func;
+
+const proc: inspectBrushSurfaces (inout lightingStats: stats,
+    in string: content) is func
+  local
+    var string: contentLower is "";
+    var integer: searchPos is 1;
+    var integer: brushPos is 0;
+    var integer: blockStart is 0;
+    var integer: blockEnd is 0;
+  begin
+    contentLower := lower(content);
+    brushPos := pos(contentLower, "brushdef3", searchPos);
+    while brushPos <> 0 do
+      blockStart := pos(content, "{", brushPos);
+      blockEnd := matchingBlockEnd(content, blockStart);
+      if blockStart <> 0 and blockEnd <> 0 then
+        addSurface(stats, firstMaterialToken(content[blockStart .. blockEnd]),
+            FALSE);
+      end if;
+      searchPos := brushPos + length("brushdef3");
+      brushPos := pos(contentLower, "brushdef3", searchPos);
+    end while;
+  end func;
+
+const proc: inspectPatchSurfaces (inout lightingStats: stats,
+    in string: content) is func
+  local
+    var string: contentLower is "";
+    var integer: searchPos is 1;
+    var integer: patchPos2 is 0;
+    var integer: patchPos3 is 0;
+    var integer: patchPos is 0;
+    var integer: blockStart is 0;
+    var integer: blockEnd is 0;
+  begin
+    contentLower := lower(content);
+    patchPos2 := pos(contentLower, "patchdef2", searchPos);
+    patchPos3 := pos(contentLower, "patchdef3", searchPos);
+    while patchPos2 <> 0 or patchPos3 <> 0 do
+      if patchPos2 = 0 then
+        patchPos := patchPos3;
+      elsif patchPos3 = 0 then
+        patchPos := patchPos2;
+      elsif patchPos2 < patchPos3 then
+        patchPos := patchPos2;
+      else
+        patchPos := patchPos3;
+      end if;
+      blockStart := pos(content, "{", patchPos);
+      blockEnd := matchingBlockEnd(content, blockStart);
+      if blockStart <> 0 and blockEnd <> 0 then
+        addSurface(stats, firstMaterialToken(content[blockStart .. blockEnd]),
+            TRUE);
+      end if;
+      searchPos := patchPos + length("patchdef2");
+      patchPos2 := pos(contentLower, "patchdef2", searchPos);
+      patchPos3 := pos(contentLower, "patchdef3", searchPos);
+    end while;
+  end func;
+
+const proc: inspectLightEntity (inout lightingStats: stats,
+    in string: entityBlock) is func
+  local
+    var lightRec: light is lightRec.value;
+    var string: originText is "";
+    var string: radiusText is "";
+  begin
+    stats.lights +:= 1;
+    light.name := quotedValueAfter(entityBlock, "name");
+    originText := quotedValueAfter(entityBlock, "origin");
+    if originText <> "" then
+      light.hasOrigin := TRUE;
+      light.x := vectorComponentOrDefault(originText, 1, 0.0);
+      light.y := vectorComponentOrDefault(originText, 2, 0.0);
+      if stats.firstLightOrigin = "" then
+        stats.firstLightOrigin := originText;
+      end if;
+    end if;
+    radiusText := quotedValueAfter(entityBlock, "light_radius");
+    if radiusText <> "" then
+      light.hasRadius := TRUE;
+      light.radius := vectorComponentOrDefault(radiusText, 1, 0.0);
+      stats.lightsWithRadius +:= 1;
+      if stats.firstLightRadius = "" then
+        stats.firstLightRadius := radiusText;
+      end if;
+    end if;
+    light.colorText := quotedValueAfter(entityBlock, "_color");
+    if light.colorText <> "" then
+      light.hasColor := TRUE;
+      stats.lightsWithColor +:= 1;
+      if stats.firstLightColor = "" then
+        stats.firstLightColor := light.colorText;
+      end if;
+    end if;
+    if stats.firstLightName = "" then
+      stats.firstLightName := light.name;
+    end if;
+    stats.lightRecords &:= light;
+  end func;
+
+const proc: inspectMapContent (inout lightingStats: stats,
+    in string: content) is func
+  local
+    var integer: searchPos is 1;
+    var integer: classPos is 0;
+    var integer: blockStart is 0;
+    var integer: blockEnd is 0;
+    var string: blockText is "";
+  begin
+    inspectBrushSurfaces(stats, content);
+    inspectPatchSurfaces(stats, content);
+    classPos := pos(lower(content), "\"classname\"", searchPos);
+    while classPos <> 0 do
+      blockStart := previousCharPos(content, '{', classPos);
+      blockEnd := matchingBlockEnd(content, blockStart);
+      if blockStart <> 0 and blockEnd <> 0 then
+        stats.mapEntities +:= 1;
+        blockText := content[blockStart .. blockEnd];
+        if lower(quotedValueAfter(blockText, "classname")) = "light" then
+          inspectLightEntity(stats, blockText);
+        end if;
+      end if;
+      searchPos := classPos + length("\"classname\"");
+      classPos := pos(lower(content), "\"classname\"", searchPos);
+    end while;
+  end func;
+
+const func boolean: materialCastsShadow (in lightingStats: stats,
+    in string: materialName) is func
+  result
+    var boolean: castsShadow is TRUE;
+  local
+    var integer: materialIndex is 0;
+  begin
+    materialIndex := indexOfString(stats.materialNames, materialName);
+    if materialIndex <> 0 then
+      castsShadow := not stats.materialNoShadows[materialIndex] and
+          not stats.materialTranslucent[materialIndex] and
+          not stats.materialNonsolid[materialIndex];
+    end if;
+  end func;
+
+const func string: shadowSuppressionReason (in lightingStats: stats,
+    in string: materialName) is func
+  result
+    var string: reason is "";
+  local
+    var integer: materialIndex is 0;
+  begin
+    materialIndex := indexOfString(stats.materialNames, materialName);
+    if materialIndex = 0 then
+      reason := "missing_material";
+    elsif stats.materialNoShadows[materialIndex] then
+      reason := "noshadows";
+    elsif stats.materialTranslucent[materialIndex] then
+      reason := "translucent";
+    elsif stats.materialNonsolid[materialIndex] then
+      reason := "nonsolid";
+    else
+      reason := "casts";
+    end if;
+  end func;
+
+const proc: solveLighting (inout lightingStats: stats) is func
+  local
+    var lightRec: light is lightRec.value;
+    var surfaceRec: surface is surfaceRec.value;
+    var float: dx is 0.0;
+    var float: dy is 0.0;
+    var boolean: lit is FALSE;
+    var string: reason is "";
+  begin
+    for surface range stats.surfaceRecords do
+      lit := FALSE;
+      for light range stats.lightRecords do
+        if not lit and light.hasOrigin and light.hasRadius then
+          dx := surface.x - light.x;
+          dy := surface.y - light.y;
+          lit := dx * dx + dy * dy <= light.radius * light.radius;
+        end if;
+      end for;
+      if lit then
+        stats.litSurfaces +:= 1;
+        if materialCastsShadow(stats, surface.materialName) then
+          stats.shadowCasters +:= 1;
+          stats.shadowVolumesPlanned +:= 1;
+          if stats.firstShadowCaster = "" then
+            stats.firstShadowCaster := surface.materialName;
+          end if;
+        else
+          stats.shadowSuppressed +:= 1;
+          reason := shadowSuppressionReason(stats, surface.materialName);
+          if stats.firstShadowSuppressed = "" then
+            stats.firstShadowSuppressed := surface.materialName <& ":" <& reason;
+          end if;
+        end if;
+      end if;
+    end for;
+    if stats.shadowVolumesPlanned <> 0 then
+      stats.shadowFallbacks := stats.shadowVolumesPlanned;
+      stats.firstShadowPlan := "light=" <& stats.firstLightName <&
+          ";caster=" <& stats.firstShadowCaster <&
+          ";mode=volume-fallback";
+    end if;
+  end func;
+
+const proc: scanArchive (inout lightingStats: stats,
+    in string: pk4File) is func
+  local
+    var fileSys: zipFs is fileSys.value;
+    var array string: paths is 0 times "";
+    var string: path is "";
+    var string: pathLower is "";
+  begin
+    zipFs := openZip(pk4File);
+    if zipFs = fileSys.value then
+      logError("could not open pk4 archive: " <& pk4File);
+    else
+      paths := readDir(zipFs, RECURSIVE);
+      for path range paths do
+        pathLower := normalizedAssetPath(path);
+        if endsWith(pathLower, ".mtr") then
+          stats.materialFiles +:= 1;
+          inspectMaterialContent(stats, getFile(zipFs, path));
+        end if;
+      end for;
+      for path range paths do
+        pathLower := normalizedAssetPath(path);
+        if pathLower = stats.requestedMapPath then
+          stats.requestedMapFound := TRUE;
+          inspectMapContent(stats, getFile(zipFs, path));
+        end if;
+      end for;
+      close(zipFs);
+    end if;
+  end func;
+
+const func array string: findPk4Archives (in string: basePath) is func
+  result
+    var array string: pk4Files is 0 times "";
+  local
+    var array string: names is 0 times "";
+    var string: name is "";
+  begin
+    if fileType(basePath) = FILE_DIR then
+      names := readDir(basePath);
+      for name range names do
+        if isPk4Name(name) and fileType(joinPath(basePath, name)) = FILE_REGULAR then
+          pk4Files &:= joinPath(basePath, name);
+        end if;
+      end for;
+    end if;
+  end func;
+
+const proc: sortStrings (inout array string: values) is func
+  local
+    var integer: leftIdx is 1;
+    var integer: rightIdx is 1;
+    var string: temp is "";
+  begin
+    for leftIdx range 1 to length(values) do
+      for rightIdx range succ(leftIdx) to length(values) do
+        if values[rightIdx] < values[leftIdx] then
+          temp := values[leftIdx];
+          values[leftIdx] := values[rightIdx];
+          values[rightIdx] := temp;
+        end if;
+      end for;
+    end for;
+  end func;
+
+const proc: parseArgs (inout lightingConfig: config) is func
+  local
+    var integer: idx is 1;
+    var string: arg is "";
+  begin
+    while idx <= length(argv(PROGRAM)) do
+      arg := argv(PROGRAM)[idx];
+      if arg = "--help" or arg = "-h" then
+        config.showHelp := TRUE;
+      elsif arg = "--doom3_data_path" and idx < length(argv(PROGRAM)) then
+        config.dataPath := convDosPath(argv(PROGRAM)[succ(idx)]);
+        incr(idx);
+      elsif arg = "--doom3_base_path" and idx < length(argv(PROGRAM)) then
+        config.basePath := convDosPath(argv(PROGRAM)[succ(idx)]);
+        incr(idx);
+      elsif arg = "--doom3_start_map" and idx < length(argv(PROGRAM)) then
+        config.startMap := argv(PROGRAM)[succ(idx)];
+        incr(idx);
+      elsif arg = "+map" and idx < length(argv(PROGRAM)) then
+        config.startMap := argv(PROGRAM)[succ(idx)];
+        incr(idx);
+      elsif arg = "+set" and idx + 2 <= length(argv(PROGRAM)) then
+        if argv(PROGRAM)[succ(idx)] = "fs_basepath" then
+          config.dataPath := convDosPath(argv(PROGRAM)[idx + 2]);
+        elsif argv(PROGRAM)[succ(idx)] = "fs_game" then
+          config.basePath := convDosPath(argv(PROGRAM)[idx + 2]);
+        end if;
+        idx +:= 2;
+      end if;
+      incr(idx);
+    end while;
+    if config.basePath = "" then
+      config.basePath := joinPath(config.dataPath, DEFAULT_BASE_DIR);
+    end if;
+  end func;
+
+const proc: showUsage is func
+  begin
+    writeln("Usage:");
+    writeln("  s7 doom3_seed7_lighting.s7 --doom3_data_path <doom3-root>");
+    writeln("  s7 doom3_seed7_lighting.s7 +set fs_basepath <doom3-root> +map <map>");
+    writeln;
+    writeln("Scans user-owned Doom 3 pk4 files for lighting/shadow readiness.");
+  end func;
+
+const proc: printStats (in lightingStats: stats) is func
+  begin
+    logInfo("pk4_archives=" <& stats.pk4Archives);
+    logInfo("requested_map=" <& stats.requestedMapPath);
+    logInfo("requested_map_found=" <& stats.requestedMapFound);
+    logInfo("lighting_materials total=" <& length(stats.materialNames) <&
+        " shadow_casting=" <& stats.shadowCastingMaterials <&
+        " noshadows=" <& stats.noShadowMaterials <&
+        " translucent=" <& stats.translucentMaterials <&
+        " nonsolid=" <& stats.nonsolidMaterials <&
+        " twosided=" <& stats.twoSidedMaterials);
+    logInfo("lighting_map entities=" <& stats.mapEntities <&
+        " lights=" <& stats.lights <& " radius=" <&
+        stats.lightsWithRadius <& " color=" <& stats.lightsWithColor <&
+        " surfaces=" <& stats.surfaces);
+    logInfo("lighting_surfaces brush=" <& stats.brushSurfaces <&
+        " patch=" <& stats.patchSurfaces <& " lit=" <&
+        stats.litSurfaces);
+    logInfo("shadow_plan casters=" <& stats.shadowCasters <&
+        " suppressed=" <& stats.shadowSuppressed <& " volumes=" <&
+        stats.shadowVolumesPlanned <& " fallbacks=" <&
+        stats.shadowFallbacks);
+    if stats.firstLightName <> "" then logInfo("first_light_name=" <& stats.firstLightName); end if;
+    if stats.firstLightOrigin <> "" then logInfo("first_light_origin=" <& stats.firstLightOrigin); end if;
+    if stats.firstLightRadius <> "" then logInfo("first_light_radius=" <& stats.firstLightRadius); end if;
+    if stats.firstLightColor <> "" then logInfo("first_light_color=" <& stats.firstLightColor); end if;
+    if stats.firstMaterial <> "" then logInfo("first_lighting_material=" <& stats.firstMaterial); end if;
+    if stats.firstShadowCaster <> "" then logInfo("first_shadow_caster=" <& stats.firstShadowCaster); end if;
+    if stats.firstShadowSuppressed <> "" then logInfo("first_shadow_suppressed=" <& stats.firstShadowSuppressed); end if;
+    if stats.firstShadowPlan <> "" then logInfo("first_shadow_plan=" <& stats.firstShadowPlan); end if;
+    logInfo("lighting_probe_ready=" <& (stats.pk4Archives <> 0 and
+        stats.requestedMapFound and stats.lights <> 0 and
+        stats.litSurfaces <> 0 and stats.shadowCasters <> 0 and
+        stats.shadowSuppressed <> 0));
+  end func;
+
+const proc: main is func
+  local
+    var lightingConfig: config is lightingConfig.value;
+    var lightingStats: stats is lightingStats.value;
+    var array string: pk4Files is 0 times "";
+    var string: pk4File is "";
+  begin
+    parseArgs(config);
+    if config.showHelp then
+      showUsage;
+    else
+      stats.requestedMapPath := mapNameToAssetPath(config.startMap);
+      if fileType(config.basePath) <> FILE_DIR then
+        logError("Doom 3 base directory not found: " <& config.basePath);
+      else
+        pk4Files := findPk4Archives(config.basePath);
+        sortStrings(pk4Files);
+        stats.pk4Archives := length(pk4Files);
+        if length(pk4Files) = 0 then
+          logError("No .pk4 archives found in: " <& config.basePath);
+        else
+          for pk4File range pk4Files do
+            scanArchive(stats, pk4File);
+          end for;
+          solveLighting(stats);
+          printStats(stats);
+        end if;
+      end if;
+    end if;
+  end func;

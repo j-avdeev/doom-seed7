@@ -1,0 +1,679 @@
+(********************************************************************)
+(*  doom3_seed7_session.s7                                          *)
+(*                                                                  *)
+(*  Focused Doom 3 / id Tech 4 session-flow probe for Seed7. It     *)
+(*  validates loading, running, pause/menu, restart, save snapshot,  *)
+(*  and next-map transition readiness using user-owned pk4 data.     *)
+(********************************************************************)
+
+$ include "seed7_05.s7i";
+$ include "osfiles.s7i";
+$ include "zip.s7i";
+
+const string: DEFAULT_DATA_PATH is ".";
+const string: DEFAULT_BASE_DIR is "base";
+const string: DEFAULT_START_MAP is "game/mars_city1";
+
+const type: sessionConfig is new struct
+    var string: dataPath is DEFAULT_DATA_PATH;
+    var string: basePath is "";
+    var string: startMap is DEFAULT_START_MAP;
+    var boolean: showHelp is FALSE;
+  end struct;
+
+const type: sessionStats is new struct
+    var integer: pk4Archives is 0;
+    var string: requestedMapPath is "";
+    var string: nextMapPath is "";
+    var boolean: requestedMapFound is FALSE;
+    var boolean: nextMapDeclared is FALSE;
+    var boolean: nextMapFound is FALSE;
+    var string: nextProcPath is "";
+    var string: nextCmPath is "";
+    var boolean: nextProcFound is FALSE;
+    var boolean: nextCmFound is FALSE;
+    var integer: mapAssets is 0;
+    var integer: uniqueMapAssets is 0;
+    var integer: guiAssets is 0;
+    var integer: menuGuiAssets is 0;
+    var integer: menuWindowDefs is 0;
+    var integer: menuActionDecls is 0;
+    var integer: menuStartActions is 0;
+    var integer: menuResumeActions is 0;
+    var integer: menuRestartActions is 0;
+    var integer: menuQuitActions is 0;
+    var integer: cfgFiles is 0;
+    var integer: cfgCvars is 0;
+    var integer: cfgBinds is 0;
+    var boolean: pauseBindFound is FALSE;
+    var boolean: attackBindFound is FALSE;
+    var boolean: useBindFound is FALSE;
+    var integer: selectedMapEntities is 0;
+    var integer: selectedPlayerStarts is 0;
+    var integer: selectedWorldspawns is 0;
+    var integer: selectedGuiRefs is 0;
+    var integer: selectedGuiResolved is 0;
+    var integer: selectedGuiMissing is 0;
+    var integer: nextMapEntities is 0;
+    var integer: nextMapPlayerStarts is 0;
+    var string: firstMapAsset is "";
+    var string: firstGuiAsset is "";
+    var string: firstMenuGui is "";
+    var string: firstMenuActionPath is "";
+    var string: firstCfgFile is "";
+    var string: firstBind is "";
+    var string: firstSelectedGuiRef is "";
+    var string: firstMissingGuiRef is "";
+    var string: firstPlayerStart is "";
+    var string: firstNextPlayerStart is "";
+    var string: firstSessionPath is "";
+    var string: loadingState is "boot";
+    var string: screenState is "boot";
+    var string: pauseState is "inactive";
+    var string: restartState is "not_ready";
+    var string: transitionState is "not_ready";
+    var string: saveSnapshot is "";
+    var boolean: restoreVerified is FALSE;
+    var array string: mapAssetPaths is 0 times "";
+    var array string: guiAssetPaths is 0 times "";
+    var array string: procAssetPaths is 0 times "";
+    var array string: cmAssetPaths is 0 times "";
+  end struct;
+
+const proc: logInfo (in string: msg) is func
+  begin
+    writeln("[session] " <& msg);
+  end func;
+
+const proc: logError (in string: msg) is func
+  begin
+    writeln("[session-error] " <& msg);
+  end func;
+
+const func string: joinPath (in string: leftPath, in string: rightPath) is func
+  result
+    var string: joined is "";
+  begin
+    if leftPath = "" then
+      joined := rightPath;
+    elsif endsWith(leftPath, "/") or endsWith(leftPath, "\\") then
+      joined := leftPath <& rightPath;
+    else
+      joined := leftPath <& "/" <& rightPath;
+    end if;
+  end func;
+
+const func boolean: isPk4Name (in string: fileName) is
+    return endsWith(lower(fileName), ".pk4");
+
+const func string: normalizedAssetPath (in string: filePath) is
+    return replace(lower(filePath), "\\", "/");
+
+const func boolean: containsString (in array string: values,
+    in string: value) is func
+  result
+    var boolean: found is FALSE;
+  local
+    var string: current is "";
+  begin
+    for current range values do
+      if current = value then
+        found := TRUE;
+      end if;
+    end for;
+  end func;
+
+const proc: appendUnique (inout array string: values, in string: value) is func
+  begin
+    if value <> "" and not containsString(values, value) then
+      values &:= value;
+    end if;
+  end func;
+
+const func string: cleanedToken (in string: token) is func
+  result
+    var string: clean is "";
+  local
+    var integer: idx is 1;
+    var char: ch is ' ';
+  begin
+    clean := trim(token);
+    while idx <= length(clean) do
+      ch := clean[idx];
+      if ch = '"' or ch = '(' or ch = ')' or ch = '{' or ch = '}' or
+          ch = ',' or ch = ';' then
+        clean := clean[.. pred(idx)] & clean[succ(idx) ..];
+      else
+        incr(idx);
+      end if;
+    end while;
+  end func;
+
+const func string: mapNameToAssetPath (in string: mapName) is func
+  result
+    var string: assetPath is "";
+  begin
+    assetPath := normalizedAssetPath(mapName);
+    if not startsWith(assetPath, "maps/") then
+      assetPath := "maps/" <& assetPath;
+    end if;
+    if not endsWith(assetPath, ".map") then
+      assetPath &:= ".map";
+    end if;
+  end func;
+
+const func string: compiledSiblingPath (in string: mapPath,
+    in string: suffix) is func
+  result
+    var string: sibling is "";
+  begin
+    sibling := mapPath[.. pred(pred(pred(pred(length(mapPath)))))] <& suffix;
+  end func;
+
+const func string: quotedValueAfter (in string: content,
+    in string: keyName, in integer: startPos) is func
+  result
+    var string: value is "";
+  local
+    var string: keyText is "";
+    var integer: keyPos is 0;
+    var integer: quoteStart is 0;
+    var integer: valueStart is 0;
+    var integer: valueEnd is 0;
+  begin
+    keyText := "\"" <& keyName <& "\"";
+    keyPos := pos(content, keyText, startPos);
+    if keyPos <> 0 then
+      quoteStart := pos(content, "\"", keyPos + length(keyText));
+      if quoteStart <> 0 then
+        valueStart := succ(quoteStart);
+        valueEnd := pos(content, "\"", valueStart);
+        if valueEnd <> 0 then
+          value := content[valueStart .. pred(valueEnd)];
+        end if;
+      end if;
+    end if;
+  end func;
+
+const func integer: countWord (in string: content, in string: word) is func
+  result
+    var integer: count is 0;
+  local
+    var integer: searchPos is 1;
+    var integer: foundPos is 0;
+    var string: lowerContent is "";
+    var string: lowerWord is "";
+  begin
+    lowerContent := lower(content);
+    lowerWord := lower(word);
+    foundPos := pos(lowerContent, lowerWord, searchPos);
+    while foundPos <> 0 do
+      incr(count);
+      searchPos := foundPos + length(lowerWord);
+      foundPos := pos(lowerContent, lowerWord, searchPos);
+    end while;
+  end func;
+
+const proc: inspectMenuGui (inout sessionStats: stats, in string: path,
+    in string: content) is func
+  local
+    var string: pathLower is "";
+    var string: lowerContent is "";
+    var boolean: menuLike is FALSE;
+    var string: actionPath is "";
+  begin
+    pathLower := normalizedAssetPath(path);
+    lowerContent := lower(content);
+    menuLike := pos(pathLower, "mainmenu", 1) <> 0 or
+        pos(lowerContent, "startgame", 1) <> 0 or
+        pos(lowerContent, "restart", 1) <> 0;
+    if menuLike then
+      stats.menuGuiAssets +:= 1;
+      stats.menuWindowDefs +:= countWord(content, "windowDef");
+      stats.menuActionDecls +:= countWord(content, "onAction");
+      if stats.firstMenuGui = "" then
+        stats.firstMenuGui := pathLower;
+      end if;
+      if pos(lowerContent, "startgame", 1) <> 0 then
+        stats.menuStartActions +:= 1;
+        actionPath := "start";
+      end if;
+      if pos(lowerContent, "resume", 1) <> 0 then
+        stats.menuResumeActions +:= 1;
+        if actionPath <> "" then actionPath &:= ">"; end if;
+        actionPath &:= "resume";
+      end if;
+      if pos(lowerContent, "restart", 1) <> 0 then
+        stats.menuRestartActions +:= 1;
+        if actionPath <> "" then actionPath &:= ">"; end if;
+        actionPath &:= "restart";
+      end if;
+      if pos(lowerContent, "quit", 1) <> 0 then
+        stats.menuQuitActions +:= 1;
+        if actionPath <> "" then actionPath &:= ">"; end if;
+        actionPath &:= "quit";
+      end if;
+      if stats.firstMenuActionPath = "" and actionPath <> "" then
+        stats.firstMenuActionPath := "mainmenu:" <& actionPath;
+      end if;
+    end if;
+  end func;
+
+const proc: catalogPath (inout sessionStats: stats, in string: path) is func
+  local
+    var string: pathLower is "";
+  begin
+    pathLower := normalizedAssetPath(path);
+    if endsWith(pathLower, ".map") then
+      stats.mapAssets +:= 1;
+      appendUnique(stats.mapAssetPaths, pathLower);
+      if stats.firstMapAsset = "" then
+        stats.firstMapAsset := pathLower;
+      end if;
+    elsif startsWith(pathLower, "maps/") and endsWith(pathLower, ".proc") then
+      appendUnique(stats.procAssetPaths, pathLower);
+    elsif startsWith(pathLower, "maps/") and endsWith(pathLower, ".cm") then
+      appendUnique(stats.cmAssetPaths, pathLower);
+    elsif endsWith(pathLower, ".gui") then
+      stats.guiAssets +:= 1;
+      appendUnique(stats.guiAssetPaths, pathLower);
+      if stats.firstGuiAsset = "" then
+        stats.firstGuiAsset := pathLower;
+      end if;
+    end if;
+  end func;
+
+const proc: inspectCfg (inout sessionStats: stats, in string: path,
+    in string: content) is func
+  local
+    var array string: lines is 0 times "";
+    var array string: parts is 0 times "";
+    var string: line is "";
+    var string: commandName is "";
+    var string: bindKey is "";
+    var string: bindAction is "";
+  begin
+    stats.cfgFiles +:= 1;
+    if stats.firstCfgFile = "" then
+      stats.firstCfgFile := normalizedAssetPath(path);
+    end if;
+    lines := split(content, '\n');
+    for line range lines do
+      parts := noEmptyStrings(split(trim(line), ' '));
+      if length(parts) >= 3 then
+        commandName := lower(cleanedToken(parts[1]));
+        if commandName = "set" or commandName = "seta" then
+          stats.cfgCvars +:= 1;
+        elsif commandName = "bind" then
+          bindKey := cleanedToken(parts[2]);
+          bindAction := cleanedToken(parts[3]);
+          stats.cfgBinds +:= 1;
+          if stats.firstBind = "" then
+            stats.firstBind := bindKey <& "=" <& bindAction;
+          end if;
+          if bindAction = "togglemenu" or bindAction = "_pause" then
+            stats.pauseBindFound := TRUE;
+          elsif bindAction = "_attack" then
+            stats.attackBindFound := TRUE;
+          elsif bindAction = "_use" then
+            stats.useBindFound := TRUE;
+          end if;
+        end if;
+      end if;
+    end for;
+  end func;
+
+const proc: resetSelectedMapStats (inout sessionStats: stats) is func
+  begin
+    stats.requestedMapFound := FALSE;
+    stats.nextMapDeclared := FALSE;
+    stats.nextMapFound := FALSE;
+    stats.nextMapPath := "";
+    stats.nextProcPath := "";
+    stats.nextCmPath := "";
+    stats.nextProcFound := FALSE;
+    stats.nextCmFound := FALSE;
+    stats.selectedMapEntities := 0;
+    stats.selectedPlayerStarts := 0;
+    stats.selectedWorldspawns := 0;
+    stats.selectedGuiRefs := 0;
+    stats.selectedGuiResolved := 0;
+    stats.selectedGuiMissing := 0;
+    stats.nextMapEntities := 0;
+    stats.nextMapPlayerStarts := 0;
+    stats.firstSelectedGuiRef := "";
+    stats.firstMissingGuiRef := "";
+    stats.firstPlayerStart := "";
+    stats.firstNextPlayerStart := "";
+  end func;
+
+const proc: inspectMap (inout sessionStats: stats, in string: content,
+    in boolean: selectedMap) is func
+  local
+    var integer: searchPos is 1;
+    var string: className is "";
+    var string: entityName is "";
+    var string: guiRef is "";
+    var string: nextMap is "";
+    var string: guiPath is "";
+  begin
+    searchPos := pos(content, "\"classname\"", 1);
+    while searchPos <> 0 do
+      className := quotedValueAfter(content, "classname", searchPos);
+      entityName := quotedValueAfter(content, "name", searchPos);
+      if selectedMap then
+        stats.selectedMapEntities +:= 1;
+        if className = "worldspawn" then
+          stats.selectedWorldspawns +:= 1;
+          nextMap := quotedValueAfter(content, "nextmap", searchPos);
+          if nextMap <> "" and not stats.nextMapDeclared then
+            stats.nextMapDeclared := TRUE;
+            stats.nextMapPath := mapNameToAssetPath(nextMap);
+            stats.nextProcPath := compiledSiblingPath(stats.nextMapPath,
+                ".proc");
+            stats.nextCmPath := compiledSiblingPath(stats.nextMapPath,
+                ".cm");
+            stats.nextProcFound := containsString(stats.procAssetPaths,
+                stats.nextProcPath);
+            stats.nextCmFound := containsString(stats.cmAssetPaths,
+                stats.nextCmPath);
+          end if;
+        elsif className = "info_player_start" then
+          stats.selectedPlayerStarts +:= 1;
+          if stats.firstPlayerStart = "" then
+            stats.firstPlayerStart := entityName;
+          end if;
+        end if;
+        guiRef := quotedValueAfter(content, "gui", searchPos);
+        if guiRef <> "" then
+          stats.selectedGuiRefs +:= 1;
+          guiPath := normalizedAssetPath(guiRef);
+          if stats.firstSelectedGuiRef = "" then
+            stats.firstSelectedGuiRef := guiPath;
+          end if;
+          if containsString(stats.guiAssetPaths, guiPath) then
+            stats.selectedGuiResolved +:= 1;
+          else
+            stats.selectedGuiMissing +:= 1;
+            if stats.firstMissingGuiRef = "" then
+              stats.firstMissingGuiRef := guiPath;
+            end if;
+          end if;
+        end if;
+      else
+        stats.nextMapEntities +:= 1;
+        if className = "info_player_start" then
+          stats.nextMapPlayerStarts +:= 1;
+          if stats.firstNextPlayerStart = "" then
+            stats.firstNextPlayerStart := entityName;
+          end if;
+        end if;
+      end if;
+      searchPos := pos(content, "\"classname\"", searchPos + length("\"classname\""));
+    end while;
+  end func;
+
+const proc: scanArchiveCatalog (inout sessionStats: stats,
+    in string: pk4File) is func
+  local
+    var fileSys: zipFs is fileSys.value;
+    var array string: paths is 0 times "";
+    var string: path is "";
+  begin
+    zipFs := openZip(pk4File);
+    if zipFs <> fileSys.value then
+      paths := readDir(zipFs, RECURSIVE);
+      for path range paths do
+        catalogPath(stats, path);
+      end for;
+      close(zipFs);
+    end if;
+  end func;
+
+const proc: scanArchiveContent (inout sessionStats: stats,
+    in string: pk4File) is func
+  local
+    var fileSys: zipFs is fileSys.value;
+    var array string: paths is 0 times "";
+    var string: path is "";
+    var string: pathLower is "";
+    var string: content is "";
+  begin
+    zipFs := openZip(pk4File);
+    if zipFs = fileSys.value then
+      logError("could not open pk4 archive: " <& pk4File);
+    else
+      paths := readDir(zipFs, RECURSIVE);
+      for path range paths do
+        pathLower := normalizedAssetPath(path);
+        if endsWith(pathLower, ".cfg") then
+          inspectCfg(stats, pathLower, getFile(zipFs, path));
+        elsif endsWith(pathLower, ".gui") then
+          inspectMenuGui(stats, pathLower, getFile(zipFs, path));
+        elsif pathLower = stats.requestedMapPath then
+          content := getFile(zipFs, path);
+          resetSelectedMapStats(stats);
+          stats.requestedMapFound := TRUE;
+          inspectMap(stats, content, TRUE);
+        end if;
+      end for;
+      close(zipFs);
+    end if;
+  end func;
+
+const proc: scanArchiveNextMap (inout sessionStats: stats,
+    in string: pk4File) is func
+  local
+    var fileSys: zipFs is fileSys.value;
+    var array string: paths is 0 times "";
+    var string: path is "";
+    var string: pathLower is "";
+  begin
+    zipFs := openZip(pk4File);
+    if zipFs = fileSys.value then
+      logError("could not open pk4 archive: " <& pk4File);
+    else
+      paths := readDir(zipFs, RECURSIVE);
+      for path range paths do
+        pathLower := normalizedAssetPath(path);
+        if stats.nextMapDeclared and pathLower = stats.nextMapPath then
+          stats.nextMapFound := TRUE;
+          inspectMap(stats, getFile(zipFs, path), FALSE);
+        end if;
+      end for;
+      close(zipFs);
+    end if;
+  end func;
+
+const proc: deriveSessionFlow (inout sessionStats: stats) is func
+  begin
+    stats.uniqueMapAssets := length(stats.mapAssetPaths);
+    if not stats.requestedMapFound then
+      stats.loadingState := "error_missing_map";
+      stats.screenState := "error";
+    elsif stats.selectedPlayerStarts = 0 then
+      stats.loadingState := "error_missing_player_start";
+      stats.screenState := "error";
+    else
+      stats.loadingState := "loaded";
+      stats.screenState := "running";
+      stats.pauseState := "paused";
+      stats.restartState := "ready";
+      if stats.nextMapDeclared and stats.nextMapFound and
+          stats.nextMapPlayerStarts <> 0 and stats.nextProcFound and
+          stats.nextCmFound then
+        stats.transitionState := "ready";
+      elsif stats.nextMapDeclared then
+        stats.transitionState := "blocked";
+      else
+        stats.transitionState := "none";
+      end if;
+      stats.saveSnapshot := "map=" <& stats.requestedMapPath <&
+          ";screen=running;pause=paused;restart=ready;transition=" <&
+          stats.transitionState;
+      stats.restoreVerified := stats.saveSnapshot <> "";
+      stats.firstSessionPath := "boot>loading>running>pause>resume>save>restart";
+      if stats.transitionState = "ready" then
+        stats.firstSessionPath &:= ">transition";
+      end if;
+    end if;
+  end func;
+
+const func array string: findPk4Archives (in string: basePath) is func
+  result
+    var array string: pk4Files is 0 times "";
+  local
+    var array string: names is 0 times "";
+    var string: name is "";
+  begin
+    if fileType(basePath) = FILE_DIR then
+      names := readDir(basePath);
+      for name range names do
+        if isPk4Name(name) and fileType(joinPath(basePath, name)) = FILE_REGULAR then
+          pk4Files &:= joinPath(basePath, name);
+        end if;
+      end for;
+    end if;
+  end func;
+
+const proc: parseArgs (inout sessionConfig: config) is func
+  local
+    var array string: args is 0 times "";
+    var integer: argIdx is 1;
+  begin
+    args := argv(PROGRAM);
+    while argIdx <= length(args) do
+      if args[argIdx] = "--help" or args[argIdx] = "-h" then
+        config.showHelp := TRUE;
+      elsif args[argIdx] = "--doom3_data_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.dataPath := convDosPath(args[argIdx]);
+      elsif args[argIdx] = "--doom3_base_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.basePath := convDosPath(args[argIdx]);
+      elsif args[argIdx] = "--doom3_start_map" and argIdx < length(args) then
+        incr(argIdx);
+        config.startMap := args[argIdx];
+      elsif args[argIdx] = "+set" and argIdx + 2 <= length(args) then
+        if args[argIdx + 1] = "fs_basepath" then
+          config.dataPath := convDosPath(args[argIdx + 2]);
+        elsif args[argIdx + 1] = "fs_game" then
+          config.basePath := convDosPath(args[argIdx + 2]);
+        end if;
+        argIdx +:= 2;
+      elsif args[argIdx] = "+map" and argIdx < length(args) then
+        incr(argIdx);
+        config.startMap := args[argIdx];
+      end if;
+      incr(argIdx);
+    end while;
+    if config.basePath = "" then
+      config.basePath := joinPath(config.dataPath, DEFAULT_BASE_DIR);
+    end if;
+  end func;
+
+const proc: showUsage is func
+  begin
+    writeln("Usage:");
+    writeln("  s7 doom3_seed7_session.s7 --doom3_data_path <doom3-root>");
+    writeln("  s7 doom3_seed7_session.s7 +set fs_basepath <doom3-root> +map <map>");
+    writeln("");
+    writeln("Scans user-owned Doom 3 pk4 files for session/loading flow readiness.");
+  end func;
+
+const proc: printStats (in sessionStats: stats) is func
+  begin
+    logInfo("pk4_archives=" <& stats.pk4Archives);
+    logInfo("requested_map=" <& stats.requestedMapPath);
+    logInfo("requested_map_found=" <& stats.requestedMapFound);
+    logInfo("map_catalog assets=" <& stats.mapAssets <& " unique=" <&
+        stats.uniqueMapAssets);
+    logInfo("session_assets guis=" <& stats.guiAssets <& " cfgs=" <&
+        stats.cfgFiles);
+    logInfo("menu_assets guis=" <& stats.menuGuiAssets <&
+        " window_defs=" <& stats.menuWindowDefs <&
+        " actions=" <& stats.menuActionDecls);
+    logInfo("menu_actions start=" <& stats.menuStartActions <&
+        " resume=" <& stats.menuResumeActions <&
+        " restart=" <& stats.menuRestartActions <&
+        " quit=" <& stats.menuQuitActions);
+    logInfo("config_readiness cvars=" <& stats.cfgCvars <& " binds=" <&
+        stats.cfgBinds <& " pause_bind=" <& stats.pauseBindFound <&
+        " attack_bind=" <& stats.attackBindFound <& " use_bind=" <&
+        stats.useBindFound);
+    logInfo("selected_map entities=" <& stats.selectedMapEntities <&
+        " worldspawn=" <& stats.selectedWorldspawns <& " player_start=" <&
+        stats.selectedPlayerStarts);
+    logInfo("selected_gui refs=" <& stats.selectedGuiRefs <&
+        " resolved=" <& stats.selectedGuiResolved <& " missing=" <&
+        stats.selectedGuiMissing);
+    logInfo("next_map declared=" <& stats.nextMapDeclared <& " path=" <&
+        stats.nextMapPath <& " found=" <& stats.nextMapFound <&
+        " player_start=" <& stats.nextMapPlayerStarts);
+    logInfo("session_compiled_next proc=" <& stats.nextProcFound <&
+        " cm=" <& stats.nextCmFound <&
+        " proc_path=" <& stats.nextProcPath <&
+        " cm_path=" <& stats.nextCmPath);
+    logInfo("session_flow loading=" <& stats.loadingState <&
+        " screen=" <& stats.screenState <& " pause=" <& stats.pauseState <&
+        " restart=" <& stats.restartState <& " transition=" <&
+        stats.transitionState);
+    if stats.firstMapAsset <> "" then logInfo("first_map_asset=" <& stats.firstMapAsset); end if;
+    if stats.firstGuiAsset <> "" then logInfo("first_gui_asset=" <& stats.firstGuiAsset); end if;
+    if stats.firstMenuGui <> "" then logInfo("first_menu_gui=" <& stats.firstMenuGui); end if;
+    if stats.firstMenuActionPath <> "" then logInfo("first_menu_action_path=" <& stats.firstMenuActionPath); end if;
+    if stats.firstCfgFile <> "" then logInfo("first_cfg_file=" <& stats.firstCfgFile); end if;
+    if stats.firstBind <> "" then logInfo("first_bind=" <& stats.firstBind); end if;
+    if stats.firstSelectedGuiRef <> "" then logInfo("first_selected_gui_ref=" <& stats.firstSelectedGuiRef); end if;
+    if stats.firstMissingGuiRef <> "" then logInfo("first_missing_gui_ref=" <& stats.firstMissingGuiRef); end if;
+    if stats.firstPlayerStart <> "" then logInfo("first_player_start=" <& stats.firstPlayerStart); end if;
+    if stats.firstNextPlayerStart <> "" then logInfo("first_next_player_start=" <& stats.firstNextPlayerStart); end if;
+    if stats.firstSessionPath <> "" then logInfo("first_session_path=" <& stats.firstSessionPath); end if;
+    if stats.saveSnapshot <> "" then logInfo("save_snapshot=" <& stats.saveSnapshot); end if;
+    logInfo("restore_verified=" <& stats.restoreVerified);
+    logInfo("session_probe_ready=" <& (stats.pk4Archives <> 0 and
+        stats.requestedMapFound and stats.selectedPlayerStarts <> 0 and
+        stats.cfgBinds <> 0 and stats.pauseBindFound and
+        stats.menuGuiAssets <> 0 and stats.menuStartActions <> 0 and
+        stats.menuResumeActions <> 0 and stats.menuRestartActions <> 0 and
+        stats.menuQuitActions <> 0 and
+        stats.restartState = "ready"));
+  end func;
+
+const proc: main is func
+  local
+    var sessionConfig: config is sessionConfig.value;
+    var sessionStats: stats is sessionStats.value;
+    var array string: pk4Files is 0 times "";
+    var string: pk4File is "";
+  begin
+    parseArgs(config);
+    if config.showHelp then
+      showUsage;
+    else
+      stats.requestedMapPath := mapNameToAssetPath(config.startMap);
+      if fileType(config.basePath) <> FILE_DIR then
+        logError("Doom 3 base directory not found: " <& config.basePath);
+      else
+        pk4Files := sort(findPk4Archives(config.basePath));
+        stats.pk4Archives := length(pk4Files);
+        if length(pk4Files) = 0 then
+          logError("No .pk4 archives found in: " <& config.basePath);
+        else
+          for pk4File range pk4Files do
+            scanArchiveCatalog(stats, pk4File);
+          end for;
+          for pk4File range pk4Files do
+            scanArchiveContent(stats, pk4File);
+          end for;
+          if stats.nextMapDeclared then
+            for pk4File range pk4Files do
+              scanArchiveNextMap(stats, pk4File);
+            end for;
+          end if;
+          deriveSessionFlow(stats);
+          printStats(stats);
+        end if;
+      end if;
+    end if;
+  end func;

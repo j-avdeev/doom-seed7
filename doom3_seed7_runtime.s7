@@ -1,0 +1,17 @@
+(********************************************************************)
+(*  doom3_seed7_runtime.s7                                          *)
+(*                                                                  *)
+(*  Doom3 Seed7 runtime entrypoint.                                 *)
+(*                                                                  *)
+(*  This is the browser/native launch entry for the current            *)
+(*  Stage-1/2 readiness runtime path. It delegates to the current      *)
+(*  integrated playable-loop module while keeping a clean top-level      *)
+(*  runtime name for end users and launchers.                         *)
+(*                                                                  *)
+(*  Note: this project is still a clean-room, asset-backed                *)
+(*  compatibility/probing implementation and intentionally avoids any    *)
+(*  bundled commercial data.                                         *)
+(********************************************************************)
+
+$ include "doom3_seed7_playloop.s7";
+

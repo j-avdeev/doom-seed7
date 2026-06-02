@@ -1,0 +1,2707 @@
+(********************************************************************)
+(*  doom3_seed7_frame.s7                                            *)
+(*                                                                  *)
+(*  Focused Doom 3 / id Tech 4 gameplay-frame probe for Seed7.      *)
+(*  It loads user-owned pk4 archives, builds a small selected-map    *)
+(*  runtime entity set, then simulates one deterministic frame path  *)
+(*  with pickups, trigger/door activation, weapon fire, and monster  *)
+(*  retaliation. No commercial data is bundled.                      *)
+(********************************************************************)
+
+$ include "seed7_05.s7i";
+$ include "osfiles.s7i";
+$ include "zip.s7i";
+$ include "math.s7i";
+
+const string: DEFAULT_DATA_PATH is ".";
+const string: DEFAULT_BASE_DIR is "base";
+const string: DEFAULT_START_MAP is "game/mars_city1";
+const integer: DEFAULT_PLAYER_HEALTH is 100;
+const integer: DEFAULT_MONSTER_HEALTH is 100;
+const integer: DEFAULT_AMMO_ON_PICKUP is 12;
+const integer: DEFAULT_SHOT_DAMAGE is 25;
+const integer: DEFAULT_MONSTER_DAMAGE is 12;
+const float: TOUCH_RADIUS is 32.0;
+const float: MONSTER_ATTACK_RANGE is 80.0;
+const float: FRAME_STEP_DISTANCE is 16.0;
+const integer: TRACE_STEPS is 32;
+const integer: FRAME_STEPS is 4;
+const integer: LOOP_TICKS is 6;
+const integer: HUD_BAR_BLOCKS is 10;
+const integer: ENTITY_DEF_INHERIT_LIMIT is 8;
+
+var string: globalNextProcPath is "";
+var string: globalNextCmPath is "";
+var boolean: globalNextProcFound is FALSE;
+var boolean: globalNextCmFound is FALSE;
+
+const type: frameConfig is new struct
+    var string: dataPath is DEFAULT_DATA_PATH;
+    var string: basePath is "";
+    var string: startMap is DEFAULT_START_MAP;
+    var boolean: showHelp is FALSE;
+  end struct;
+
+const type: frameEntity is new struct
+    var string: className is "";
+    var string: entityName is "";
+    var string: target is "";
+    var string: call is "";
+    var string: soundRef is "";
+    var string: modelRef is "";
+    var string: animRef is "";
+    var string: skinRef is "";
+    var string: guiRef is "";
+    var string: spawnclass is "";
+    var boolean: hasOrigin is FALSE;
+    var float: x is 0.0;
+    var float: y is 0.0;
+    var integer: health is 0;
+  end struct;
+
+const type: frameBrushBox is new struct
+    var float: minX is 0.0;
+    var float: minY is 0.0;
+    var float: maxX is 0.0;
+    var float: maxY is 0.0;
+    var boolean: complete is FALSE;
+  end struct;
+
+const type: frameStats is new struct
+    var integer: pk4Archives is 0;
+    var string: requestedMapPath is "";
+    var boolean: requestedMapFound is FALSE;
+    var integer: mapAssets is 0;
+    var integer: uniqueMapAssets is 0;
+    var integer: entityDefs is 0;
+    var integer: entityDefHealthValues is 0;
+    var integer: entityDefInheritValues is 0;
+    var integer: entityDefSpawnclassValues is 0;
+    var integer: weaponDefs is 0;
+    var integer: projectileDefs is 0;
+    var integer: weaponAmmoRequiredValues is 0;
+    var integer: weaponClipSizeValues is 0;
+    var integer: weaponProjectileRefs is 0;
+    var integer: weaponFireSoundRefs is 0;
+    var integer: projectileDamageValues is 0;
+    var integer: mapEntities is 0;
+    var integer: runtimeEntities is 0;
+    var integer: playerStarts is 0;
+    var integer: monsters is 0;
+    var integer: pickups is 0;
+    var integer: doors is 0;
+    var integer: triggers is 0;
+    var integer: currentMapNextMapRefs is 0;
+    var integer: brushBoxes is 0;
+    var integer: completeBrushBoxes is 0;
+    var boolean: nextMapDeclared is FALSE;
+    var boolean: nextMapFound is FALSE;
+    var integer: nextMapPlayerStarts is 0;
+    var integer: scriptFiles is 0;
+    var integer: scriptEventFunctions is 0;
+    var integer: mapCallRefs is 0;
+    var integer: mapCallEventsResolved is 0;
+    var integer: frameScriptCalls is 0;
+    var integer: frameScriptPrints is 0;
+    var integer: frameScriptTriggers is 0;
+    var integer: frameScriptWaits is 0;
+    var integer: frameScriptObjectives is 0;
+    var integer: soundAssets is 0;
+    var integer: modelAssets is 0;
+    var integer: modelDefs is 0;
+    var integer: modelDefMeshValues is 0;
+    var integer: frameModelRefs is 0;
+    var integer: frameModelResolved is 0;
+    var integer: frameModelMissing is 0;
+    var integer: frameAnimRefs is 0;
+    var integer: frameAnimResolved is 0;
+    var integer: frameAnimMissing is 0;
+    var integer: frameMd5AnimAssets is 0;
+    var integer: frameMd5AnimsParsed is 0;
+    var integer: frameAnimPlaybackSamples is 0;
+    var integer: frameAnimInterpolationSamples is 0;
+    var integer: firstFrameAnimSampleFrame is 0;
+    var integer: firstFrameAnimNextFrame is 0;
+    var integer: firstFrameAnimBlendPercent is 0;
+    var integer: skinAssets is 0;
+    var integer: skinDecls is 0;
+    var integer: skinRemaps is 0;
+    var integer: frameSkinRefs is 0;
+    var integer: frameSkinResolved is 0;
+    var integer: frameSkinMissing is 0;
+    var integer: frameSpawnclassRefs is 0;
+    var integer: frameSpawnclassResolved is 0;
+    var integer: frameSpawnclassUnsupported is 0;
+    var integer: guiAssets is 0;
+    var integer: guiWindowDefs is 0;
+    var integer: guiRectDecls is 0;
+    var integer: guiVisibleDecls is 0;
+    var integer: guiMatcolorDecls is 0;
+    var integer: guiOnActionDecls is 0;
+    var integer: entityDefGuiRefs is 0;
+    var integer: entityDefGuiResolved is 0;
+    var integer: entityDefGuiMissing is 0;
+    var integer: mapGuiRefs is 0;
+    var integer: mapGuiResolved is 0;
+    var integer: mapGuiMissing is 0;
+    var integer: runtimeGuiSurfaces is 0;
+    var integer: runtimeHudBindings is 0;
+    var integer: frameSoundCandidates is 0;
+    var integer: frameSoundEvents is 0;
+    var integer: frameSoundResolved is 0;
+    var integer: frameSoundMissing is 0;
+    var integer: frameDoorSoundEvents is 0;
+    var integer: frameWeaponSoundEvents is 0;
+    var integer: frameMonsterSoundEvents is 0;
+    var integer: frameHitscanTraces is 0;
+    var integer: frameHitscanClear is 0;
+    var integer: frameHitscanBlocked is 0;
+    var integer: frameHitscanHits is 0;
+    var integer: frameMoveRequestedSteps is 0;
+    var integer: frameMoveAcceptedSteps is 0;
+    var integer: frameMoveBlockingBrushes is 0;
+    var integer: frameMoveBlockingEntities is 0;
+    var boolean: frameMoveBlocked is FALSE;
+    var float: framePlayerFinalX is 0.0;
+    var float: framePlayerFinalY is 0.0;
+    var boolean: playerParsed is FALSE;
+    var float: playerX is 0.0;
+    var float: playerY is 0.0;
+    var float: playerYaw is 0.0;
+    var integer: playerHealthBefore is DEFAULT_PLAYER_HEALTH;
+    var integer: playerHealthAfterPickups is DEFAULT_PLAYER_HEALTH;
+    var integer: playerHealthAfterCombat is DEFAULT_PLAYER_HEALTH;
+    var integer: ammoBeforePickups is 0;
+    var integer: ammoAfterPickups is 0;
+    var integer: ammoAfterCombat is 0;
+    var boolean: weaponReady is FALSE;
+    var string: activeWeaponClass is "";
+    var string: activeWeaponProjectile is "";
+    var integer: activeWeaponAmmoRequired is 1;
+    var integer: activeWeaponClipSize is DEFAULT_AMMO_ON_PICKUP;
+    var integer: activeWeaponDamage is DEFAULT_SHOT_DAMAGE;
+    var string: activeWeaponFireSound is "";
+    var integer: touchedPickups is 0;
+    var integer: touchedHealthPickups is 0;
+    var integer: touchedAmmoPickups is 0;
+    var integer: touchedWeaponPickups is 0;
+    var integer: touchedTriggers is 0;
+    var integer: activatedDoors is 0;
+    var integer: shotsFired is 0;
+    var integer: monsterHits is 0;
+    var integer: monsterAttacks is 0;
+    var integer: loopTicks is 0;
+    var integer: loopPickupsConsumed is 0;
+    var integer: loopDoorsOpen is 0;
+    var integer: loopShotsFired is 0;
+    var integer: loopMonsterHits is 0;
+    var integer: loopMonsterAttacks is 0;
+    var integer: loopAmmoRequired is 1;
+    var integer: loopShotDamage is DEFAULT_SHOT_DAMAGE;
+    var integer: loopAmmoAfter is 0;
+    var integer: loopPlayerHealthAfter is DEFAULT_PLAYER_HEALTH;
+    var integer: loopMonsterHealthAfter is DEFAULT_MONSTER_HEALTH;
+    var boolean: loopMonsterAliveAfter is TRUE;
+    var boolean: loopClearCondition is FALSE;
+    var string: nextMapPath is "";
+    var string: transitionState is "";
+    var string: transitionPath is "";
+    var string: saveSnapshot is "";
+    var boolean: restoreVerified is FALSE;
+    var integer: restoredPlayerHealth is 0;
+    var integer: restoredAmmo is 0;
+    var integer: restoredDoorsOpen is 0;
+    var boolean: restoredClearCondition is FALSE;
+    var string: restoredScreenState is "";
+    var string: firstPickupName is "";
+    var string: firstTriggerName is "";
+    var string: firstActivatedDoorName is "";
+    var string: firstScriptCall is "";
+    var string: firstScriptEventPath is "";
+    var string: firstFrameSoundEvent is "";
+    var string: firstMissingFrameSound is "";
+    var string: firstFrameModelBinding is "";
+    var string: firstMissingFrameModel is "";
+    var string: firstFrameAnimBinding is "";
+    var string: firstMissingFrameAnim is "";
+    var string: firstSkinAsset is "";
+    var string: firstFrameSkinBinding is "";
+    var string: firstMissingFrameSkin is "";
+    var string: firstFrameSpawnclassBinding is "";
+    var string: firstUnsupportedFrameSpawnclass is "";
+    var string: firstGuiAsset is "";
+    var string: firstFrameGuiBinding is "";
+    var string: firstMissingFrameGui is "";
+    var string: firstFrameHitscanTarget is "";
+    var string: firstFrameHitscanBlocker is "";
+    var string: firstFrameMovementBlocker is "";
+    var string: firstNextMap is "";
+    var string: firstNextPlayerStart is "";
+    var string: firstMonsterName is "";
+    var string: firstMonsterClass is "";
+    var integer: firstMonsterHealthBefore is DEFAULT_MONSTER_HEALTH;
+    var integer: firstMonsterHealthAfter is DEFAULT_MONSTER_HEALTH;
+    var boolean: firstMonsterAliveAfter is TRUE;
+    var array string: entityDefNames is 0 times "";
+    var array integer: entityDefHealthValuesByIndex is 0 times 0;
+    var array string: entityDefParents is 0 times "";
+    var array string: entityDefSoundValuesByIndex is 0 times "";
+    var array string: entityDefModelValuesByIndex is 0 times "";
+    var array string: entityDefAnimValuesByIndex is 0 times "";
+    var array string: entityDefSkinValuesByIndex is 0 times "";
+    var array string: entityDefGuiValuesByIndex is 0 times "";
+    var array string: entityDefSpawnclassValuesByIndex is 0 times "";
+    var array integer: entityDefWeaponAmmoRequiredByIndex is 0 times 0;
+    var array integer: entityDefWeaponClipSizeByIndex is 0 times 0;
+    var array string: entityDefWeaponProjectileByIndex is 0 times "";
+    var array integer: entityDefProjectileDamageByIndex is 0 times 0;
+    var array string: soundAssetStems is 0 times "";
+    var array string: modelAssetStems is 0 times "";
+    var array string: md5AnimAssetStems is 0 times "";
+    var array integer: md5AnimFrameCounts is 0 times 0;
+    var array integer: md5AnimFrameRates is 0 times 0;
+    var array string: skinAssetStems is 0 times "";
+    var array string: skinNames is 0 times "";
+    var array string: guiAssetPaths is 0 times "";
+    var array string: modelDefNames is 0 times "";
+    var array string: modelDefMeshStems is 0 times "";
+    var array string: frameSoundEventsByRef is 0 times "";
+    var array string: mapPaths is 0 times "";
+    var array string: mapContents is 0 times "";
+    var array string: scriptEventFunctionNames is 0 times "";
+    var array string: scriptEventPaths is 0 times "";
+    var array frameEntity: entities is 0 times frameEntity.value;
+    var array frameBrushBox: brushes is 0 times frameBrushBox.value;
+  end struct;
+
+const proc: logInfo (in string: msg) is func
+  begin
+    writeln("[frame] " <& msg);
+  end func;
+
+const proc: logError (in string: msg) is func
+  begin
+    writeln("[frame-error] " <& msg);
+  end func;
+
+const func string: hudBar (in integer: value, in integer: maxValue) is func
+  result
+    var string: bar is "";
+  local
+    var integer: filled is 0;
+    var integer: idx is 1;
+  begin
+    if maxValue > 0 then
+      filled := value * HUD_BAR_BLOCKS div maxValue;
+    end if;
+    if filled < 0 then
+      filled := 0;
+    elsif filled > HUD_BAR_BLOCKS then
+      filled := HUD_BAR_BLOCKS;
+    end if;
+    for idx range 1 to HUD_BAR_BLOCKS do
+      if idx <= filled then
+        bar &:= "#";
+      else
+        bar &:= ".";
+      end if;
+    end for;
+  end func;
+
+const func string: screenStateForFrame (in frameStats: stats) is func
+  result
+    var string: state is "";
+  begin
+    if stats.loopPlayerHealthAfter <= 0 then
+      state := "dead";
+    elsif stats.loopClearCondition then
+      state := "cleared";
+    else
+      state := "playing";
+    end if;
+  end func;
+
+const func string: snapshotValue (in string: snapshot,
+    in string: keyName) is func
+  result
+    var string: value is "";
+  local
+    var string: keyText is "";
+    var integer: keyPos is 0;
+    var integer: valueStart is 0;
+    var integer: valueEnd is 0;
+  begin
+    keyText := keyName <& "=";
+    keyPos := pos(snapshot, keyText, 1);
+    if keyPos <> 0 then
+      valueStart := keyPos + length(keyText);
+      valueEnd := pos(snapshot, ";", valueStart);
+      if valueEnd = 0 then
+        valueEnd := succ(length(snapshot));
+      end if;
+      value := snapshot[valueStart .. pred(valueEnd)];
+    end if;
+  end func;
+
+const func string: joinPath (in string: leftPath, in string: rightPath) is func
+  result
+    var string: joined is "";
+  begin
+    if leftPath = "" then
+      joined := rightPath;
+    elsif endsWith(leftPath, "/") or endsWith(leftPath, "\\") then
+      joined := leftPath <& rightPath;
+    else
+      joined := leftPath <& "/" <& rightPath;
+    end if;
+  end func;
+
+const func boolean: isPk4Name (in string: fileName) is
+    return endsWith(lower(fileName), ".pk4");
+
+const func string: normalizedAssetPath (in string: filePath) is
+    return replace(lower(filePath), "\\", "/");
+
+const func string: assetStem (in string: filePath) is func
+  result
+    var string: stem is "";
+  local
+    var string: path is "";
+    var integer: dotPos is 0;
+  begin
+    path := normalizedAssetPath(filePath);
+    dotPos := rpos(path, ".");
+    if dotPos <> 0 then
+      stem := path[.. pred(dotPos)];
+    else
+      stem := path;
+    end if;
+  end func;
+
+const func boolean: isSoundAssetPath (in string: path) is func
+  result
+    var boolean: isSound is FALSE;
+  local
+    var string: lowerPath is "";
+  begin
+    lowerPath := normalizedAssetPath(path);
+    isSound := startsWith(lowerPath, "sound/") and
+        (endsWith(lowerPath, ".wav") or endsWith(lowerPath, ".ogg"));
+  end func;
+
+const func boolean: isModelAssetPath (in string: path) is func
+  result
+    var boolean: isModel is FALSE;
+  local
+    var string: lowerPath is "";
+  begin
+    lowerPath := normalizedAssetPath(path);
+    isModel := startsWith(lowerPath, "models/") and
+        (endsWith(lowerPath, ".md5mesh") or endsWith(lowerPath, ".md5anim") or
+        endsWith(lowerPath, ".lwo") or endsWith(lowerPath, ".ase"));
+  end func;
+
+const func boolean: isGuiAssetPath (in string: path) is func
+  result
+    var boolean: isGui is FALSE;
+  begin
+    isGui := endsWith(normalizedAssetPath(path), ".gui");
+  end func;
+
+const func boolean: isSkinAssetPath (in string: path) is func
+  result
+    var boolean: isSkin is FALSE;
+  begin
+    isSkin := endsWith(normalizedAssetPath(path), ".skin");
+  end func;
+
+const func string: mapNameToAssetPath (in string: mapName) is func
+  result
+    var string: assetPath is "";
+  begin
+    assetPath := normalizedAssetPath(mapName);
+    if not startsWith(assetPath, "maps/") then
+      assetPath := "maps/" <& assetPath;
+    end if;
+    if not endsWith(assetPath, ".map") then
+      assetPath &:= ".map";
+    end if;
+  end func;
+
+const func string: compiledSiblingPath (in string: mapPath,
+    in string: suffix) is func
+  result
+    var string: siblingPath is "";
+  begin
+    if endsWith(mapPath, ".map") then
+      siblingPath := mapPath[.. length(mapPath) - 4] <& suffix;
+    else
+      siblingPath := mapPath <& suffix;
+    end if;
+  end func;
+
+const func string: quotedValueAfter (in string: content, in string: keyName) is func
+  result
+    var string: value is "";
+  local
+    var string: keyText is "";
+    var integer: keyPos is 0;
+    var integer: keyEnd is 0;
+    var integer: valueStart is 0;
+    var integer: valueEnd is 0;
+  begin
+    keyText := "\"" <& keyName <& "\"";
+    keyPos := pos(lower(content), lower(keyText), 1);
+    if keyPos <> 0 then
+      keyEnd := pos(content, "\"", succ(keyPos));
+      if keyEnd <> 0 then
+        valueStart := pos(content, "\"", succ(keyEnd));
+        if valueStart <> 0 then
+          valueEnd := pos(content, "\"", succ(valueStart));
+          if valueEnd <> 0 then
+            value := content[succ(valueStart) .. pred(valueEnd)];
+          end if;
+        end if;
+      end if;
+    end if;
+  end func;
+
+const func string: cleanedToken (in string: token) is func
+  result
+    var string: clean is "";
+  local
+    var integer: idx is 1;
+    var char: ch is ' ';
+  begin
+    clean := token;
+    while idx <= length(clean) do
+      ch := clean[idx];
+      if ch = '"' or ch = '(' or ch = ')' or ch = '{' or ch = '}' or
+          ch = ',' or ch = ';' or ch = ':' then
+        clean := clean[.. pred(idx)] & clean[succ(idx) ..];
+      else
+        incr(idx);
+      end if;
+    end while;
+  end func;
+
+const func string: declNameAfter (in string: content, in integer: startPos) is func
+  result
+    var string: declName is "";
+  local
+    var integer: idx is 0;
+    var char: ch is ' ';
+  begin
+    idx := startPos;
+    while idx <= length(content) and declName = "" do
+      ch := content[idx];
+      if ch <> ' ' and ch <> '\t' and ch <> '\n' and ch <> '\r' then
+        while idx <= length(content) and content[idx] <> ' ' and
+            content[idx] <> '\t' and content[idx] <> '\n' and
+            content[idx] <> '\r' and content[idx] <> '{' do
+          declName &:= content[idx];
+          incr(idx);
+        end while;
+      end if;
+      incr(idx);
+    end while;
+  end func;
+
+const func string: valueAfterWord (in string: content,
+    in string: keyName) is func
+  result
+    var string: value is "";
+  local
+    var string: normalizedContent is "";
+    var array string: tokens is 0 times "";
+    var integer: tokenIndex is 1;
+  begin
+    normalizedContent := replace(content, "\n", " ");
+    normalizedContent := replace(normalizedContent, "\r", " ");
+    normalizedContent := replace(normalizedContent, "\t", " ");
+    tokens := noEmptyStrings(split(normalizedContent, ' '));
+    while tokenIndex < length(tokens) and value = "" do
+      if lower(cleanedToken(tokens[tokenIndex])) = lower(keyName) then
+        value := cleanedToken(tokens[succ(tokenIndex)]);
+      end if;
+      incr(tokenIndex);
+    end while;
+  end func;
+
+const func integer: integerAfterWord (in string: content,
+    in string: keyName) is func
+  result
+    var integer: value is 0;
+  local
+    var string: normalizedContent is "";
+    var array string: tokens is 0 times "";
+    var integer: tokenIndex is 1;
+    var string: token is "";
+  begin
+    normalizedContent := replace(lower(content), "\n", " ");
+    normalizedContent := replace(normalizedContent, "\r", " ");
+    normalizedContent := replace(normalizedContent, "\t", " ");
+    tokens := noEmptyStrings(split(normalizedContent, ' '));
+    while tokenIndex < length(tokens) and value = 0 do
+      if cleanedToken(tokens[tokenIndex]) = lower(keyName) then
+        token := cleanedToken(tokens[succ(tokenIndex)]);
+        block
+          value := integer(token);
+        exception
+          catch RANGE_ERROR:
+            value := 0;
+        end block;
+      end if;
+      incr(tokenIndex);
+    end while;
+  end func;
+
+const func integer: countWord (in string: content, in string: word) is func
+  result
+    var integer: count is 0;
+  local
+    var integer: searchPos is 1;
+    var integer: foundPos is 0;
+    var string: lowerContent is "";
+    var string: lowerWord is "";
+  begin
+    lowerContent := lower(content);
+    lowerWord := lower(word);
+    foundPos := pos(lowerContent, lowerWord, searchPos);
+    while foundPos <> 0 do
+      incr(count);
+      searchPos := foundPos + length(lowerWord);
+      foundPos := pos(lowerContent, lowerWord, searchPos);
+    end while;
+  end func;
+
+const func integer: previousCharPos (in string: content, in char: needle,
+    in integer: startPos) is func
+  result
+    var integer: foundPos is 0;
+  local
+    var integer: idx is 0;
+  begin
+    idx := startPos;
+    while idx >= 1 and foundPos = 0 do
+      if content[idx] = needle then
+        foundPos := idx;
+      end if;
+      decr(idx);
+    end while;
+  end func;
+
+const func integer: matchingBlockEnd (in string: content,
+    in integer: blockStart) is func
+  result
+    var integer: blockEnd is 0;
+  local
+    var integer: idx is 0;
+    var integer: depth is 0;
+  begin
+    if blockStart <> 0 then
+      idx := blockStart;
+      while idx <= length(content) and blockEnd = 0 do
+        if content[idx] = '{' then
+          incr(depth);
+        elsif content[idx] = '}' then
+          decr(depth);
+          if depth = 0 then
+            blockEnd := idx;
+          end if;
+        end if;
+        incr(idx);
+      end while;
+    end if;
+  end func;
+
+const func float: vectorComponentOrDefault (
+    in string: vectorText, in integer: componentIndex,
+    in float: defaultValue) is func
+  result
+    var float: component is 0.0;
+  local
+    var array string: parts is 0 times "";
+  begin
+    component := defaultValue;
+    parts := noEmptyStrings(split(vectorText, ' '));
+    if length(parts) >= componentIndex then
+      block
+        component := float(parts[componentIndex]);
+      exception
+        catch RANGE_ERROR:
+          component := defaultValue;
+      end block;
+    end if;
+  end func;
+
+const func float: degreesToRadians (in float: degrees) is
+    return degrees * 3.14159265358979323846 / 180.0;
+
+const func boolean: pointTouchesEntity (in frameEntity: entity,
+    in float: x, in float: y) is func
+  result
+    var boolean: touches is FALSE;
+  local
+    var float: dx is 0.0;
+    var float: dy is 0.0;
+  begin
+    if entity.hasOrigin then
+      dx := entity.x - x;
+      dy := entity.y - y;
+      touches := dx * dx + dy * dy <= TOUCH_RADIUS * TOUCH_RADIUS;
+    end if;
+  end func;
+
+const func boolean: pointInBrush (in frameBrushBox: box,
+    in float: x, in float: y) is func
+  result
+    var boolean: inside is FALSE;
+  begin
+    inside := box.complete and x >= box.minX and x <= box.maxX and
+        y >= box.minY and y <= box.maxY;
+  end func;
+
+const func boolean: lineBlockedByBrush (in frameStats: stats,
+    in float: startX, in float: startY, in float: endX, in float: endY) is func
+  result
+    var boolean: blocked is FALSE;
+  local
+    var integer: traceStep is 0;
+    var float: t is 0.0;
+    var float: x is 0.0;
+    var float: y is 0.0;
+    var frameBrushBox: box is frameBrushBox.value;
+  begin
+    for traceStep range 1 to TRACE_STEPS do
+      t := float(traceStep) / float(TRACE_STEPS);
+      x := startX + (endX - startX) * t;
+      y := startY + (endY - startY) * t;
+      for box range stats.brushes do
+        if pointInBrush(box, x, y) then
+          blocked := TRUE;
+        end if;
+      end for;
+    end for;
+  end func;
+
+const func string: movementBlockerAtPoint (in frameStats: stats,
+    in float: x, in float: y) is func
+  result
+    var string: blocker is "";
+  local
+    var frameBrushBox: box is frameBrushBox.value;
+    var frameEntity: entity is frameEntity.value;
+  begin
+    for box range stats.brushes do
+      if blocker = "" and pointInBrush(box, x, y) then
+        blocker := "brush";
+      end if;
+    end for;
+    for entity range stats.entities do
+      if blocker = "" and entity.hasOrigin and
+          (entity.className = "func_static" or
+          entity.className = "func_door" or
+          entity.className = "mover_door" or
+          startsWith(entity.className, "monster_")) and
+          pointTouchesEntity(entity, x, y) then
+        blocker := "entity:" <& entity.entityName;
+      end if;
+    end for;
+  end func;
+
+const func boolean: isPickupClass (in string: className) is func
+  result
+    var boolean: pickup is FALSE;
+  begin
+    pickup := startsWith(className, "item_") or
+        startsWith(className, "ammo_") or startsWith(className, "weapon_");
+  end func;
+
+const func boolean: supportedSpawnclass (in string: spawnclass) is func
+  result
+    var boolean: supported is FALSE;
+  local
+    var string: normalized is "";
+  begin
+    normalized := lower(spawnclass);
+    supported := normalized = "idai" or normalized = "iditem" or
+        normalized = "iditempowerup" or normalized = "idweapon" or
+        normalized = "idprojectile" or normalized = "iddoor" or
+        normalized = "idmover";
+  end func;
+
+const func boolean: entityNamedExists (in array frameEntity: entities,
+    in string: entityName) is func
+  result
+    var boolean: found is FALSE;
+  local
+    var frameEntity: entity is frameEntity.value;
+  begin
+    for entity range entities do
+      if entity.entityName = entityName then
+        found := TRUE;
+      end if;
+    end for;
+  end func;
+
+const func boolean: containsString (in array string: values,
+    in string: value) is func
+  result
+    var boolean: found is FALSE;
+  local
+    var string: current is "";
+  begin
+    for current range values do
+      if current = value then
+        found := TRUE;
+      end if;
+    end for;
+  end func;
+
+const proc: appendUniqueString (inout array string: values,
+    in string: value) is func
+  begin
+    if value <> "" and not containsString(values, value) then
+      values &:= value;
+    end if;
+  end func;
+
+const proc: addMapAsset (inout frameStats: stats,
+    in string: mapPath, in string: content) is func
+  local
+    var integer: idx is 1;
+    var boolean: stored is FALSE;
+  begin
+    stats.mapAssets +:= 1;
+    while idx <= length(stats.mapPaths) and not stored do
+      if stats.mapPaths[idx] = mapPath then
+        stats.mapContents[idx] := content;
+        stored := TRUE;
+      end if;
+      incr(idx);
+    end while;
+    if not stored then
+      stats.mapPaths &:= mapPath;
+      stats.mapContents &:= content;
+    end if;
+    stats.uniqueMapAssets := length(stats.mapPaths);
+  end func;
+
+const func string: mapContentForPath (in frameStats: stats,
+    in string: mapPath) is func
+  result
+    var string: content is "";
+  local
+    var integer: idx is 1;
+  begin
+    while idx <= length(stats.mapPaths) and content = "" do
+      if stats.mapPaths[idx] = mapPath then
+        content := stats.mapContents[idx];
+      end if;
+      incr(idx);
+    end while;
+  end func;
+
+const func string: meshStemForModelDef (in frameStats: stats,
+    in string: modelName) is func
+  result
+    var string: meshStem is "";
+  local
+    var integer: modelIndex is 1;
+  begin
+    while modelIndex <= length(stats.modelDefNames) and meshStem = "" do
+      if stats.modelDefNames[modelIndex] = lower(modelName) and
+          modelIndex <= length(stats.modelDefMeshStems) then
+        meshStem := stats.modelDefMeshStems[modelIndex];
+      end if;
+      incr(modelIndex);
+    end while;
+  end func;
+
+const func string: resolvedModelStem (in frameStats: stats,
+    in string: modelRef) is func
+  result
+    var string: stem is "";
+  begin
+    if endsWith(lower(modelRef), ".md5mesh") or endsWith(lower(modelRef), ".lwo") or
+        endsWith(lower(modelRef), ".ase") then
+      stem := assetStem(modelRef);
+    else
+      stem := meshStemForModelDef(stats, modelRef);
+    end if;
+  end func;
+
+const func boolean: modelRefResolved (in frameStats: stats,
+    in string: modelRef) is func
+  result
+    var boolean: resolved is FALSE;
+  local
+    var string: stem is "";
+  begin
+    stem := resolvedModelStem(stats, modelRef);
+    resolved := stem <> "" and containsString(stats.modelAssetStems, stem);
+  end func;
+
+const func boolean: animRefResolved (in frameStats: stats,
+    in string: animRef) is func
+  result
+    var boolean: resolved is FALSE;
+  begin
+    resolved := endsWith(lower(animRef), ".md5anim") and
+        containsString(stats.modelAssetStems, assetStem(animRef));
+  end func;
+
+const func boolean: skinRefResolved (in frameStats: stats,
+    in string: skinRef) is func
+  result
+    var boolean: resolved is FALSE;
+  begin
+    resolved := skinRef <> "" and
+        (containsString(stats.skinNames, lower(skinRef)) or
+        containsString(stats.skinAssetStems, assetStem(skinRef)));
+  end func;
+
+const func string: normalizedGuiRef (in string: guiRef) is func
+  result
+    var string: normalized is "";
+  begin
+    normalized := normalizedAssetPath(guiRef);
+  end func;
+
+const func boolean: guiRefResolved (in frameStats: stats,
+    in string: guiRef) is func
+  result
+    var boolean: resolved is FALSE;
+  begin
+    resolved := guiRef <> "" and
+        containsString(stats.guiAssetPaths, normalizedGuiRef(guiRef));
+  end func;
+
+const proc: addFrameGuiRef (inout frameStats: stats,
+    in string: guiRef, in boolean: mapRef, in string: ownerName) is func
+  local
+    var string: normalizedRef is "";
+  begin
+    normalizedRef := normalizedGuiRef(guiRef);
+    if normalizedRef <> "" then
+      if mapRef then
+        stats.mapGuiRefs +:= 1;
+      else
+        stats.entityDefGuiRefs +:= 1;
+      end if;
+      if guiRefResolved(stats, normalizedRef) then
+        if mapRef then
+          stats.mapGuiResolved +:= 1;
+          stats.runtimeGuiSurfaces +:= 1;
+          if startsWith(normalizedRef, "guis/hud") then
+            stats.runtimeHudBindings +:= 1;
+          end if;
+          if stats.firstFrameGuiBinding = "" then
+            stats.firstFrameGuiBinding := ownerName <& "=" <& normalizedRef;
+          end if;
+        else
+          stats.entityDefGuiResolved +:= 1;
+        end if;
+      else
+        if mapRef then
+          stats.mapGuiMissing +:= 1;
+        else
+          stats.entityDefGuiMissing +:= 1;
+        end if;
+        if stats.firstMissingFrameGui = "" then
+          stats.firstMissingFrameGui := normalizedRef;
+        end if;
+      end if;
+    end if;
+  end func;
+
+const proc: addFrameAnimPlaybackSample (inout frameStats: stats,
+    in string: animRef) is func
+  local
+    var string: animStem is "";
+    var integer: idx is 1;
+    var integer: frameCount is 0;
+    var integer: frameRate is 0;
+    var integer: sampleFrame is 0;
+    var integer: nextFrame is 0;
+    var integer: frameMillis is 0;
+    var integer: sampleMillis is 0;
+    var integer: blendPercent is 0;
+  begin
+    animStem := assetStem(animRef);
+    while idx <= length(stats.md5AnimAssetStems) and frameCount = 0 do
+      if stats.md5AnimAssetStems[idx] = animStem then
+        frameCount := stats.md5AnimFrameCounts[idx];
+        frameRate := stats.md5AnimFrameRates[idx];
+      end if;
+      incr(idx);
+    end while;
+    if frameCount <> 0 and frameRate <> 0 then
+      sampleFrame := (frameRate * 75 div 1000) rem frameCount;
+      nextFrame := (sampleFrame + 1) rem frameCount;
+      frameMillis := 1000 div frameRate;
+      if frameMillis <> 0 then
+        sampleMillis := 75 rem frameMillis;
+        blendPercent := sampleMillis * 100 div frameMillis;
+      end if;
+      stats.frameAnimPlaybackSamples +:= 1;
+      stats.frameAnimInterpolationSamples +:= 1;
+      if stats.frameAnimPlaybackSamples = 1 then
+        stats.firstFrameAnimSampleFrame := sampleFrame;
+        stats.firstFrameAnimNextFrame := nextFrame;
+        stats.firstFrameAnimBlendPercent := blendPercent;
+      end if;
+    end if;
+  end func;
+
+const func string: soundRefForEntityName (in frameStats: stats,
+    in string: entityName) is func
+  result
+    var string: soundRef is "";
+  local
+    var frameEntity: entity is frameEntity.value;
+  begin
+    for entity range stats.entities do
+      if soundRef = "" and entity.entityName = entityName then
+        soundRef := entity.soundRef;
+      end if;
+    end for;
+  end func;
+
+const func string: scriptEventPathForFunction (in frameStats: stats,
+    in string: functionName) is func
+  result
+    var string: eventPath is "";
+  local
+    var integer: idx is 1;
+  begin
+    while idx <= length(stats.scriptEventFunctionNames) and eventPath = "" do
+      if stats.scriptEventFunctionNames[idx] = lower(functionName) then
+        eventPath := stats.scriptEventPaths[idx];
+      end if;
+      incr(idx);
+    end while;
+  end func;
+
+const func string: eventPathForFunctionBody (in string: functionBody) is func
+  result
+    var string: eventPath is "";
+  local
+    var string: bodyLower is "";
+  begin
+    bodyLower := lower(functionBody);
+    if pos(bodyLower, "sys.", 1) <> 0 then
+      eventPath &:= "print";
+    end if;
+    if pos(bodyLower, "trigger", 1) <> 0 or pos(bodyLower, "activate", 1) <> 0 then
+      if eventPath <> "" then
+        eventPath &:= ">";
+      end if;
+      eventPath &:= "trigger";
+    end if;
+    if pos(bodyLower, "wait", 1) <> 0 then
+      if eventPath <> "" then
+        eventPath &:= ">";
+      end if;
+      eventPath &:= "wait";
+    end if;
+    if pos(bodyLower, "objective_complete", 1) <> 0 or
+        pos(bodyLower, "completeobjective", 1) <> 0 then
+      if eventPath <> "" then
+        eventPath &:= ">";
+      end if;
+      eventPath &:= "objective";
+    end if;
+  end func;
+
+const func string: firstSoundSpawnargValue (in string: blockText) is func
+  result
+    var string: value is "";
+  local
+    var string: lowerBlock is "";
+    var integer: searchPos is 1;
+    var integer: keyPos is 0;
+    var integer: keyStart is 0;
+    var integer: keyEnd is 0;
+    var string: keyName is "";
+  begin
+    lowerBlock := lower(blockText);
+    keyPos := pos(lowerBlock, "\"snd_", searchPos);
+    if keyPos <> 0 then
+      keyStart := succ(keyPos);
+      keyEnd := pos(blockText, "\"", keyStart);
+      if keyEnd <> 0 then
+        keyName := blockText[keyStart .. pred(keyEnd)];
+        value := quotedValueAfter(blockText, keyName);
+      end if;
+    end if;
+  end func;
+
+const func integer: intSpawnargOrZero (in string: entityBlock,
+    in string: keyName) is func
+  result
+    var integer: number is 0;
+  local
+    var string: text is "";
+  begin
+    text := quotedValueAfter(entityBlock, keyName);
+    if text <> "" then
+      block
+        number := integer(text);
+      exception
+        catch RANGE_ERROR:
+          number := 0;
+      end block;
+    end if;
+  end func;
+
+const func boolean: soundRefResolved (in frameStats: stats,
+    in string: soundRef) is func
+  result
+    var boolean: resolved is FALSE;
+  begin
+    resolved := soundRef <> "" and
+        containsString(stats.soundAssetStems, assetStem(soundRef));
+  end func;
+
+const proc: addFrameSoundEvent (inout frameStats: stats,
+    in string: eventName, in string: soundRef) is func
+  local
+    var string: eventRef is "";
+  begin
+    if soundRef <> "" then
+      eventRef := eventName <& "=" <& soundRef;
+      if not containsString(stats.frameSoundEventsByRef, eventRef) then
+        stats.frameSoundCandidates +:= 1;
+        stats.frameSoundEvents +:= 1;
+        stats.frameSoundEventsByRef &:= eventRef;
+        if soundRefResolved(stats, soundRef) then
+          stats.frameSoundResolved +:= 1;
+        else
+          stats.frameSoundMissing +:= 1;
+          if stats.firstMissingFrameSound = "" then
+            stats.firstMissingFrameSound := eventRef;
+          end if;
+        end if;
+        if stats.firstFrameSoundEvent = "" then
+          stats.firstFrameSoundEvent := eventRef;
+        end if;
+        if eventName = "door_open" then
+          stats.frameDoorSoundEvents +:= 1;
+        elsif eventName = "weapon_fire" then
+          stats.frameWeaponSoundEvents +:= 1;
+        elsif eventName = "monster_response" then
+          stats.frameMonsterSoundEvents +:= 1;
+        end if;
+      end if;
+    end if;
+  end func;
+
+const proc: addEntityDefInfo (inout frameStats: stats,
+    in string: className, in string: entityBlock) is func
+  local
+    var string: healthText is "";
+    var integer: healthValue is 0;
+    var string: parentName is "";
+    var string: soundRef is "";
+    var string: modelRef is "";
+    var string: animRef is "";
+    var string: skinRef is "";
+    var string: guiRef is "";
+    var string: spawnclass is "";
+    var integer: ammoRequired is 0;
+    var integer: clipSize is 0;
+    var string: projectileName is "";
+    var integer: projectileDamage is 0;
+  begin
+    stats.entityDefs +:= 1;
+    stats.entityDefNames &:= lower(className);
+    healthText := quotedValueAfter(entityBlock, "health");
+    if healthText <> "" then
+      block
+        healthValue := integer(healthText);
+        stats.entityDefHealthValues +:= 1;
+      exception
+        catch RANGE_ERROR:
+          healthValue := 0;
+      end block;
+    end if;
+    parentName := lower(quotedValueAfter(entityBlock, "inherit"));
+    if parentName <> "" then
+      stats.entityDefInheritValues +:= 1;
+    end if;
+    soundRef := firstSoundSpawnargValue(entityBlock);
+    modelRef := quotedValueAfter(entityBlock, "model");
+    animRef := quotedValueAfter(entityBlock, "anim");
+    skinRef := quotedValueAfter(entityBlock, "skin");
+    guiRef := quotedValueAfter(entityBlock, "gui");
+    spawnclass := quotedValueAfter(entityBlock, "spawnclass");
+    if spawnclass <> "" then
+      stats.entityDefSpawnclassValues +:= 1;
+    end if;
+    addFrameGuiRef(stats, guiRef, FALSE, "");
+    if startsWith(lower(className), "weapon_") then
+      stats.weaponDefs +:= 1;
+      ammoRequired := intSpawnargOrZero(entityBlock, "ammoRequired");
+      if ammoRequired <> 0 then
+        stats.weaponAmmoRequiredValues +:= 1;
+      end if;
+      clipSize := intSpawnargOrZero(entityBlock, "clipSize");
+      if clipSize <> 0 then
+        stats.weaponClipSizeValues +:= 1;
+      end if;
+      projectileName := lower(quotedValueAfter(entityBlock, "def_projectile"));
+      if projectileName <> "" then
+        stats.weaponProjectileRefs +:= 1;
+      end if;
+      if quotedValueAfter(entityBlock, "snd_fire") <> "" then
+        stats.weaponFireSoundRefs +:= 1;
+      end if;
+    elsif startsWith(lower(className), "projectile_") then
+      stats.projectileDefs +:= 1;
+      projectileDamage := intSpawnargOrZero(entityBlock, "damage");
+      if projectileDamage <> 0 then
+        stats.projectileDamageValues +:= 1;
+      end if;
+    end if;
+    stats.entityDefHealthValuesByIndex &:= healthValue;
+    stats.entityDefParents &:= parentName;
+    stats.entityDefSoundValuesByIndex &:= soundRef;
+    stats.entityDefModelValuesByIndex &:= modelRef;
+    stats.entityDefAnimValuesByIndex &:= animRef;
+    stats.entityDefSkinValuesByIndex &:= skinRef;
+    stats.entityDefGuiValuesByIndex &:= guiRef;
+    stats.entityDefSpawnclassValuesByIndex &:= spawnclass;
+    stats.entityDefWeaponAmmoRequiredByIndex &:= ammoRequired;
+    stats.entityDefWeaponClipSizeByIndex &:= clipSize;
+    stats.entityDefWeaponProjectileByIndex &:= projectileName;
+    stats.entityDefProjectileDamageByIndex &:= projectileDamage;
+  end func;
+
+const proc: inspectDefContent (inout frameStats: stats,
+    in string: content) is func
+  local
+    var string: contentLower is "";
+    var integer: searchPos is 1;
+    var integer: defPos is 0;
+    var string: className is "";
+    var integer: blockStart is 0;
+    var integer: blockEnd is 0;
+    var integer: modelPos is 0;
+    var string: modelName is "";
+    var string: meshStem is "";
+  begin
+    contentLower := lower(content);
+    modelPos := pos(contentLower, "model ", searchPos);
+    while modelPos <> 0 do
+      modelName := lower(declNameAfter(content, modelPos + length("model ")));
+      blockStart := pos(content, "{", modelPos);
+      blockEnd := matchingBlockEnd(content, blockStart);
+      if modelName <> "" and blockStart <> 0 and blockEnd <> 0 and
+          (modelPos = 1 or content[pred(modelPos)] <> '"') then
+        meshStem := assetStem(valueAfterWord(content[blockStart .. blockEnd],
+            "mesh"));
+        stats.modelDefs +:= 1;
+        stats.modelDefNames &:= modelName;
+        stats.modelDefMeshStems &:= meshStem;
+        if meshStem <> "" then
+          stats.modelDefMeshValues +:= 1;
+        end if;
+      end if;
+      searchPos := modelPos + length("model ");
+      modelPos := pos(contentLower, "model ", searchPos);
+    end while;
+    searchPos := 1;
+    defPos := pos(contentLower, "entitydef ", searchPos);
+    while defPos <> 0 do
+      className := lower(declNameAfter(content, defPos + length("entitydef ")));
+      blockStart := pos(content, "{", defPos);
+      blockEnd := matchingBlockEnd(content, blockStart);
+      if className <> "" and blockStart <> 0 and blockEnd <> 0 then
+        addEntityDefInfo(stats, className, content[blockStart .. blockEnd]);
+      end if;
+      searchPos := defPos + length("entitydef ");
+      defPos := pos(contentLower, "entitydef ", searchPos);
+    end while;
+  end func;
+
+const proc: inspectScriptContent (inout frameStats: stats,
+    in string: content) is func
+  local
+    var string: contentLower is "";
+    var integer: searchPos is 1;
+    var integer: voidPos is 0;
+    var integer: nameStart is 0;
+    var integer: nameEnd is 0;
+    var integer: blockStart is 0;
+    var integer: blockEnd is 0;
+    var integer: semicolonPos is 0;
+    var string: functionName is "";
+    var string: eventPath is "";
+    var string: functionBody is "";
+  begin
+    stats.scriptFiles +:= 1;
+    contentLower := lower(content);
+    voidPos := pos(contentLower, "void ", searchPos);
+    while voidPos <> 0 do
+      nameStart := voidPos + length("void ");
+      while nameStart <= length(content) and
+          (content[nameStart] = ' ' or content[nameStart] = '\t' or
+          content[nameStart] = '\n' or content[nameStart] = '\r') do
+        incr(nameStart);
+      end while;
+      nameEnd := nameStart;
+      while nameEnd <= length(content) and content[nameEnd] <> ' ' and
+          content[nameEnd] <> '\t' and content[nameEnd] <> '\n' and
+          content[nameEnd] <> '\r' and content[nameEnd] <> '(' do
+        incr(nameEnd);
+      end while;
+      functionName := cleanedToken(content[nameStart .. pred(nameEnd)]);
+      blockStart := pos(content, "{", nameEnd);
+      semicolonPos := pos(content, ";", nameEnd);
+      if functionName <> "" and blockStart <> 0 and
+          (semicolonPos = 0 or blockStart < semicolonPos) then
+        blockEnd := matchingBlockEnd(content, blockStart);
+        if blockEnd <> 0 then
+          functionBody := content[blockStart .. blockEnd];
+          eventPath := eventPathForFunctionBody(functionBody);
+          if eventPath <> "" then
+            stats.scriptEventFunctions +:= 1;
+            stats.scriptEventFunctionNames &:= lower(functionName);
+            stats.scriptEventPaths &:= eventPath;
+          end if;
+          searchPos := succ(blockEnd);
+        else
+          searchPos := nameEnd;
+        end if;
+      else
+        searchPos := nameEnd;
+      end if;
+      voidPos := pos(contentLower, "void ", searchPos);
+    end while;
+  end func;
+
+const func integer: entityDefHealthForClass (
+    in frameStats: stats, in string: className,
+    in integer: defaultHealth) is func
+  result
+    var integer: health is 0;
+  local
+    var string: currentClass is "";
+    var integer: inheritDepth is 0;
+    var integer: defIndex is 1;
+    var boolean: found is FALSE;
+  begin
+    health := defaultHealth;
+    currentClass := lower(className);
+    while currentClass <> "" and inheritDepth < ENTITY_DEF_INHERIT_LIMIT and
+        not found do
+      defIndex := 1;
+      while defIndex <= length(stats.entityDefNames) and not found do
+        if stats.entityDefNames[defIndex] = currentClass then
+          if stats.entityDefHealthValuesByIndex[defIndex] <> 0 then
+            health := stats.entityDefHealthValuesByIndex[defIndex];
+            found := TRUE;
+          else
+            currentClass := stats.entityDefParents[defIndex];
+          end if;
+        end if;
+        incr(defIndex);
+      end while;
+      incr(inheritDepth);
+    end while;
+  end func;
+
+const func string: entityDefSoundForClass (
+    in frameStats: stats, in string: className) is func
+  result
+    var string: soundRef is "";
+  local
+    var string: currentClass is "";
+    var integer: inheritDepth is 0;
+    var integer: defIndex is 1;
+    var boolean: found is FALSE;
+  begin
+    currentClass := lower(className);
+    while currentClass <> "" and inheritDepth < ENTITY_DEF_INHERIT_LIMIT and
+        not found do
+      defIndex := 1;
+      while defIndex <= length(stats.entityDefNames) and not found do
+        if stats.entityDefNames[defIndex] = currentClass then
+          if stats.entityDefSoundValuesByIndex[defIndex] <> "" then
+            soundRef := stats.entityDefSoundValuesByIndex[defIndex];
+            found := TRUE;
+          else
+            currentClass := stats.entityDefParents[defIndex];
+          end if;
+        end if;
+        incr(defIndex);
+      end while;
+      incr(inheritDepth);
+    end while;
+  end func;
+
+const func string: entityDefModelForClass (
+    in frameStats: stats, in string: className) is func
+  result
+    var string: modelRef is "";
+  local
+    var string: currentClass is "";
+    var integer: inheritDepth is 0;
+    var integer: defIndex is 1;
+    var boolean: found is FALSE;
+  begin
+    currentClass := lower(className);
+    while currentClass <> "" and inheritDepth < ENTITY_DEF_INHERIT_LIMIT and
+        not found do
+      defIndex := 1;
+      while defIndex <= length(stats.entityDefNames) and not found do
+        if stats.entityDefNames[defIndex] = currentClass then
+          if stats.entityDefModelValuesByIndex[defIndex] <> "" then
+            modelRef := stats.entityDefModelValuesByIndex[defIndex];
+            found := TRUE;
+          else
+            currentClass := stats.entityDefParents[defIndex];
+          end if;
+        end if;
+        incr(defIndex);
+      end while;
+      incr(inheritDepth);
+    end while;
+  end func;
+
+const func string: entityDefAnimForClass (
+    in frameStats: stats, in string: className) is func
+  result
+    var string: animRef is "";
+  local
+    var string: currentClass is "";
+    var integer: inheritDepth is 0;
+    var integer: defIndex is 1;
+    var boolean: found is FALSE;
+  begin
+    currentClass := lower(className);
+    while currentClass <> "" and inheritDepth < ENTITY_DEF_INHERIT_LIMIT and
+        not found do
+      defIndex := 1;
+      while defIndex <= length(stats.entityDefNames) and not found do
+        if stats.entityDefNames[defIndex] = currentClass then
+          if stats.entityDefAnimValuesByIndex[defIndex] <> "" then
+            animRef := stats.entityDefAnimValuesByIndex[defIndex];
+            found := TRUE;
+          else
+            currentClass := stats.entityDefParents[defIndex];
+          end if;
+        end if;
+        incr(defIndex);
+      end while;
+      incr(inheritDepth);
+    end while;
+  end func;
+
+const func string: entityDefSkinForClass (
+    in frameStats: stats, in string: className) is func
+  result
+    var string: skinRef is "";
+  local
+    var string: currentClass is "";
+    var integer: inheritDepth is 0;
+    var integer: defIndex is 1;
+    var boolean: found is FALSE;
+  begin
+    currentClass := lower(className);
+    while currentClass <> "" and inheritDepth < ENTITY_DEF_INHERIT_LIMIT and
+        not found do
+      defIndex := 1;
+      while defIndex <= length(stats.entityDefNames) and not found do
+        if stats.entityDefNames[defIndex] = currentClass then
+          if stats.entityDefSkinValuesByIndex[defIndex] <> "" then
+            skinRef := stats.entityDefSkinValuesByIndex[defIndex];
+            found := TRUE;
+          else
+            currentClass := stats.entityDefParents[defIndex];
+          end if;
+        end if;
+        incr(defIndex);
+      end while;
+      incr(inheritDepth);
+    end while;
+  end func;
+
+const func string: entityDefSpawnclassForClass (
+    in frameStats: stats, in string: className) is func
+  result
+    var string: spawnclass is "";
+  local
+    var string: currentClass is "";
+    var integer: inheritDepth is 0;
+    var integer: defIndex is 1;
+    var boolean: found is FALSE;
+  begin
+    currentClass := lower(className);
+    while currentClass <> "" and inheritDepth < ENTITY_DEF_INHERIT_LIMIT and
+        not found do
+      defIndex := 1;
+      while defIndex <= length(stats.entityDefNames) and not found do
+        if stats.entityDefNames[defIndex] = currentClass then
+          if stats.entityDefSpawnclassValuesByIndex[defIndex] <> "" then
+            spawnclass := stats.entityDefSpawnclassValuesByIndex[defIndex];
+            found := TRUE;
+          else
+            currentClass := stats.entityDefParents[defIndex];
+          end if;
+        end if;
+        incr(defIndex);
+      end while;
+      incr(inheritDepth);
+    end while;
+  end func;
+
+const func integer: weaponAmmoRequiredForClass (
+    in frameStats: stats, in string: className) is func
+  result
+    var integer: ammoRequired is 1;
+  local
+    var integer: idx is 1;
+  begin
+    while idx <= length(stats.entityDefNames) do
+      if stats.entityDefNames[idx] = lower(className) and
+          stats.entityDefWeaponAmmoRequiredByIndex[idx] <> 0 then
+        ammoRequired := stats.entityDefWeaponAmmoRequiredByIndex[idx];
+      end if;
+      incr(idx);
+    end while;
+  end func;
+
+const func integer: weaponClipSizeForClass (
+    in frameStats: stats, in string: className) is func
+  result
+    var integer: clipSize is DEFAULT_AMMO_ON_PICKUP;
+  local
+    var integer: idx is 1;
+  begin
+    while idx <= length(stats.entityDefNames) do
+      if stats.entityDefNames[idx] = lower(className) and
+          stats.entityDefWeaponClipSizeByIndex[idx] <> 0 then
+        clipSize := stats.entityDefWeaponClipSizeByIndex[idx];
+      end if;
+      incr(idx);
+    end while;
+  end func;
+
+const func string: weaponProjectileForClass (
+    in frameStats: stats, in string: className) is func
+  result
+    var string: projectileName is "";
+  local
+    var integer: idx is 1;
+  begin
+    while idx <= length(stats.entityDefNames) and projectileName = "" do
+      if stats.entityDefNames[idx] = lower(className) then
+        projectileName := stats.entityDefWeaponProjectileByIndex[idx];
+      end if;
+      incr(idx);
+    end while;
+  end func;
+
+const func integer: projectileDamageForClass (
+    in frameStats: stats, in string: className) is func
+  result
+    var integer: damage is DEFAULT_SHOT_DAMAGE;
+  local
+    var integer: idx is 1;
+  begin
+    while idx <= length(stats.entityDefNames) do
+      if stats.entityDefNames[idx] = lower(className) and
+          stats.entityDefProjectileDamageByIndex[idx] <> 0 then
+        damage := stats.entityDefProjectileDamageByIndex[idx];
+      end if;
+      incr(idx);
+    end while;
+  end func;
+
+const proc: bindFrameEntityModel (inout frameStats: stats,
+    inout frameEntity: entity) is func
+  begin
+    if entity.modelRef = "" then
+      entity.modelRef := entityDefModelForClass(stats, entity.className);
+    end if;
+    if entity.animRef = "" then
+      entity.animRef := entityDefAnimForClass(stats, entity.className);
+    end if;
+    if entity.skinRef = "" then
+      entity.skinRef := entityDefSkinForClass(stats, entity.className);
+    end if;
+    if entity.modelRef <> "" then
+      stats.frameModelRefs +:= 1;
+      if modelRefResolved(stats, entity.modelRef) then
+        stats.frameModelResolved +:= 1;
+        if stats.firstFrameModelBinding = "" then
+          stats.firstFrameModelBinding := entity.entityName <& "=" <&
+              resolvedModelStem(stats, entity.modelRef);
+        end if;
+      else
+        stats.frameModelMissing +:= 1;
+        if stats.firstMissingFrameModel = "" then
+          stats.firstMissingFrameModel := entity.entityName <& "=" <&
+              entity.modelRef;
+        end if;
+      end if;
+    end if;
+    if entity.animRef <> "" then
+      stats.frameAnimRefs +:= 1;
+      if animRefResolved(stats, entity.animRef) then
+        stats.frameAnimResolved +:= 1;
+        addFrameAnimPlaybackSample(stats, entity.animRef);
+        if stats.firstFrameAnimBinding = "" then
+          stats.firstFrameAnimBinding := entity.entityName <& "=" <&
+              assetStem(entity.animRef);
+        end if;
+      else
+        stats.frameAnimMissing +:= 1;
+        if stats.firstMissingFrameAnim = "" then
+          stats.firstMissingFrameAnim := entity.entityName <& "=" <&
+              entity.animRef;
+        end if;
+      end if;
+    end if;
+    if entity.skinRef <> "" then
+      stats.frameSkinRefs +:= 1;
+      if skinRefResolved(stats, entity.skinRef) then
+        stats.frameSkinResolved +:= 1;
+        if stats.firstFrameSkinBinding = "" then
+          stats.firstFrameSkinBinding := entity.entityName <& "=" <&
+              lower(entity.skinRef);
+        end if;
+      else
+        stats.frameSkinMissing +:= 1;
+        if stats.firstMissingFrameSkin = "" then
+          stats.firstMissingFrameSkin := entity.entityName <& "=" <&
+              entity.skinRef;
+        end if;
+      end if;
+    end if;
+  end func;
+
+const proc: bindFrameEntitySpawnclass (inout frameStats: stats,
+    inout frameEntity: entity) is func
+  begin
+    if entity.spawnclass = "" then
+      entity.spawnclass := entityDefSpawnclassForClass(stats,
+          entity.className);
+    end if;
+    if entity.spawnclass <> "" then
+      stats.frameSpawnclassRefs +:= 1;
+      if supportedSpawnclass(entity.spawnclass) then
+        stats.frameSpawnclassResolved +:= 1;
+        if stats.firstFrameSpawnclassBinding = "" then
+          stats.firstFrameSpawnclassBinding := entity.entityName <& "=" <&
+              entity.spawnclass;
+        end if;
+      else
+        stats.frameSpawnclassUnsupported +:= 1;
+        if stats.firstUnsupportedFrameSpawnclass = "" then
+          stats.firstUnsupportedFrameSpawnclass := entity.entityName <& "=" <&
+              entity.spawnclass;
+        end if;
+      end if;
+    end if;
+  end func;
+
+const proc: inspectMapEntity (inout frameStats: stats,
+    in string: entityBlock) is func
+  local
+    var frameEntity: entity is frameEntity.value;
+    var string: originText is "";
+    var string: angleText is "";
+    var string: nextMapText is "";
+  begin
+    entity.className := lower(quotedValueAfter(entityBlock, "classname"));
+    entity.entityName := quotedValueAfter(entityBlock, "name");
+    entity.target := quotedValueAfter(entityBlock, "target");
+    entity.call := quotedValueAfter(entityBlock, "call");
+    entity.soundRef := firstSoundSpawnargValue(entityBlock);
+    entity.modelRef := quotedValueAfter(entityBlock, "model");
+    entity.animRef := quotedValueAfter(entityBlock, "anim");
+    entity.skinRef := quotedValueAfter(entityBlock, "skin");
+    entity.guiRef := quotedValueAfter(entityBlock, "gui");
+    entity.spawnclass := quotedValueAfter(entityBlock, "spawnclass");
+    originText := quotedValueAfter(entityBlock, "origin");
+    if originText <> "" then
+      entity.x := vectorComponentOrDefault(originText, 1, 0.0);
+      entity.y := vectorComponentOrDefault(originText, 2, 0.0);
+      entity.hasOrigin := TRUE;
+    end if;
+    if entity.className <> "" then
+      stats.mapEntities +:= 1;
+      if entity.className = "worldspawn" then
+        addFrameGuiRef(stats, entity.guiRef, TRUE, entity.entityName);
+        nextMapText := normalizedAssetPath(quotedValueAfter(entityBlock,
+            "nextmap"));
+        if nextMapText <> "" then
+          stats.currentMapNextMapRefs +:= 1;
+          if stats.firstNextMap = "" then
+            stats.firstNextMap := nextMapText;
+          end if;
+        end if;
+      end if;
+      if entity.className = "info_player_start" then
+        stats.playerStarts +:= 1;
+        if entity.hasOrigin then
+          stats.playerParsed := TRUE;
+          stats.playerX := entity.x;
+          stats.playerY := entity.y;
+        end if;
+        angleText := quotedValueAfter(entityBlock, "angle");
+        if angleText <> "" then
+          block
+            stats.playerYaw := float(angleText);
+          exception
+            catch RANGE_ERROR:
+              stats.playerYaw := 0.0;
+          end block;
+        end if;
+      else
+        if startsWith(entity.className, "monster_") then
+          stats.monsters +:= 1;
+          entity.health := entityDefHealthForClass(stats, entity.className,
+              DEFAULT_MONSTER_HEALTH);
+          if entity.soundRef = "" then
+            entity.soundRef := entityDefSoundForClass(stats, entity.className);
+          end if;
+          if stats.firstMonsterName = "" then
+            stats.firstMonsterName := entity.entityName;
+            stats.firstMonsterClass := entity.className;
+            stats.firstMonsterHealthBefore := entity.health;
+            stats.firstMonsterHealthAfter := entity.health;
+          end if;
+        elsif isPickupClass(entity.className) then
+          stats.pickups +:= 1;
+          if entity.soundRef = "" then
+            entity.soundRef := entityDefSoundForClass(stats, entity.className);
+          end if;
+        elsif entity.className = "func_door" or entity.className = "mover_door" then
+          stats.doors +:= 1;
+        elsif startsWith(entity.className, "trigger_") then
+          stats.triggers +:= 1;
+        end if;
+        if entity.call <> "" then
+          stats.mapCallRefs +:= 1;
+          if scriptEventPathForFunction(stats, entity.call) <> "" then
+            stats.mapCallEventsResolved +:= 1;
+          end if;
+        end if;
+        bindFrameEntityModel(stats, entity);
+        bindFrameEntitySpawnclass(stats, entity);
+        stats.entities &:= entity;
+        stats.runtimeEntities +:= 1;
+      end if;
+    end if;
+  end func;
+
+const proc: addBrushFromBlock (inout frameStats: stats,
+    in string: blockText) is func
+  local
+    var array string: lines is 0 times "";
+    var string: line is "";
+    var string: cleanLine is "";
+    var array string: tokens is 0 times "";
+    var float: nx is 0.0;
+    var float: ny is 0.0;
+    var float: dist is 0.0;
+    var float: planeValue is 0.0;
+    var frameBrushBox: box is frameBrushBox.value;
+    var boolean: hasMinX is FALSE;
+    var boolean: hasMaxX is FALSE;
+    var boolean: hasMinY is FALSE;
+    var boolean: hasMaxY is FALSE;
+  begin
+    lines := split(blockText, '\n');
+    for line range lines do
+      if startsWith(trim(line), "(") then
+        cleanLine := replace(trim(line), "(", " ");
+        cleanLine := replace(cleanLine, ")", " ");
+        tokens := noEmptyStrings(split(cleanLine, ' '));
+        if length(tokens) >= 4 then
+          block
+            nx := float(cleanedToken(tokens[1]));
+            ny := float(cleanedToken(tokens[2]));
+            dist := float(cleanedToken(tokens[4]));
+            planeValue := -dist;
+            if nx = 1.0 and ny = 0.0 then
+              box.maxX := planeValue;
+              hasMaxX := TRUE;
+            elsif nx = -1.0 and ny = 0.0 then
+              box.minX := -planeValue;
+              hasMinX := TRUE;
+            elsif nx = 0.0 and ny = 1.0 then
+              box.maxY := planeValue;
+              hasMaxY := TRUE;
+            elsif nx = 0.0 and ny = -1.0 then
+              box.minY := -planeValue;
+              hasMinY := TRUE;
+            end if;
+          exception
+            catch RANGE_ERROR:
+              noop;
+          end block;
+        end if;
+      end if;
+    end for;
+    stats.brushBoxes +:= 1;
+    box.complete := hasMinX and hasMaxX and hasMinY and hasMaxY;
+    if box.complete then
+      stats.completeBrushBoxes +:= 1;
+      stats.brushes &:= box;
+    end if;
+  end func;
+
+const proc: inspectBrushes (inout frameStats: stats,
+    in string: content) is func
+  local
+    var string: contentLower is "";
+    var integer: searchPos is 1;
+    var integer: brushPos is 0;
+    var integer: blockStart is 0;
+    var integer: blockEnd is 0;
+  begin
+    contentLower := lower(content);
+    brushPos := pos(contentLower, "brushdef3", searchPos);
+    while brushPos <> 0 do
+      blockStart := pos(content, "{", brushPos);
+      blockEnd := matchingBlockEnd(content, blockStart);
+      if blockStart <> 0 and blockEnd <> 0 then
+        addBrushFromBlock(stats, content[blockStart .. blockEnd]);
+      end if;
+      searchPos := brushPos + length("brushdef3");
+      brushPos := pos(contentLower, "brushdef3", searchPos);
+    end while;
+  end func;
+
+const proc: inspectFrameMd5AnimContent (inout frameStats: stats,
+    in string: path, in string: content) is func
+  local
+    var string: contentLower is "";
+    var integer: frameCount is 0;
+    var integer: frameRate is 0;
+  begin
+    contentLower := lower(content);
+    if pos(contentLower, "md5version", 1) <> 0 and
+        pos(contentLower, "numframes", 1) <> 0 and
+        pos(contentLower, "framerate", 1) <> 0 and
+        pos(contentLower, "hierarchy", 1) <> 0 then
+      frameCount := integerAfterWord(content, "numframes");
+      frameRate := integerAfterWord(content, "framerate");
+      if frameCount <> 0 and frameRate <> 0 then
+        stats.frameMd5AnimsParsed +:= 1;
+        stats.md5AnimAssetStems &:= assetStem(path);
+        stats.md5AnimFrameCounts &:= frameCount;
+        stats.md5AnimFrameRates &:= frameRate;
+      end if;
+    end if;
+  end func;
+
+const proc: inspectGuiContent (inout frameStats: stats,
+    in string: path, in string: content) is func
+  begin
+    stats.guiAssets +:= 1;
+    appendUniqueString(stats.guiAssetPaths, normalizedAssetPath(path));
+    if stats.firstGuiAsset = "" then
+      stats.firstGuiAsset := normalizedAssetPath(path);
+    end if;
+    stats.guiWindowDefs +:= countWord(content, "windowDef");
+    stats.guiRectDecls +:= countWord(content, "rect");
+    stats.guiVisibleDecls +:= countWord(content, "visible");
+    stats.guiMatcolorDecls +:= countWord(content, "matcolor");
+    stats.guiOnActionDecls +:= countWord(content, "onAction");
+  end func;
+
+const proc: inspectSkinContent (inout frameStats: stats,
+    in string: path, in string: content) is func
+  local
+    var string: contentLower is "";
+    var integer: searchPos is 1;
+    var integer: skinPos is 0;
+    var string: skinName is "";
+    var integer: blockStart is 0;
+    var integer: blockEnd is 0;
+    var string: blockText is "";
+    var string: normalizedBlock is "";
+    var array string: tokens is 0 times "";
+    var integer: tokenIndex is 1;
+    var string: fromMaterial is "";
+    var string: toMaterial is "";
+  begin
+    stats.skinAssets +:= 1;
+    appendUniqueString(stats.skinAssetStems, assetStem(path));
+    if stats.firstSkinAsset = "" then
+      stats.firstSkinAsset := normalizedAssetPath(path);
+    end if;
+    contentLower := lower(content);
+    skinPos := pos(contentLower, "skin ", searchPos);
+    while skinPos <> 0 do
+      skinName := lower(declNameAfter(content, skinPos + length("skin ")));
+      blockStart := pos(content, "{", skinPos);
+      blockEnd := matchingBlockEnd(content, blockStart);
+      if skinName <> "" and blockStart <> 0 and blockEnd <> 0 then
+        stats.skinDecls +:= 1;
+        stats.skinNames &:= skinName;
+        blockText := content[blockStart .. blockEnd];
+        normalizedBlock := replace(lower(blockText), "\n", " ");
+        normalizedBlock := replace(normalizedBlock, "\r", " ");
+        normalizedBlock := replace(normalizedBlock, "\t", " ");
+        tokens := noEmptyStrings(split(normalizedBlock, ' '));
+        tokenIndex := 1;
+        while tokenIndex < length(tokens) do
+          fromMaterial := cleanedToken(tokens[tokenIndex]);
+          toMaterial := cleanedToken(tokens[succ(tokenIndex)]);
+          if startsWith(fromMaterial, "textures/") or
+              startsWith(fromMaterial, "models/") then
+            stats.skinRemaps +:= 1;
+            incr(tokenIndex);
+          end if;
+          incr(tokenIndex);
+        end while;
+      end if;
+      searchPos := skinPos + length("skin ");
+      skinPos := pos(contentLower, "skin ", searchPos);
+    end while;
+  end func;
+
+const proc: inspectMapContent (inout frameStats: stats,
+    in string: content) is func
+  local
+    var string: contentLower is "";
+    var integer: searchPos is 1;
+    var integer: classPos is 0;
+    var integer: blockStart is 0;
+    var integer: blockEnd is 0;
+  begin
+    inspectBrushes(stats, content);
+    contentLower := lower(content);
+    classPos := pos(contentLower, "\"classname\"", searchPos);
+    while classPos <> 0 do
+      blockStart := previousCharPos(content, '{', classPos);
+      blockEnd := matchingBlockEnd(content, blockStart);
+      if blockStart <> 0 and blockEnd <> 0 then
+        inspectMapEntity(stats, content[blockStart .. blockEnd]);
+      end if;
+      searchPos := classPos + length("\"classname\"");
+      classPos := pos(contentLower, "\"classname\"", searchPos);
+    end while;
+  end func;
+
+const proc: summarizeNextMapForTransition (inout frameStats: stats,
+    in string: content) is func
+  local
+    var integer: searchPos is 1;
+    var integer: classPos is 0;
+    var integer: blockStart is 0;
+    var integer: blockEnd is 0;
+    var string: blockText is "";
+    var string: className is "";
+    var string: entityName is "";
+  begin
+    classPos := pos(lower(content), "\"classname\"", searchPos);
+    while classPos <> 0 do
+      blockStart := previousCharPos(content, '{', classPos);
+      blockEnd := matchingBlockEnd(content, blockStart);
+      if blockStart <> 0 and blockEnd <> 0 then
+        blockText := content[blockStart .. blockEnd];
+        className := lower(quotedValueAfter(blockText, "classname"));
+        if className = "info_player_start" then
+          stats.nextMapPlayerStarts +:= 1;
+          if stats.firstNextPlayerStart = "" then
+            entityName := quotedValueAfter(blockText, "name");
+            if entityName <> "" then
+              stats.firstNextPlayerStart := entityName;
+            else
+              stats.firstNextPlayerStart := "info_player_start";
+            end if;
+          end if;
+        end if;
+      end if;
+      searchPos := classPos + length("\"classname\"");
+      classPos := pos(lower(content), "\"classname\"", searchPos);
+    end while;
+  end func;
+
+const proc: simulateFrame (inout frameStats: stats) is func
+  local
+    var frameEntity: entity is frameEntity.value;
+    var float: yawRadians is 0.0;
+    var integer: frameStep is 0;
+    var float: pathX is 0.0;
+    var float: pathY is 0.0;
+    var string: movementBlocker is "";
+    var boolean: healthTouched is FALSE;
+    var boolean: ammoTouched is FALSE;
+    var boolean: weaponTouched is FALSE;
+    var boolean: triggerTouched is FALSE;
+    var boolean: scriptExecuted is FALSE;
+    var boolean: movementBlocked is FALSE;
+    var string: eventPath is "";
+    var string: doorSoundRef is "";
+    var string: weaponSoundRef is "";
+    var string: monsterSoundRef is "";
+    var float: dx is 0.0;
+    var float: dy is 0.0;
+    var float: distanceSq is 0.0;
+    var float: bestDistanceSq is 0.0;
+    var boolean: visibleMonsterFound is FALSE;
+    var frameEntity: targetEntity is frameEntity.value;
+  begin
+    stats.playerHealthAfterPickups := stats.playerHealthBefore;
+    stats.playerHealthAfterCombat := stats.playerHealthBefore;
+    stats.frameMoveRequestedSteps := FRAME_STEPS;
+    stats.framePlayerFinalX := stats.playerX;
+    stats.framePlayerFinalY := stats.playerY;
+    if stats.playerParsed then
+      yawRadians := degreesToRadians(stats.playerYaw);
+      for frameStep range 0 to FRAME_STEPS do
+        if not movementBlocked then
+          pathX := stats.playerX + cos(yawRadians) *
+              FRAME_STEP_DISTANCE * float(frameStep);
+          pathY := stats.playerY + sin(yawRadians) *
+              FRAME_STEP_DISTANCE * float(frameStep);
+          movementBlocker := "";
+          if frameStep <> 0 then
+            movementBlocker := movementBlockerAtPoint(stats, pathX, pathY);
+          end if;
+          if movementBlocker <> "" then
+            movementBlocked := TRUE;
+            stats.frameMoveBlocked := TRUE;
+            if startsWith(movementBlocker, "entity:") then
+              stats.frameMoveBlockingEntities +:= 1;
+            else
+              stats.frameMoveBlockingBrushes +:= 1;
+            end if;
+            if stats.firstFrameMovementBlocker = "" then
+              stats.firstFrameMovementBlocker := movementBlocker;
+            end if;
+          else
+            if frameStep <> 0 then
+              stats.frameMoveAcceptedSteps +:= 1;
+            end if;
+            stats.framePlayerFinalX := pathX;
+            stats.framePlayerFinalY := pathY;
+          end if;
+        end if;
+        if not movementBlocked then
+          for entity range stats.entities do
+            if isPickupClass(entity.className) and
+                pointTouchesEntity(entity, pathX, pathY) then
+            if startsWith(entity.className, "item_") and not healthTouched then
+              stats.touchedPickups +:= 1;
+              stats.touchedHealthPickups +:= 1;
+              healthTouched := TRUE;
+              if stats.firstPickupName = "" then
+                stats.firstPickupName := entity.entityName;
+              end if;
+            elsif startsWith(entity.className, "ammo_") and not ammoTouched then
+              stats.touchedPickups +:= 1;
+              stats.touchedAmmoPickups +:= 1;
+              stats.ammoAfterPickups +:= DEFAULT_AMMO_ON_PICKUP;
+              ammoTouched := TRUE;
+              if stats.firstPickupName = "" then
+                stats.firstPickupName := entity.entityName;
+              end if;
+            elsif startsWith(entity.className, "weapon_") and not weaponTouched then
+              stats.touchedPickups +:= 1;
+              stats.touchedWeaponPickups +:= 1;
+              stats.weaponReady := TRUE;
+              stats.activeWeaponClass := entity.className;
+              stats.activeWeaponAmmoRequired :=
+                  weaponAmmoRequiredForClass(stats, entity.className);
+              stats.activeWeaponClipSize :=
+                  weaponClipSizeForClass(stats, entity.className);
+              stats.activeWeaponProjectile :=
+                  weaponProjectileForClass(stats, entity.className);
+              stats.activeWeaponFireSound :=
+                  entityDefSoundForClass(stats, entity.className);
+              if stats.activeWeaponProjectile <> "" then
+                stats.activeWeaponDamage := projectileDamageForClass(stats,
+                    stats.activeWeaponProjectile);
+              end if;
+              if stats.activeWeaponAmmoRequired <= 0 then
+                stats.activeWeaponAmmoRequired := 1;
+              end if;
+              weaponTouched := TRUE;
+              if stats.firstPickupName = "" then
+                stats.firstPickupName := entity.entityName;
+              end if;
+            end if;
+          elsif startsWith(entity.className, "trigger_") and
+              not triggerTouched and
+              pointTouchesEntity(entity, pathX, pathY) then
+            stats.touchedTriggers +:= 1;
+            stats.firstTriggerName := entity.entityName;
+            if entityNamedExists(stats.entities, entity.target) and
+                stats.activatedDoors = 0 then
+              stats.activatedDoors +:= 1;
+              stats.firstActivatedDoorName := entity.target;
+              doorSoundRef := soundRefForEntityName(stats, entity.target);
+              addFrameSoundEvent(stats, "door_open", doorSoundRef);
+            end if;
+            triggerTouched := TRUE;
+          elsif entity.call <> "" and not scriptExecuted then
+            eventPath := scriptEventPathForFunction(stats, entity.call);
+            if eventPath <> "" then
+              stats.frameScriptCalls +:= 1;
+              stats.firstScriptCall := entity.call;
+              stats.firstScriptEventPath := entity.call <& ":" <& eventPath;
+              if pos(eventPath, "print", 1) <> 0 then
+                stats.frameScriptPrints +:= 1;
+              end if;
+              if pos(eventPath, "trigger", 1) <> 0 then
+                stats.frameScriptTriggers +:= 1;
+                if stats.activatedDoors = 0 and
+                    entityNamedExists(stats.entities, "door_smoke_1") then
+                  stats.activatedDoors := 1;
+                  stats.firstActivatedDoorName := "door_smoke_1";
+                  doorSoundRef := soundRefForEntityName(stats, "door_smoke_1");
+                  addFrameSoundEvent(stats, "door_open", doorSoundRef);
+                end if;
+              end if;
+              if pos(eventPath, "wait", 1) <> 0 then
+                stats.frameScriptWaits +:= 1;
+              end if;
+              if pos(eventPath, "objective", 1) <> 0 then
+                stats.frameScriptObjectives +:= 1;
+              end if;
+              scriptExecuted := TRUE;
+            end if;
+          end if;
+          end for;
+        end if;
+      end for;
+    end if;
+    stats.ammoAfterCombat := stats.ammoAfterPickups;
+    if stats.weaponReady and stats.ammoAfterCombat > 0 and stats.firstMonsterName <> "" then
+      bestDistanceSq := 999999999.0;
+      for entity range stats.entities do
+        if startsWith(entity.className, "monster_") and entity.hasOrigin then
+          stats.frameHitscanTraces +:= 1;
+          if lineBlockedByBrush(stats, stats.playerX, stats.playerY,
+              entity.x, entity.y) then
+            stats.frameHitscanBlocked +:= 1;
+            if stats.firstFrameHitscanBlocker = "" then
+              stats.firstFrameHitscanBlocker := "brush";
+            end if;
+          else
+            stats.frameHitscanClear +:= 1;
+            dx := entity.x - stats.playerX;
+            dy := entity.y - stats.playerY;
+            distanceSq := dx * dx + dy * dy;
+            if distanceSq < bestDistanceSq then
+              bestDistanceSq := distanceSq;
+              targetEntity := entity;
+              visibleMonsterFound := TRUE;
+            end if;
+          end if;
+        elsif weaponSoundRef = "" and startsWith(entity.className, "weapon_") then
+          weaponSoundRef := stats.activeWeaponFireSound;
+        end if;
+      end for;
+      if visibleMonsterFound and
+          stats.ammoAfterCombat >= stats.activeWeaponAmmoRequired then
+        stats.shotsFired := 1;
+        stats.ammoAfterCombat -:= stats.activeWeaponAmmoRequired;
+        stats.monsterHits := 1;
+        stats.frameHitscanHits := 1;
+        stats.firstFrameHitscanTarget := targetEntity.entityName;
+        addFrameSoundEvent(stats, "weapon_fire", weaponSoundRef);
+        if targetEntity.entityName = stats.firstMonsterName then
+          stats.firstMonsterHealthAfter := stats.firstMonsterHealthBefore -
+              stats.activeWeaponDamage;
+          stats.firstMonsterAliveAfter := stats.firstMonsterHealthAfter > 0;
+        end if;
+      end if;
+    end if;
+    stats.loopAmmoRequired := stats.activeWeaponAmmoRequired;
+    stats.loopShotDamage := stats.activeWeaponDamage;
+    if stats.firstMonsterAliveAfter and stats.firstMonsterName <> "" then
+      for entity range stats.entities do
+        if entity.entityName = stats.firstMonsterName and entity.hasOrigin then
+          monsterSoundRef := entity.soundRef;
+          dx := entity.x - stats.playerX;
+          dy := entity.y - stats.playerY;
+          if dx * dx + dy * dy <= MONSTER_ATTACK_RANGE * MONSTER_ATTACK_RANGE then
+            stats.monsterAttacks := 1;
+            addFrameSoundEvent(stats, "monster_response", monsterSoundRef);
+            stats.playerHealthAfterCombat := stats.playerHealthAfterPickups -
+                DEFAULT_MONSTER_DAMAGE;
+          end if;
+        end if;
+      end for;
+    end if;
+  end func;
+
+const proc: simulateLoop (inout frameStats: stats) is func
+  local
+    var integer: loopTick is 0;
+    var integer: monsterHealth is 0;
+    var integer: playerHealth is 0;
+    var integer: ammo is 0;
+    var boolean: monsterAlive is TRUE;
+  begin
+    stats.loopTicks := LOOP_TICKS;
+    stats.loopPickupsConsumed := stats.touchedPickups;
+    stats.loopDoorsOpen := stats.activatedDoors;
+    monsterHealth := stats.firstMonsterHealthBefore;
+    playerHealth := stats.playerHealthAfterPickups;
+    ammo := stats.ammoAfterPickups;
+    if stats.weaponReady and stats.firstFrameHitscanTarget <> "" then
+      for loopTick range 1 to LOOP_TICKS do
+        if ammo >= stats.loopAmmoRequired and monsterAlive then
+          stats.loopShotsFired +:= 1;
+          stats.loopMonsterHits +:= 1;
+          ammo -:= stats.loopAmmoRequired;
+          monsterHealth -:= stats.loopShotDamage;
+          if monsterHealth <= 0 then
+            monsterHealth := 0;
+            monsterAlive := FALSE;
+          else
+            stats.loopMonsterAttacks +:= 1;
+            playerHealth -:= DEFAULT_MONSTER_DAMAGE;
+            if playerHealth < 0 then
+              playerHealth := 0;
+            end if;
+          end if;
+        end if;
+      end for;
+    end if;
+    stats.loopAmmoAfter := ammo;
+    stats.loopPlayerHealthAfter := playerHealth;
+    stats.loopMonsterHealthAfter := monsterHealth;
+    stats.loopMonsterAliveAfter := monsterAlive;
+    stats.loopClearCondition := not monsterAlive and stats.loopDoorsOpen <> 0;
+  end func;
+
+const proc: resolveNextCompiledAssets (inout frameStats: stats,
+    in array string: pk4Files) is func
+  local
+    var string: pk4File is "";
+    var fileSys: zipFs is fileSys.value;
+    var array string: paths is 0 times "";
+    var string: path is "";
+    var string: pathLower is "";
+  begin
+    if stats.nextMapDeclared then
+      for pk4File range pk4Files do
+        zipFs := openZip(pk4File);
+        if zipFs <> fileSys.value then
+          paths := readDir(zipFs, RECURSIVE);
+          for path range paths do
+            pathLower := normalizedAssetPath(path);
+            if pathLower = globalNextProcPath then
+              globalNextProcFound := TRUE;
+            elsif pathLower = globalNextCmPath then
+              globalNextCmFound := TRUE;
+            end if;
+          end for;
+          close(zipFs);
+        end if;
+      end for;
+    end if;
+  end func;
+
+const proc: prepareFrameTransition (inout frameStats: stats,
+    in array string: pk4Files) is func
+  local
+    var string: nextContent is "";
+  begin
+    if stats.firstNextMap <> "" then
+      stats.nextMapDeclared := TRUE;
+      stats.nextMapPath := mapNameToAssetPath(stats.firstNextMap);
+      globalNextProcPath := compiledSiblingPath(stats.nextMapPath, ".proc");
+      globalNextCmPath := compiledSiblingPath(stats.nextMapPath, ".cm");
+      nextContent := mapContentForPath(stats, stats.nextMapPath);
+      stats.nextMapFound := nextContent <> "";
+      if stats.nextMapFound then
+        summarizeNextMapForTransition(stats, nextContent);
+      end if;
+      resolveNextCompiledAssets(stats, pk4Files);
+    end if;
+    if stats.loopClearCondition and stats.nextMapDeclared and
+        stats.nextMapFound and stats.nextMapPlayerStarts <> 0 and
+        globalNextProcFound and globalNextCmFound then
+      stats.transitionState := "ready";
+      stats.transitionPath := stats.requestedMapPath <& ">cleared>" <&
+          stats.nextMapPath;
+    elsif stats.loopClearCondition then
+      stats.transitionState := "incomplete";
+    else
+      stats.transitionState := "pending";
+    end if;
+  end func;
+
+const proc: buildAndVerifySaveSnapshot (inout frameStats: stats) is func
+  local
+    var string: clearText is "";
+    var string: healthText is "";
+    var string: ammoText is "";
+    var string: doorsText is "";
+    var string: screenText is "";
+  begin
+    stats.saveSnapshot := "map=" <& stats.requestedMapPath <&
+        ";health=" <& stats.loopPlayerHealthAfter <&
+        ";ammo=" <& stats.loopAmmoAfter <&
+        ";monster_health=" <& stats.loopMonsterHealthAfter <&
+        ";monster_alive=" <& stats.loopMonsterAliveAfter <&
+        ";doors_open=" <& stats.loopDoorsOpen <&
+        ";clear=" <& stats.loopClearCondition <&
+        ";screen=" <& screenStateForFrame(stats) <&
+        ";next_map=" <& stats.nextMapPath <&
+        ";transition=" <& stats.transitionState;
+    healthText := snapshotValue(stats.saveSnapshot, "health");
+    ammoText := snapshotValue(stats.saveSnapshot, "ammo");
+    doorsText := snapshotValue(stats.saveSnapshot, "doors_open");
+    clearText := snapshotValue(stats.saveSnapshot, "clear");
+    screenText := snapshotValue(stats.saveSnapshot, "screen");
+    block
+      stats.restoredPlayerHealth := integer(healthText);
+      stats.restoredAmmo := integer(ammoText);
+      stats.restoredDoorsOpen := integer(doorsText);
+      stats.restoredClearCondition := clearText = "TRUE";
+      stats.restoredScreenState := screenText;
+      stats.restoreVerified :=
+          stats.restoredPlayerHealth = stats.loopPlayerHealthAfter and
+          stats.restoredAmmo = stats.loopAmmoAfter and
+          stats.restoredDoorsOpen = stats.loopDoorsOpen and
+          stats.restoredClearCondition = stats.loopClearCondition and
+          stats.restoredScreenState = screenStateForFrame(stats);
+    exception
+      catch RANGE_ERROR:
+        stats.restoreVerified := FALSE;
+    end block;
+  end func;
+
+const func array string: findPk4Archives (in string: basePath) is func
+  result
+    var array string: pk4Files is 0 times "";
+  local
+    var array string: names is 0 times "";
+    var string: name is "";
+  begin
+    if fileType(basePath) = FILE_DIR then
+      names := readDir(basePath);
+      for name range names do
+        if isPk4Name(name) and fileType(joinPath(basePath, name)) = FILE_REGULAR then
+          pk4Files &:= joinPath(basePath, name);
+        end if;
+      end for;
+    end if;
+  end func;
+
+const proc: scanArchive (inout frameStats: stats,
+    in string: pk4File, in string: targetMapPath) is func
+  local
+    var fileSys: zipFs is fileSys.value;
+    var array string: paths is 0 times "";
+    var string: path is "";
+    var string: pathLower is "";
+  begin
+    zipFs := openZip(pk4File);
+    if zipFs = fileSys.value then
+      logError("could not open pk4 archive: " <& pk4File);
+    else
+      paths := readDir(zipFs, RECURSIVE);
+      for path range paths do
+        pathLower := normalizedAssetPath(path);
+        if isSoundAssetPath(pathLower) then
+          stats.soundAssets +:= 1;
+          appendUniqueString(stats.soundAssetStems, assetStem(pathLower));
+        elsif isModelAssetPath(pathLower) then
+          stats.modelAssets +:= 1;
+          appendUniqueString(stats.modelAssetStems, assetStem(pathLower));
+          if endsWith(pathLower, ".md5anim") then
+            stats.frameMd5AnimAssets +:= 1;
+            inspectFrameMd5AnimContent(stats, pathLower, getFile(zipFs, path));
+          end if;
+        elsif isGuiAssetPath(pathLower) then
+          inspectGuiContent(stats, pathLower, getFile(zipFs, path));
+        elsif isSkinAssetPath(pathLower) then
+          inspectSkinContent(stats, pathLower, getFile(zipFs, path));
+        end if;
+      end for;
+      for path range paths do
+        pathLower := normalizedAssetPath(path);
+        if startsWith(pathLower, "maps/") and endsWith(pathLower, ".map") then
+          addMapAsset(stats, pathLower, getFile(zipFs, path));
+        end if;
+      end for;
+      for path range paths do
+        pathLower := normalizedAssetPath(path);
+        if endsWith(pathLower, ".script") then
+          inspectScriptContent(stats, getFile(zipFs, path));
+        end if;
+      end for;
+      for path range paths do
+        pathLower := normalizedAssetPath(path);
+        if endsWith(pathLower, ".def") or endsWith(pathLower, ".decl") then
+          inspectDefContent(stats, getFile(zipFs, path));
+        end if;
+      end for;
+      for path range paths do
+        pathLower := normalizedAssetPath(path);
+        if not stats.requestedMapFound and pathLower = targetMapPath then
+          stats.requestedMapFound := TRUE;
+          inspectMapContent(stats, getFile(zipFs, path));
+        end if;
+      end for;
+      close(zipFs);
+    end if;
+  end func;
+
+const proc: parseArgs (inout frameConfig: config) is func
+  local
+    var array string: args is 0 times "";
+    var integer: argIdx is 1;
+  begin
+    args := argv(PROGRAM);
+    while argIdx <= length(args) do
+      if args[argIdx] = "--help" or args[argIdx] = "-h" then
+        config.showHelp := TRUE;
+      elsif args[argIdx] = "--doom3_data_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.dataPath := convDosPath(args[argIdx]);
+      elsif args[argIdx] = "--doom3_base_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.basePath := convDosPath(args[argIdx]);
+      elsif args[argIdx] = "--doom3_start_map" and argIdx < length(args) then
+        incr(argIdx);
+        config.startMap := args[argIdx];
+      elsif args[argIdx] = "+map" and argIdx < length(args) then
+        incr(argIdx);
+        config.startMap := args[argIdx];
+      elsif args[argIdx] = "+set" and argIdx + 2 <= length(args) then
+        if args[argIdx + 1] = "fs_basepath" then
+          config.dataPath := convDosPath(args[argIdx + 2]);
+        elsif args[argIdx + 1] = "fs_game" then
+          config.basePath := convDosPath(args[argIdx + 2]);
+        end if;
+        argIdx +:= 2;
+      end if;
+      incr(argIdx);
+    end while;
+    if config.basePath = "" then
+      config.basePath := joinPath(config.dataPath, DEFAULT_BASE_DIR);
+    end if;
+  end func;
+
+const proc: showUsage is func
+  begin
+    writeln("Usage:");
+    writeln("  s7 doom3_seed7_frame.s7 --doom3_data_path <doom3-root>");
+    writeln("  s7 doom3_seed7_frame.s7 +set fs_basepath <doom3-root> +map <map>");
+    writeln("");
+    writeln("Scans user-owned Doom 3 pk4 files for game-frame readiness.");
+  end func;
+
+const proc: printStats (in frameStats: stats) is func
+  begin
+    logInfo("pk4_archives=" <& stats.pk4Archives);
+    logInfo("requested_map=" <& stats.requestedMapPath);
+    logInfo("requested_map_found=" <& stats.requestedMapFound);
+    logInfo("entity_defs=" <& stats.entityDefs <&
+        " health=" <& stats.entityDefHealthValues <&
+        " inherit=" <& stats.entityDefInheritValues <&
+        " spawnclass=" <& stats.entityDefSpawnclassValues);
+    logInfo("frame_weapon_defs weapons=" <& stats.weaponDefs <&
+        " projectiles=" <& stats.projectileDefs <&
+        " ammo_required=" <& stats.weaponAmmoRequiredValues <&
+        " clip_size=" <& stats.weaponClipSizeValues <&
+        " projectile_refs=" <& stats.weaponProjectileRefs <&
+        " fire_sound=" <& stats.weaponFireSoundRefs <&
+        " projectile_damage=" <& stats.projectileDamageValues);
+    logInfo("map_entities=" <& stats.mapEntities <&
+        " runtime=" <& stats.runtimeEntities <&
+        " player_start=" <& stats.playerStarts);
+    logInfo("frame_map_catalog assets=" <& stats.mapAssets <&
+        " unique=" <& stats.uniqueMapAssets);
+    logInfo("current_map_next_maps=" <& stats.currentMapNextMapRefs);
+    logInfo("frame_brush_trace boxes=" <& stats.brushBoxes <&
+        " complete=" <& stats.completeBrushBoxes);
+    logInfo("runtime_kinds monster=" <& stats.monsters <&
+        " pickup=" <& stats.pickups <& " door=" <& stats.doors <&
+        " trigger=" <& stats.triggers);
+    logInfo("player_start_parsed=" <& stats.playerParsed);
+    logInfo("frame_movement requested=" <& stats.frameMoveRequestedSteps <&
+        " accepted=" <& stats.frameMoveAcceptedSteps <&
+        " blocked=" <& stats.frameMoveBlocked);
+    logInfo("frame_movement_blockers brush=" <&
+        stats.frameMoveBlockingBrushes <& " entity=" <&
+        stats.frameMoveBlockingEntities);
+    logInfo("frame_player_final_x=" <& stats.framePlayerFinalX);
+    logInfo("frame_script_bindings files=" <& stats.scriptFiles <&
+        " event_functions=" <& stats.scriptEventFunctions <&
+        " map_calls=" <& stats.mapCallRefs <&
+        " resolved_events=" <& stats.mapCallEventsResolved);
+    logInfo("frame_sound_assets=" <& stats.soundAssets <&
+        " unique=" <& length(stats.soundAssetStems));
+    logInfo("frame_model_assets=" <& stats.modelAssets <&
+        " unique=" <& length(stats.modelAssetStems) <&
+        " model_defs=" <& stats.modelDefs <&
+        " mesh_values=" <& stats.modelDefMeshValues);
+    logInfo("frame_model_bindings refs=" <& stats.frameModelRefs <&
+        " resolved=" <& stats.frameModelResolved <&
+        " missing=" <& stats.frameModelMissing <&
+        " anim_refs=" <& stats.frameAnimRefs <&
+        " anim_resolved=" <& stats.frameAnimResolved <&
+        " anim_missing=" <& stats.frameAnimMissing);
+    logInfo("frame_skin_assets=" <& stats.skinAssets <&
+        " unique=" <& length(stats.skinAssetStems) <&
+        " skin_decls=" <& stats.skinDecls <&
+        " remaps=" <& stats.skinRemaps);
+    logInfo("frame_skin_bindings refs=" <& stats.frameSkinRefs <&
+        " resolved=" <& stats.frameSkinResolved <&
+        " missing=" <& stats.frameSkinMissing);
+    logInfo("frame_spawnclass_bindings refs=" <&
+        stats.frameSpawnclassRefs <& " resolved=" <&
+        stats.frameSpawnclassResolved <& " unsupported=" <&
+        stats.frameSpawnclassUnsupported);
+    logInfo("frame_anim_playback assets=" <& stats.frameMd5AnimAssets <&
+        " parsed=" <& stats.frameMd5AnimsParsed <&
+        " samples=" <& stats.frameAnimPlaybackSamples <&
+        " interpolation=" <& stats.frameAnimInterpolationSamples);
+    logInfo("first_frame_anim_sample frame_75ms=" <&
+        stats.firstFrameAnimSampleFrame <& " next_frame=" <&
+        stats.firstFrameAnimNextFrame <& " blend_percent=" <&
+        stats.firstFrameAnimBlendPercent);
+    logInfo("frame_gui_assets=" <& stats.guiAssets <&
+        " unique=" <& length(stats.guiAssetPaths) <&
+        " window_defs=" <& stats.guiWindowDefs <&
+        " rects=" <& stats.guiRectDecls <&
+        " visible=" <& stats.guiVisibleDecls <&
+        " matcolor=" <& stats.guiMatcolorDecls <&
+        " on_action=" <& stats.guiOnActionDecls);
+    logInfo("frame_gui_refs entity=" <& stats.entityDefGuiRefs <&
+        " entity_resolved=" <& stats.entityDefGuiResolved <&
+        " entity_missing=" <& stats.entityDefGuiMissing <&
+        " map=" <& stats.mapGuiRefs <&
+        " map_resolved=" <& stats.mapGuiResolved <&
+        " map_missing=" <& stats.mapGuiMissing);
+    logInfo("frame_gui_runtime surfaces=" <& stats.runtimeGuiSurfaces <&
+        " hud_bindings=" <& stats.runtimeHudBindings);
+    logInfo("frame_pickups touched=" <& stats.touchedPickups <&
+        " health=" <& stats.touchedHealthPickups <&
+        " ammo=" <& stats.touchedAmmoPickups <&
+        " weapon=" <& stats.touchedWeaponPickups);
+    logInfo("frame_inventory weapon=" <& stats.weaponReady <&
+        " ammo_before=" <& stats.ammoBeforePickups <&
+        " ammo_after_pickups=" <& stats.ammoAfterPickups <&
+        " ammo_after_combat=" <& stats.ammoAfterCombat);
+    logInfo("frame_weapon_runtime class=" <& stats.activeWeaponClass <&
+        " projectile=" <& stats.activeWeaponProjectile <&
+        " ammo_required=" <& stats.activeWeaponAmmoRequired <&
+        " clip_size=" <& stats.activeWeaponClipSize <&
+        " damage=" <& stats.activeWeaponDamage);
+    logInfo("frame_trigger touches=" <& stats.touchedTriggers <&
+        " activated_doors=" <& stats.activatedDoors);
+    logInfo("frame_script calls=" <& stats.frameScriptCalls <&
+        " prints=" <& stats.frameScriptPrints <&
+        " triggers=" <& stats.frameScriptTriggers <&
+        " waits=" <& stats.frameScriptWaits <&
+        " objectives=" <& stats.frameScriptObjectives);
+    logInfo("frame_sound_events candidates=" <&
+        stats.frameSoundCandidates <& " emitted=" <& stats.frameSoundEvents <&
+        " resolved=" <& stats.frameSoundResolved <&
+        " missing=" <& stats.frameSoundMissing);
+    logInfo("frame_sound_kinds door=" <& stats.frameDoorSoundEvents <&
+        " weapon=" <& stats.frameWeaponSoundEvents <&
+        " monster=" <& stats.frameMonsterSoundEvents);
+    logInfo("frame_hitscan traces=" <& stats.frameHitscanTraces <&
+        " clear=" <& stats.frameHitscanClear <&
+        " blocked=" <& stats.frameHitscanBlocked <&
+        " hits=" <& stats.frameHitscanHits);
+    logInfo("frame_combat shots=" <& stats.shotsFired <&
+        " monster_hits=" <& stats.monsterHits <&
+        " monster_attacks=" <& stats.monsterAttacks);
+    logInfo("player_health before=" <& stats.playerHealthBefore <&
+        " after_pickups=" <& stats.playerHealthAfterPickups <&
+        " after_combat=" <& stats.playerHealthAfterCombat);
+    logInfo("loop_ticks=" <& stats.loopTicks);
+    logInfo("loop_state pickups_consumed=" <& stats.loopPickupsConsumed <&
+        " doors_open=" <& stats.loopDoorsOpen);
+    logInfo("loop_combat shots=" <& stats.loopShotsFired <&
+        " monster_hits=" <& stats.loopMonsterHits <&
+        " monster_attacks=" <& stats.loopMonsterAttacks);
+    logInfo("loop_ammo_after=" <& stats.loopAmmoAfter);
+    logInfo("loop_player_health_after=" <& stats.loopPlayerHealthAfter);
+    logInfo("loop_monster_health_after=" <& stats.loopMonsterHealthAfter);
+    logInfo("loop_monster_alive_after=" <& stats.loopMonsterAliveAfter);
+    logInfo("loop_clear_condition=" <& stats.loopClearCondition);
+    logInfo("hud_health_value=" <& stats.loopPlayerHealthAfter);
+    logInfo("hud_health_bar=" <&
+        hudBar(stats.loopPlayerHealthAfter, DEFAULT_PLAYER_HEALTH));
+    logInfo("hud_ammo_value=" <& stats.loopAmmoAfter);
+    logInfo("hud_ammo_bar=" <&
+        hudBar(stats.loopAmmoAfter, DEFAULT_AMMO_ON_PICKUP));
+    logInfo("hud_enemies_remaining=" <& ord(stats.loopMonsterAliveAfter));
+    logInfo("hud_objective_complete=" <& stats.loopClearCondition);
+    logInfo("screen_state=" <& screenStateForFrame(stats));
+    logInfo("frame_transition next_declared=" <& stats.nextMapDeclared <&
+        " path=" <& stats.nextMapPath <&
+        " found=" <& stats.nextMapFound <&
+        " next_player_start=" <& stats.nextMapPlayerStarts);
+    logInfo("frame_compiled_next proc=" <& globalNextProcFound <&
+        " cm=" <& globalNextCmFound <&
+        " proc_path=" <& globalNextProcPath <&
+        " cm_path=" <& globalNextCmPath);
+    logInfo("frame_transition_state=" <& stats.transitionState);
+    if stats.transitionPath <> "" then
+      logInfo("frame_transition_path=" <& stats.transitionPath);
+    end if;
+    logInfo("save_snapshot=" <& stats.saveSnapshot);
+    logInfo("restore_verified=" <& stats.restoreVerified);
+    logInfo("restore_state health=" <& stats.restoredPlayerHealth <&
+        " ammo=" <& stats.restoredAmmo <&
+        " doors_open=" <& stats.restoredDoorsOpen <&
+        " clear=" <& stats.restoredClearCondition <&
+        " screen=" <& stats.restoredScreenState);
+    if stats.firstPickupName <> "" then
+      logInfo("first_frame_pickup=" <& stats.firstPickupName);
+    end if;
+    if stats.firstTriggerName <> "" then
+      logInfo("first_frame_trigger=" <& stats.firstTriggerName);
+    end if;
+    if stats.firstActivatedDoorName <> "" then
+      logInfo("first_activated_door=" <& stats.firstActivatedDoorName);
+    end if;
+    if stats.firstScriptCall <> "" then
+      logInfo("first_frame_script_call=" <& stats.firstScriptCall);
+    end if;
+    if stats.firstScriptEventPath <> "" then
+      logInfo("first_frame_script_event_path=" <& stats.firstScriptEventPath);
+    end if;
+    if stats.firstFrameSoundEvent <> "" then
+      logInfo("first_frame_sound_event=" <& stats.firstFrameSoundEvent);
+    end if;
+    if stats.firstMissingFrameSound <> "" then
+      logInfo("first_missing_frame_sound=" <& stats.firstMissingFrameSound);
+    end if;
+    if stats.firstFrameModelBinding <> "" then
+      logInfo("first_frame_model_binding=" <& stats.firstFrameModelBinding);
+    end if;
+    if stats.firstMissingFrameModel <> "" then
+      logInfo("first_missing_frame_model=" <& stats.firstMissingFrameModel);
+    end if;
+    if stats.firstFrameAnimBinding <> "" then
+      logInfo("first_frame_anim_binding=" <& stats.firstFrameAnimBinding);
+    end if;
+    if stats.firstMissingFrameAnim <> "" then
+      logInfo("first_missing_frame_anim=" <& stats.firstMissingFrameAnim);
+    end if;
+    if stats.firstSkinAsset <> "" then
+      logInfo("first_frame_skin_asset=" <& stats.firstSkinAsset);
+    end if;
+    if stats.firstFrameSkinBinding <> "" then
+      logInfo("first_frame_skin_binding=" <& stats.firstFrameSkinBinding);
+    end if;
+    if stats.firstMissingFrameSkin <> "" then
+      logInfo("first_missing_frame_skin=" <& stats.firstMissingFrameSkin);
+    end if;
+    if stats.firstFrameSpawnclassBinding <> "" then
+      logInfo("first_frame_spawnclass_binding=" <&
+          stats.firstFrameSpawnclassBinding);
+    end if;
+    if stats.firstUnsupportedFrameSpawnclass <> "" then
+      logInfo("first_unsupported_frame_spawnclass=" <&
+          stats.firstUnsupportedFrameSpawnclass);
+    end if;
+    if stats.firstGuiAsset <> "" then
+      logInfo("first_frame_gui_asset=" <& stats.firstGuiAsset);
+    end if;
+    if stats.firstFrameGuiBinding <> "" then
+      logInfo("first_frame_gui_binding=" <& stats.firstFrameGuiBinding);
+    end if;
+    if stats.firstMissingFrameGui <> "" then
+      logInfo("first_missing_frame_gui=" <& stats.firstMissingFrameGui);
+    end if;
+    if stats.firstFrameHitscanTarget <> "" then
+      logInfo("first_frame_hitscan_target=" <& stats.firstFrameHitscanTarget);
+    end if;
+    if stats.firstFrameHitscanBlocker <> "" then
+      logInfo("first_frame_hitscan_blocker=" <&
+          stats.firstFrameHitscanBlocker);
+    end if;
+    if stats.firstFrameMovementBlocker <> "" then
+      logInfo("first_frame_movement_blocker=" <&
+          stats.firstFrameMovementBlocker);
+    end if;
+    if stats.firstNextMap <> "" then
+      logInfo("first_frame_next_map=" <& stats.firstNextMap);
+    end if;
+    if stats.firstNextPlayerStart <> "" then
+      logInfo("first_frame_next_player_start=" <& stats.firstNextPlayerStart);
+    end if;
+    if stats.firstMonsterName <> "" then
+      logInfo("first_monster=" <& stats.firstMonsterName);
+      logInfo("first_monster_class=" <& stats.firstMonsterClass);
+      logInfo("first_monster_health_before=" <&
+          stats.firstMonsterHealthBefore);
+      logInfo("first_monster_health_after=" <& stats.firstMonsterHealthAfter);
+      logInfo("first_monster_alive_after=" <& stats.firstMonsterAliveAfter);
+    end if;
+    logInfo("frame_probe_ready=" <& (stats.requestedMapFound and
+        stats.playerParsed and stats.weaponReady and stats.ammoAfterPickups > 0 and
+        stats.firstMonsterName <> "" and stats.activatedDoors <> 0 and
+        stats.frameScriptCalls <> 0 and stats.frameScriptObjectives <> 0 and
+        stats.frameSoundEvents <> 0 and stats.frameSoundMissing = 0 and
+        stats.frameModelResolved <> 0 and stats.frameModelMissing = 0 and
+        stats.frameAnimResolved <> 0 and stats.frameAnimMissing = 0 and
+        stats.frameAnimPlaybackSamples <> 0 and
+        stats.frameAnimInterpolationSamples <> 0 and
+        stats.skinDecls <> 0 and stats.skinRemaps <> 0 and
+        stats.frameSkinResolved <> 0 and stats.frameSkinMissing = 0 and
+        stats.entityDefSpawnclassValues <> 0 and
+        stats.frameSpawnclassResolved <> 0 and
+        stats.frameSpawnclassUnsupported = 0 and
+        stats.guiAssets <> 0 and stats.guiWindowDefs <> 0 and
+        stats.entityDefGuiResolved <> 0 and stats.mapGuiResolved <> 0 and
+        stats.runtimeHudBindings <> 0 and stats.entityDefGuiMissing = 0 and
+        stats.mapGuiMissing = 0 and
+        stats.frameMoveAcceptedSteps <> 0 and stats.frameMoveBlocked and
+        stats.frameHitscanHits <> 0 and stats.loopClearCondition and
+        stats.transitionState = "ready" and
+        stats.restoreVerified));
+  end func;
+
+const proc: main is func
+  local
+    var frameConfig: config is frameConfig.value;
+    var frameStats: stats is frameStats.value;
+    var array string: pk4Files is 0 times "";
+    var string: pk4File is "";
+  begin
+    parseArgs(config);
+    if config.showHelp then
+      showUsage;
+    else
+      stats.requestedMapPath := mapNameToAssetPath(config.startMap);
+      globalNextProcPath := "";
+      globalNextCmPath := "";
+      globalNextProcFound := FALSE;
+      globalNextCmFound := FALSE;
+      if fileType(config.basePath) <> FILE_DIR then
+        logError("Doom 3 base directory not found: " <& config.basePath);
+      else
+        pk4Files := sort(findPk4Archives(config.basePath));
+        stats.pk4Archives := length(pk4Files);
+        if length(pk4Files) = 0 then
+          logError("No .pk4 archives found in: " <& config.basePath);
+        else
+          for pk4File range pk4Files do
+            scanArchive(stats, pk4File, stats.requestedMapPath);
+          end for;
+          simulateFrame(stats);
+          simulateLoop(stats);
+          prepareFrameTransition(stats, pk4Files);
+          buildAndVerifySaveSnapshot(stats);
+          printStats(stats);
+        end if;
+      end if;
+    end if;
+  end func;

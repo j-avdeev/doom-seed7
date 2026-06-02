@@ -1,0 +1,532 @@
+(********************************************************************)
+(*  doom3_seed7_gui.s7                                             *)
+(*                                                                  *)
+(*  Focused Doom 3 / id Tech 4 GUI subsystem probe for Seed7.      *)
+(*  It reads user-owned pk4 archives, scans .gui assets, resolves   *)
+(*  entityDef and selected-map gui bindings, and reports readiness  *)
+(*  for a future HUD/menu/surface-GUI runtime layer. No commercial  *)
+(*  data is bundled.                                                *)
+(********************************************************************)
+
+$ include "seed7_05.s7i";
+$ include "osfiles.s7i";
+$ include "zip.s7i";
+
+const string: DEFAULT_DATA_PATH is ".";
+const string: DEFAULT_BASE_DIR is "base";
+const string: DEFAULT_START_MAP is "game/mars_city1";
+
+const type: guiConfig is new struct
+    var string: dataPath is DEFAULT_DATA_PATH;
+    var string: basePath is "";
+    var string: startMap is DEFAULT_START_MAP;
+    var boolean: showHelp is FALSE;
+  end struct;
+
+const type: guiStats is new struct
+    var integer: pk4Archives is 0;
+    var string: requestedMapPath is "";
+    var boolean: requestedMapFound is FALSE;
+    var integer: guiAssets is 0;
+    var integer: guiWindowDefs is 0;
+    var integer: guiNamedWindows is 0;
+    var integer: guiRectDecls is 0;
+    var integer: guiVisibleDecls is 0;
+    var integer: guiMatcolorDecls is 0;
+    var integer: guiOnActionDecls is 0;
+    var integer: entityDefs is 0;
+    var integer: entityDefGuiRefs is 0;
+    var integer: resolvedEntityDefGuiRefs is 0;
+    var integer: missingEntityDefGuiRefs is 0;
+    var integer: mapEntities is 0;
+    var integer: mapGuiRefs is 0;
+    var integer: resolvedMapGuiRefs is 0;
+    var integer: missingMapGuiRefs is 0;
+    var integer: runtimeGuiSurfaces is 0;
+    var integer: runtimeHudBindings is 0;
+    var string: firstGuiAsset is "";
+    var string: firstGuiWindow is "";
+    var string: firstEntityDefGuiRef is "";
+    var string: firstMapGuiRef is "";
+    var string: firstRuntimeGuiBinding is "";
+    var string: firstMissingGuiRef is "";
+    var array string: guiAssetPaths is 0 times "";
+  end struct;
+
+const proc: logInfo (in string: msg) is func
+  begin
+    writeln("[gui] " <& msg);
+  end func;
+
+const proc: logError (in string: msg) is func
+  begin
+    writeln("[gui-error] " <& msg);
+  end func;
+
+const func string: joinPath (in string: leftPath, in string: rightPath) is func
+  result
+    var string: joined is "";
+  begin
+    if leftPath = "" then
+      joined := rightPath;
+    elsif endsWith(leftPath, "/") or endsWith(leftPath, "\\") then
+      joined := leftPath <& rightPath;
+    else
+      joined := leftPath <& "/" <& rightPath;
+    end if;
+  end func;
+
+const func boolean: isPk4Name (in string: fileName) is
+    return endsWith(lower(fileName), ".pk4");
+
+const func string: normalizedAssetPath (in string: filePath) is
+    return replace(lower(filePath), "\\", "/");
+
+const func string: mapNameToAssetPath (in string: mapName) is func
+  result
+    var string: assetPath is "";
+  begin
+    assetPath := normalizedAssetPath(mapName);
+    if not startsWith(assetPath, "maps/") then
+      assetPath := "maps/" <& assetPath;
+    end if;
+    if not endsWith(assetPath, ".map") then
+      assetPath &:= ".map";
+    end if;
+  end func;
+
+const func boolean: containsString (in array string: values,
+    in string: value) is func
+  result
+    var boolean: found is FALSE;
+  local
+    var string: current is "";
+  begin
+    for current range values do
+      if current = value then
+        found := TRUE;
+      end if;
+    end for;
+  end func;
+
+const proc: appendUnique (inout array string: values, in string: value) is func
+  begin
+    if value <> "" and not containsString(values, value) then
+      values &:= value;
+    end if;
+  end func;
+
+const func integer: countWord (in string: content, in string: word) is func
+  result
+    var integer: count is 0;
+  local
+    var integer: searchPos is 1;
+    var integer: foundPos is 0;
+    var string: lowerContent is "";
+    var string: lowerWord is "";
+  begin
+    lowerContent := lower(content);
+    lowerWord := lower(word);
+    foundPos := pos(lowerContent, lowerWord, searchPos);
+    while foundPos <> 0 do
+      incr(count);
+      searchPos := foundPos + length(lowerWord);
+      foundPos := pos(lowerContent, lowerWord, searchPos);
+    end while;
+  end func;
+
+const func string: cleanedToken (in string: token) is func
+  result
+    var string: clean is "";
+  local
+    var integer: idx is 1;
+    var char: ch is ' ';
+  begin
+    clean := token;
+    while idx <= length(clean) do
+      ch := clean[idx];
+      if ch = '"' or ch = '(' or ch = ')' or ch = '{' or ch = '}' or
+          ch = ',' or ch = ';' then
+        clean := clean[.. pred(idx)] & clean[succ(idx) ..];
+      else
+        incr(idx);
+      end if;
+    end while;
+  end func;
+
+const func string: quotedValueAfter (in string: content, in string: keyName) is func
+  result
+    var string: value is "";
+  local
+    var string: keyText is "";
+    var integer: keyPos is 0;
+    var integer: keyEnd is 0;
+    var integer: valueStart is 0;
+    var integer: valueEnd is 0;
+  begin
+    keyText := "\"" <& keyName <& "\"";
+    keyPos := pos(lower(content), lower(keyText), 1);
+    if keyPos <> 0 then
+      keyEnd := pos(content, "\"", succ(keyPos));
+      if keyEnd <> 0 then
+        valueStart := pos(content, "\"", succ(keyEnd));
+        if valueStart <> 0 then
+          valueEnd := pos(content, "\"", succ(valueStart));
+          if valueEnd <> 0 then
+            value := content[succ(valueStart) .. pred(valueEnd)];
+          end if;
+        end if;
+      end if;
+    end if;
+  end func;
+
+const func string: guiValueAfter (in string: content, in string: keyName) is func
+  result
+    var string: value is "";
+  local
+    var string: quotedValue is "";
+  begin
+    quotedValue := quotedValueAfter(content, keyName);
+    if quotedValue <> "" then
+      value := normalizedAssetPath(quotedValue);
+    end if;
+  end func;
+
+const func integer: matchingBlockEnd (in string: content,
+    in integer: blockStart) is func
+  result
+    var integer: blockEnd is 0;
+  local
+    var integer: idx is 0;
+    var integer: depth is 0;
+  begin
+    if blockStart <> 0 then
+      idx := blockStart;
+      while idx <= length(content) and blockEnd = 0 do
+        if content[idx] = '{' then
+          incr(depth);
+        elsif content[idx] = '}' then
+          decr(depth);
+          if depth = 0 then
+            blockEnd := idx;
+          end if;
+        end if;
+        incr(idx);
+      end while;
+    end if;
+  end func;
+
+const func string: tokenAfterWord (in string: content, in string: word) is func
+  result
+    var string: value is "";
+  local
+    var string: normalizedText is "";
+    var array string: tokens is 0 times "";
+    var integer: idx is 1;
+  begin
+    normalizedText := replace(content, "\n", " ");
+    normalizedText := replace(normalizedText, "\r", " ");
+    normalizedText := replace(normalizedText, "\t", " ");
+    tokens := noEmptyStrings(split(normalizedText, ' '));
+    while idx < length(tokens) and value = "" do
+      if lower(cleanedToken(tokens[idx])) = lower(word) then
+        value := cleanedToken(tokens[succ(idx)]);
+      end if;
+      incr(idx);
+    end while;
+  end func;
+
+const proc: inspectGuiText (inout guiStats: stats,
+    in string: path, in string: content) is func
+  local
+    var string: firstWindowName is "";
+  begin
+    stats.guiAssets +:= 1;
+    appendUnique(stats.guiAssetPaths, normalizedAssetPath(path));
+    if stats.firstGuiAsset = "" then
+      stats.firstGuiAsset := normalizedAssetPath(path);
+    end if;
+    stats.guiWindowDefs +:= countWord(content, "windowDef");
+    stats.guiRectDecls +:= countWord(content, "rect");
+    stats.guiVisibleDecls +:= countWord(content, "visible");
+    stats.guiMatcolorDecls +:= countWord(content, "matcolor");
+    stats.guiOnActionDecls +:= countWord(content, "onAction");
+    firstWindowName := tokenAfterWord(content, "windowDef");
+    if firstWindowName <> "" then
+      stats.guiNamedWindows +:= 1;
+      if stats.firstGuiWindow = "" then
+        stats.firstGuiWindow := firstWindowName;
+      end if;
+    end if;
+  end func;
+
+const proc: inspectGuiRef (inout guiStats: stats, in string: guiRef,
+    in boolean: fromMap, in string: ownerName) is func
+  local
+    var string: normalizedRef is "";
+  begin
+    normalizedRef := normalizedAssetPath(guiRef);
+    if normalizedRef <> "" then
+      if fromMap then
+        stats.mapGuiRefs +:= 1;
+        if stats.firstMapGuiRef = "" then
+          stats.firstMapGuiRef := normalizedRef;
+        end if;
+      else
+        stats.entityDefGuiRefs +:= 1;
+        if stats.firstEntityDefGuiRef = "" then
+          stats.firstEntityDefGuiRef := normalizedRef;
+        end if;
+      end if;
+      if containsString(stats.guiAssetPaths, normalizedRef) then
+        if fromMap then
+          stats.resolvedMapGuiRefs +:= 1;
+          stats.runtimeGuiSurfaces +:= 1;
+          if startsWith(normalizedRef, "guis/hud") then
+            stats.runtimeHudBindings +:= 1;
+          end if;
+          if stats.firstRuntimeGuiBinding = "" then
+            if ownerName <> "" then
+              stats.firstRuntimeGuiBinding := ownerName <& "=" <& normalizedRef;
+            else
+              stats.firstRuntimeGuiBinding := normalizedRef;
+            end if;
+          end if;
+        else
+          stats.resolvedEntityDefGuiRefs +:= 1;
+        end if;
+      else
+        if fromMap then
+          stats.missingMapGuiRefs +:= 1;
+        else
+          stats.missingEntityDefGuiRefs +:= 1;
+        end if;
+        if stats.firstMissingGuiRef = "" then
+          stats.firstMissingGuiRef := normalizedRef;
+        end if;
+      end if;
+    end if;
+  end func;
+
+const proc: inspectDefText (inout guiStats: stats,
+    in string: content) is func
+  local
+    var string: contentLower is "";
+    var integer: searchPos is 1;
+    var integer: defPos is 0;
+    var integer: blockStart is 0;
+    var integer: blockEnd is 0;
+    var string: guiRef is "";
+  begin
+    contentLower := lower(content);
+    defPos := pos(contentLower, "entitydef ", searchPos);
+    while defPos <> 0 do
+      stats.entityDefs +:= 1;
+      blockStart := pos(content, "{", defPos);
+      blockEnd := matchingBlockEnd(content, blockStart);
+      if blockStart <> 0 and blockEnd <> 0 then
+        guiRef := guiValueAfter(content[blockStart .. blockEnd], "gui");
+        inspectGuiRef(stats, guiRef, FALSE, "");
+      end if;
+      searchPos := defPos + length("entitydef ");
+      defPos := pos(contentLower, "entitydef ", searchPos);
+    end while;
+  end func;
+
+const proc: inspectMapText (inout guiStats: stats,
+    in string: content) is func
+  local
+    var integer: searchPos is 1;
+    var integer: blockStart is 0;
+    var integer: blockEnd is 0;
+    var string: blockText is "";
+    var string: guiRef is "";
+    var string: ownerName is "";
+  begin
+    blockStart := pos(content, "{", searchPos);
+    while blockStart <> 0 do
+      blockEnd := matchingBlockEnd(content, blockStart);
+      if blockEnd <> 0 then
+        stats.mapEntities +:= 1;
+        blockText := content[blockStart .. blockEnd];
+        guiRef := guiValueAfter(blockText, "gui");
+        ownerName := quotedValueAfter(blockText, "name");
+        inspectGuiRef(stats, guiRef, TRUE, ownerName);
+        searchPos := succ(blockEnd);
+      else
+        searchPos := succ(blockStart);
+      end if;
+      blockStart := pos(content, "{", searchPos);
+    end while;
+  end func;
+
+const func array string: findPk4Archives (in string: basePath) is func
+  result
+    var array string: pk4Files is 0 times "";
+  local
+    var array string: names is 0 times "";
+    var string: name is "";
+  begin
+    if fileType(basePath) = FILE_DIR then
+      names := readDir(basePath);
+      for name range names do
+        if isPk4Name(name) and fileType(joinPath(basePath, name)) = FILE_REGULAR then
+          pk4Files &:= joinPath(basePath, name);
+        end if;
+      end for;
+    end if;
+  end func;
+
+const proc: scanArchive (inout guiStats: stats,
+    in string: pk4File, in string: requestedMapPath) is func
+  local
+    var fileSys: zipFs is fileSys.value;
+    var array string: paths is 0 times "";
+    var string: path is "";
+    var string: pathLower is "";
+  begin
+    zipFs := openZip(pk4File);
+    if zipFs = fileSys.value then
+      logError("could not open pk4 archive: " <& pk4File);
+    else
+      paths := readDir(zipFs, RECURSIVE);
+      for path range paths do
+        pathLower := normalizedAssetPath(path);
+        if endsWith(pathLower, ".gui") then
+          inspectGuiText(stats, path, getFile(zipFs, path));
+        end if;
+      end for;
+      for path range paths do
+        pathLower := normalizedAssetPath(path);
+        if endsWith(pathLower, ".def") then
+          inspectDefText(stats, getFile(zipFs, path));
+        elsif pathLower = requestedMapPath then
+          stats.requestedMapFound := TRUE;
+          inspectMapText(stats, getFile(zipFs, path));
+        end if;
+      end for;
+      close(zipFs);
+    end if;
+  end func;
+
+const proc: parseArgs (inout guiConfig: config) is func
+  local
+    var array string: args is 0 times "";
+    var integer: argIdx is 1;
+  begin
+    args := argv(PROGRAM);
+    while argIdx <= length(args) do
+      if args[argIdx] = "--help" or args[argIdx] = "-h" then
+        config.showHelp := TRUE;
+      elsif args[argIdx] = "--doom3_data_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.dataPath := convDosPath(args[argIdx]);
+      elsif args[argIdx] = "--doom3_base_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.basePath := convDosPath(args[argIdx]);
+      elsif args[argIdx] = "--doom3_start_map" and argIdx < length(args) then
+        incr(argIdx);
+        config.startMap := args[argIdx];
+      elsif args[argIdx] = "+map" and argIdx < length(args) then
+        incr(argIdx);
+        config.startMap := args[argIdx];
+      elsif args[argIdx] = "+set" and argIdx + 2 <= length(args) then
+        if args[argIdx + 1] = "fs_basepath" then
+          config.dataPath := convDosPath(args[argIdx + 2]);
+        elsif args[argIdx + 1] = "fs_game" then
+          config.basePath := convDosPath(args[argIdx + 2]);
+        end if;
+        argIdx +:= 2;
+      end if;
+      incr(argIdx);
+    end while;
+    if config.basePath = "" then
+      config.basePath := joinPath(config.dataPath, DEFAULT_BASE_DIR);
+    end if;
+  end func;
+
+const proc: showUsage is func
+  begin
+    writeln("Usage:");
+    writeln("  s7 doom3_seed7_gui.s7 --doom3_data_path <doom3-root>");
+    writeln("  s7 doom3_seed7_gui.s7 +set fs_basepath <doom3-root> +map <map>");
+    writeln("");
+    writeln("Scans user-owned Doom 3 pk4 files for GUI/HUD readiness.");
+  end func;
+
+const proc: printStats (in guiStats: stats) is func
+  begin
+    logInfo("pk4_archives=" <& stats.pk4Archives);
+    logInfo("requested_map=" <& stats.requestedMapPath);
+    logInfo("requested_map_found=" <& stats.requestedMapFound);
+    logInfo("gui_assets=" <& stats.guiAssets <&
+        " unique=" <& length(stats.guiAssetPaths));
+    logInfo("gui_structure window_defs=" <& stats.guiWindowDefs <&
+        " named=" <& stats.guiNamedWindows <&
+        " rects=" <& stats.guiRectDecls <&
+        " visible=" <& stats.guiVisibleDecls <&
+        " matcolor=" <& stats.guiMatcolorDecls <&
+        " on_action=" <& stats.guiOnActionDecls);
+    logInfo("entity_defs=" <& stats.entityDefs <&
+        " gui_refs=" <& stats.entityDefGuiRefs);
+    logInfo("entity_gui_resolution resolved=" <&
+        stats.resolvedEntityDefGuiRefs <& " missing=" <&
+        stats.missingEntityDefGuiRefs);
+    logInfo("map_entities=" <& stats.mapEntities <&
+        " gui_refs=" <& stats.mapGuiRefs);
+    logInfo("map_gui_resolution resolved=" <& stats.resolvedMapGuiRefs <&
+        " missing=" <& stats.missingMapGuiRefs);
+    logInfo("runtime_gui_surfaces=" <& stats.runtimeGuiSurfaces <&
+        " hud_bindings=" <& stats.runtimeHudBindings);
+    if stats.firstGuiAsset <> "" then
+      logInfo("first_gui_asset=" <& stats.firstGuiAsset);
+    end if;
+    if stats.firstGuiWindow <> "" then
+      logInfo("first_gui_window=" <& stats.firstGuiWindow);
+    end if;
+    if stats.firstEntityDefGuiRef <> "" then
+      logInfo("first_entity_gui_ref=" <& stats.firstEntityDefGuiRef);
+    end if;
+    if stats.firstMapGuiRef <> "" then
+      logInfo("first_map_gui_ref=" <& stats.firstMapGuiRef);
+    end if;
+    if stats.firstRuntimeGuiBinding <> "" then
+      logInfo("first_runtime_gui_binding=" <& stats.firstRuntimeGuiBinding);
+    end if;
+    if stats.firstMissingGuiRef <> "" then
+      logInfo("first_missing_gui_ref=" <& stats.firstMissingGuiRef);
+    end if;
+    logInfo("gui_probe_ready=" <& (stats.guiAssets <> 0 and
+        stats.guiWindowDefs <> 0 and stats.guiRectDecls <> 0 and
+        stats.guiVisibleDecls <> 0 and stats.resolvedEntityDefGuiRefs <> 0 and
+        stats.resolvedMapGuiRefs <> 0 and stats.runtimeHudBindings <> 0));
+  end func;
+
+const proc: main is func
+  local
+    var guiConfig: config is guiConfig.value;
+    var guiStats: stats is guiStats.value;
+    var array string: pk4Files is 0 times "";
+    var string: pk4File is "";
+  begin
+    parseArgs(config);
+    if config.showHelp then
+      showUsage;
+    else
+      stats.requestedMapPath := mapNameToAssetPath(config.startMap);
+      if fileType(config.basePath) <> FILE_DIR then
+        logError("Doom 3 base directory not found: " <& config.basePath);
+      else
+        pk4Files := sort(findPk4Archives(config.basePath));
+        stats.pk4Archives := length(pk4Files);
+        if length(pk4Files) = 0 then
+          logError("No .pk4 archives found in: " <& config.basePath);
+        else
+          for pk4File range pk4Files do
+            scanArchive(stats, pk4File, stats.requestedMapPath);
+          end for;
+          printStats(stats);
+        end if;
+      end if;
+    end if;
+  end func;

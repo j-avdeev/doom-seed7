@@ -1,0 +1,478 @@
+(********************************************************************)
+(*  doom3_seed7_access.s7                                          *)
+(*                                                                  *)
+(*  Focused Doom 3 / id Tech 4 security/access subsystem probe for *)
+(*  Seed7. It reads user-owned pk4 archives, scans selected-map    *)
+(*  doors/triggers, reads PDA-granted door authorization metadata, *)
+(*  and reports whether a future runtime can unlock/access a door. *)
+(*  No commercial data is bundled.                                  *)
+(********************************************************************)
+
+$ include "seed7_05.s7i";
+$ include "osfiles.s7i";
+$ include "zip.s7i";
+
+const string: DEFAULT_DATA_PATH is ".";
+const string: DEFAULT_BASE_DIR is "base";
+const string: DEFAULT_START_MAP is "game/mars_city1";
+
+const type: accessConfig is new struct
+    var string: dataPath is DEFAULT_DATA_PATH;
+    var string: basePath is "";
+    var string: startMap is DEFAULT_START_MAP;
+    var boolean: showHelp is FALSE;
+  end struct;
+
+const type: accessStats is new struct
+    var integer: pk4Archives is 0;
+    var string: requestedMapPath is "";
+    var boolean: requestedMapFound is FALSE;
+    var integer: pdaAssets is 0;
+    var integer: pdaDefs is 0;
+    var integer: authorizationTokens is 0;
+    var integer: uniqueAuthorizedDoors is 0;
+    var integer: selectedMapEntities is 0;
+    var integer: selectedMapDoors is 0;
+    var integer: selectedMapTriggers is 0;
+    var integer: triggerTargetRefs is 0;
+    var integer: resolvedAuthorizations is 0;
+    var integer: missingAuthorizations is 0;
+    var integer: triggerLinkedAuthorizations is 0;
+    var integer: runtimeLockedDoors is 0;
+    var integer: runtimeUnlockedDoors is 0;
+    var string: firstPdaAsset is "";
+    var string: firstPdaDef is "";
+    var string: firstAuthorizedDoor is "";
+    var string: firstMapDoor is "";
+    var string: firstTriggerTarget is "";
+    var string: firstResolvedAuthorization is "";
+    var string: firstMissingAuthorization is "";
+    var string: firstUnlockedDoor is "";
+    var string: firstAccessPath is "";
+    var array string: authorizedDoors is 0 times "";
+    var array string: mapDoors is 0 times "";
+    var array string: triggerTargets is 0 times "";
+  end struct;
+
+const proc: logInfo (in string: msg) is func
+  begin
+    writeln("[access] " <& msg);
+  end func;
+
+const proc: logError (in string: msg) is func
+  begin
+    writeln("[access-error] " <& msg);
+  end func;
+
+const func string: joinPath (in string: leftPath, in string: rightPath) is func
+  result
+    var string: joined is "";
+  begin
+    if leftPath = "" then
+      joined := rightPath;
+    elsif endsWith(leftPath, "/") or endsWith(leftPath, "\\") then
+      joined := leftPath <& rightPath;
+    else
+      joined := leftPath <& "/" <& rightPath;
+    end if;
+  end func;
+
+const func boolean: isPk4Name (in string: fileName) is
+    return endsWith(lower(fileName), ".pk4");
+
+const func string: normalizedAssetPath (in string: filePath) is
+    return replace(lower(filePath), "\\", "/");
+
+const func string: mapNameToAssetPath (in string: mapName) is func
+  result
+    var string: assetPath is "";
+  begin
+    assetPath := normalizedAssetPath(mapName);
+    if not startsWith(assetPath, "maps/") then
+      assetPath := "maps/" <& assetPath;
+    end if;
+    if not endsWith(assetPath, ".map") then
+      assetPath &:= ".map";
+    end if;
+  end func;
+
+const func boolean: containsString (in array string: values,
+    in string: value) is func
+  result
+    var boolean: found is FALSE;
+  local
+    var string: current is "";
+  begin
+    for current range values do
+      if current = value then
+        found := TRUE;
+      end if;
+    end for;
+  end func;
+
+const proc: appendUnique (inout array string: values, in string: value) is func
+  begin
+    if value <> "" and not containsString(values, value) then
+      values &:= value;
+    end if;
+  end func;
+
+const func string: cleanedToken (in string: token) is func
+  result
+    var string: clean is "";
+  local
+    var integer: idx is 1;
+    var char: ch is ' ';
+  begin
+    clean := trim(token);
+    while idx <= length(clean) do
+      ch := clean[idx];
+      if ch = '"' or ch = '(' or ch = ')' or ch = '{' or ch = '}' or
+          ch = ',' or ch = ';' then
+        clean := clean[.. pred(idx)] & clean[succ(idx) ..];
+      else
+        incr(idx);
+      end if;
+    end while;
+  end func;
+
+const func array string: quotedTokens (in string: content) is func
+  result
+    var array string: tokens is 0 times "";
+  local
+    var integer: idx is 1;
+    var integer: startIdx is 1;
+  begin
+    while idx <= length(content) do
+      if content[idx] = '"' then
+        incr(idx);
+        startIdx := idx;
+        while idx <= length(content) and content[idx] <> '"' do
+          incr(idx);
+        end while;
+        if idx > startIdx then
+          tokens &:= content[startIdx .. pred(idx)];
+        end if;
+      end if;
+      incr(idx);
+    end while;
+  end func;
+
+const func integer: countWord (in string: content, in string: word) is func
+  result
+    var integer: count is 0;
+  local
+    var integer: searchPos is 1;
+    var integer: foundPos is 0;
+    var string: lowerContent is "";
+    var string: lowerWord is "";
+  begin
+    lowerContent := lower(content);
+    lowerWord := lower(word);
+    foundPos := pos(lowerContent, lowerWord, searchPos);
+    while foundPos <> 0 do
+      incr(count);
+      searchPos := foundPos + length(lowerWord);
+      foundPos := pos(lowerContent, lowerWord, searchPos);
+    end while;
+  end func;
+
+const func string: tokenAfterWord (in string: content, in string: word) is func
+  result
+    var string: value is "";
+  local
+    var integer: keyPos is 0;
+    var integer: idx is 0;
+    var integer: startIdx is 0;
+  begin
+    keyPos := pos(lower(content), lower(word), 1);
+    if keyPos <> 0 then
+      idx := keyPos + length(word);
+      while idx <= length(content) and content[idx] <= ' ' do
+        incr(idx);
+      end while;
+      startIdx := idx;
+      while idx <= length(content) and content[idx] > ' ' and
+          content[idx] <> '{' and content[idx] <> '"' do
+        incr(idx);
+      end while;
+      if idx > startIdx then
+        value := cleanedToken(content[startIdx .. pred(idx)]);
+      end if;
+    end if;
+  end func;
+
+const func boolean: isDoorClass (in string: className) is
+    return className = "func_door" or className = "mover_door" or
+        className = "idmoveable_door";
+
+const func boolean: isTriggerClass (in string: className) is
+    return startsWith(className, "trigger_");
+
+const proc: inspectPdaContent (inout accessStats: stats,
+    in string: path, in string: content) is func
+  local
+    var array string: tokens is 0 times "";
+    var integer: idx is 1;
+    var string: idName is "";
+    var string: value is "";
+  begin
+    stats.pdaAssets +:= 1;
+    if stats.firstPdaAsset = "" then
+      stats.firstPdaAsset := normalizedAssetPath(path);
+    end if;
+    stats.pdaDefs +:= countWord(content, "pda ");
+    if stats.firstPdaDef = "" then
+      stats.firstPdaDef := tokenAfterWord(content, "pda ");
+    end if;
+    tokens := quotedTokens(content);
+    while idx < length(tokens) do
+      idName := lower(cleanedToken(tokens[idx]));
+      value := cleanedToken(tokens[succ(idx)]);
+      if idName = "door" or idName = "access" or idName = "security_door" then
+        stats.authorizationTokens +:= 1;
+        appendUnique(stats.authorizedDoors, value);
+        if stats.firstAuthorizedDoor = "" then
+          stats.firstAuthorizedDoor := value;
+        end if;
+      end if;
+      idx +:= 2;
+    end while;
+    stats.uniqueAuthorizedDoors := length(stats.authorizedDoors);
+  end func;
+
+const proc: inspectMapContent (inout accessStats: stats,
+    in string: content) is func
+  local
+    var array string: tokens is 0 times "";
+    var integer: idx is 1;
+    var string: idName is "";
+    var string: value is "";
+    var string: currentClass is "";
+  begin
+    stats.requestedMapFound := TRUE;
+    tokens := quotedTokens(content);
+    while idx < length(tokens) do
+      idName := lower(cleanedToken(tokens[idx]));
+      value := cleanedToken(tokens[succ(idx)]);
+      if idName = "classname" then
+        currentClass := value;
+        stats.selectedMapEntities +:= 1;
+      elsif idName = "name" and isDoorClass(currentClass) then
+        stats.selectedMapDoors +:= 1;
+        appendUnique(stats.mapDoors, value);
+        if stats.firstMapDoor = "" then
+          stats.firstMapDoor := value;
+        end if;
+      elsif idName = "name" and isTriggerClass(currentClass) then
+        stats.selectedMapTriggers +:= 1;
+      elsif idName = "target" and isTriggerClass(currentClass) then
+        stats.triggerTargetRefs +:= 1;
+        appendUnique(stats.triggerTargets, value);
+        if stats.firstTriggerTarget = "" then
+          stats.firstTriggerTarget := value;
+        end if;
+      end if;
+      idx +:= 2;
+    end while;
+  end func;
+
+const proc: computeAccessRuntime (inout accessStats: stats) is func
+  local
+    var string: doorName is "";
+  begin
+    stats.runtimeLockedDoors := stats.selectedMapDoors;
+    for doorName range stats.authorizedDoors do
+      if containsString(stats.mapDoors, doorName) then
+        stats.resolvedAuthorizations +:= 1;
+        if stats.firstResolvedAuthorization = "" then
+          stats.firstResolvedAuthorization := doorName;
+        end if;
+        if containsString(stats.triggerTargets, doorName) then
+          stats.triggerLinkedAuthorizations +:= 1;
+        end if;
+      else
+        stats.missingAuthorizations +:= 1;
+        if stats.firstMissingAuthorization = "" then
+          stats.firstMissingAuthorization := doorName;
+        end if;
+      end if;
+    end for;
+    stats.runtimeUnlockedDoors := stats.resolvedAuthorizations;
+    if stats.runtimeUnlockedDoors > 0 then
+      stats.firstUnlockedDoor := stats.firstResolvedAuthorization;
+      stats.firstAccessPath := "pda>" <& stats.firstPdaDef <& ">door>" <&
+          stats.firstUnlockedDoor;
+    end if;
+  end func;
+
+const func array string: findPk4Archives (in string: basePath) is func
+  result
+    var array string: pk4Files is 0 times "";
+  local
+    var array string: names is 0 times "";
+    var string: name is "";
+  begin
+    if fileType(basePath) = FILE_DIR then
+      names := readDir(basePath);
+      for name range names do
+        if isPk4Name(name) and fileType(joinPath(basePath, name)) = FILE_REGULAR then
+          pk4Files &:= joinPath(basePath, name);
+        end if;
+      end for;
+    end if;
+  end func;
+
+const proc: scanArchive (inout accessStats: stats,
+    in string: pk4File) is func
+  local
+    var fileSys: zipFs is fileSys.value;
+    var array string: paths is 0 times "";
+    var string: path is "";
+    var string: pathLower is "";
+  begin
+    zipFs := openZip(pk4File);
+    if zipFs = fileSys.value then
+      logError("could not open pk4 archive: " <& pk4File);
+    else
+      paths := sort(readDir(zipFs, RECURSIVE));
+      for path range paths do
+        pathLower := normalizedAssetPath(path);
+        if endsWith(pathLower, ".pda") then
+          inspectPdaContent(stats, path, getFile(zipFs, path));
+        elsif pathLower = stats.requestedMapPath then
+          inspectMapContent(stats, getFile(zipFs, path));
+        end if;
+      end for;
+      close(zipFs);
+    end if;
+  end func;
+
+const proc: parseArgs (inout accessConfig: config) is func
+  local
+    var array string: args is 0 times "";
+    var integer: argIdx is 1;
+  begin
+    args := argv(PROGRAM);
+    while argIdx <= length(args) do
+      if args[argIdx] = "--help" or args[argIdx] = "-h" then
+        config.showHelp := TRUE;
+      elsif args[argIdx] = "--doom3_data_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.dataPath := convDosPath(args[argIdx]);
+      elsif args[argIdx] = "--doom3_base_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.basePath := convDosPath(args[argIdx]);
+      elsif args[argIdx] = "--doom3_start_map" and argIdx < length(args) then
+        incr(argIdx);
+        config.startMap := args[argIdx];
+      elsif args[argIdx] = "+set" and argIdx + 2 <= length(args) then
+        if args[argIdx + 1] = "fs_basepath" then
+          config.dataPath := convDosPath(args[argIdx + 2]);
+        elsif args[argIdx + 1] = "fs_game" then
+          config.basePath := convDosPath(args[argIdx + 2]);
+        end if;
+        argIdx +:= 2;
+      elsif args[argIdx] = "+map" and argIdx < length(args) then
+        incr(argIdx);
+        config.startMap := args[argIdx];
+      end if;
+      incr(argIdx);
+    end while;
+    if config.basePath = "" then
+      config.basePath := joinPath(config.dataPath, DEFAULT_BASE_DIR);
+    end if;
+  end func;
+
+const proc: showUsage is func
+  begin
+    writeln("Usage:");
+    writeln("  s7 doom3_seed7_access.s7 --doom3_data_path <doom3-root>");
+    writeln("  s7 doom3_seed7_access.s7 +set fs_basepath <doom3-root> +map <map>");
+    writeln("");
+    writeln("Scans user-owned Doom 3 pk4 files for PDA/security access readiness.");
+  end func;
+
+const proc: printStats (in accessStats: stats) is func
+  begin
+    logInfo("pk4_archives=" <& stats.pk4Archives);
+    logInfo("requested_map=" <& stats.requestedMapPath);
+    logInfo("requested_map_found=" <& stats.requestedMapFound);
+    logInfo("pda_assets=" <& stats.pdaAssets <&
+        " pda_defs=" <& stats.pdaDefs);
+    logInfo("authorization_tokens=" <& stats.authorizationTokens <&
+        " unique_doors=" <& stats.uniqueAuthorizedDoors);
+    logInfo("selected_map entities=" <& stats.selectedMapEntities <&
+        " doors=" <& stats.selectedMapDoors <&
+        " triggers=" <& stats.selectedMapTriggers <&
+        " trigger_targets=" <& stats.triggerTargetRefs);
+    logInfo("authorization_resolution resolved=" <&
+        stats.resolvedAuthorizations <& " missing=" <&
+        stats.missingAuthorizations <& " trigger_linked=" <&
+        stats.triggerLinkedAuthorizations);
+    logInfo("runtime_access locked_doors=" <& stats.runtimeLockedDoors <&
+        " unlocked_doors=" <& stats.runtimeUnlockedDoors);
+    if stats.firstPdaAsset <> "" then
+      logInfo("first_access_pda_asset=" <& stats.firstPdaAsset);
+    end if;
+    if stats.firstPdaDef <> "" then
+      logInfo("first_access_pda=" <& stats.firstPdaDef);
+    end if;
+    if stats.firstAuthorizedDoor <> "" then
+      logInfo("first_authorized_door=" <& stats.firstAuthorizedDoor);
+    end if;
+    if stats.firstMapDoor <> "" then
+      logInfo("first_map_door=" <& stats.firstMapDoor);
+    end if;
+    if stats.firstTriggerTarget <> "" then
+      logInfo("first_access_trigger_target=" <& stats.firstTriggerTarget);
+    end if;
+    if stats.firstResolvedAuthorization <> "" then
+      logInfo("first_resolved_authorization=" <&
+          stats.firstResolvedAuthorization);
+    end if;
+    if stats.firstUnlockedDoor <> "" then
+      logInfo("first_unlocked_door=" <& stats.firstUnlockedDoor);
+      logInfo("first_access_path=" <& stats.firstAccessPath);
+    end if;
+    if stats.firstMissingAuthorization <> "" then
+      logInfo("first_missing_authorization=" <&
+          stats.firstMissingAuthorization);
+    end if;
+    logInfo("access_probe_ready=" <& (stats.pk4Archives <> 0 and
+        stats.requestedMapFound and stats.pdaAssets <> 0 and
+        stats.authorizationTokens <> 0 and stats.selectedMapDoors <> 0 and
+        stats.resolvedAuthorizations <> 0 and
+        stats.triggerLinkedAuthorizations <> 0 and
+        stats.runtimeUnlockedDoors <> 0 and stats.missingAuthorizations = 0));
+  end func;
+
+const proc: main is func
+  local
+    var accessConfig: config is accessConfig.value;
+    var accessStats: stats is accessStats.value;
+    var array string: pk4Files is 0 times "";
+    var string: pk4File is "";
+  begin
+    parseArgs(config);
+    if config.showHelp then
+      showUsage;
+    else
+      if fileType(config.basePath) <> FILE_DIR then
+        logError("Doom 3 base directory not found: " <& config.basePath);
+      else
+        stats.requestedMapPath := mapNameToAssetPath(config.startMap);
+        pk4Files := sort(findPk4Archives(config.basePath));
+        stats.pk4Archives := length(pk4Files);
+        if length(pk4Files) = 0 then
+          logError("No .pk4 archives found in: " <& config.basePath);
+        else
+          for pk4File range pk4Files do
+            scanArchive(stats, pk4File);
+          end for;
+          computeAccessRuntime(stats);
+          printStats(stats);
+        end if;
+      end if;
+    end if;
+  end func;

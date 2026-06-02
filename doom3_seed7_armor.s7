@@ -1,0 +1,608 @@
+(********************************************************************)
+(*  doom3_seed7_armor.s7                                           *)
+(*                                                                  *)
+(*  Focused Doom 3 / id Tech 4 armor/damage subsystem probe for    *)
+(*  Seed7. It reads user-owned pk4 archives, scans PDA/player suit *)
+(*  armor state, reads monster melee damage, and emits a first      *)
+(*  deterministic armor-mitigation/HUD readiness contract. No       *)
+(*  commercial data is bundled.                                     *)
+(********************************************************************)
+
+$ include "seed7_05.s7i";
+$ include "osfiles.s7i";
+$ include "zip.s7i";
+
+const string: DEFAULT_DATA_PATH is ".";
+const string: DEFAULT_BASE_DIR is "base";
+const string: DEFAULT_START_MAP is "game/mars_city1";
+const integer: DEFAULT_PLAYER_HEALTH is 100;
+const integer: DEFAULT_MONSTER_DAMAGE is 12;
+const integer: DEFAULT_ARMOR_PROTECTION_PERCENT is 60;
+
+const type: armorConfig is new struct
+    var string: dataPath is DEFAULT_DATA_PATH;
+    var string: basePath is "";
+    var string: startMap is DEFAULT_START_MAP;
+    var boolean: showHelp is FALSE;
+  end struct;
+
+const type: armorStats is new struct
+    var integer: pk4Archives is 0;
+    var string: requestedMapPath is "";
+    var boolean: requestedMapFound is FALSE;
+    var string: requestedCollisionPath is "";
+    var boolean: requestedCollisionFound is FALSE;
+    var integer: collisionModels is 0;
+    var integer: collisionPolygons is 0;
+    var integer: pdaAssets is 0;
+    var integer: pdaArmorEntries is 0;
+    var integer: pdaArmorProtectionEntries is 0;
+    var integer: initialArmor is 0;
+    var integer: armorProtectionPercent is DEFAULT_ARMOR_PROTECTION_PERCENT;
+    var integer: entityDefs is 0;
+    var integer: monsterDamageDefs is 0;
+    var integer: monsterDamage is DEFAULT_MONSTER_DAMAGE;
+    var integer: selectedMapEntities is 0;
+    var integer: playerStarts is 0;
+    var integer: monsters is 0;
+    var integer: playerHealthBefore is DEFAULT_PLAYER_HEALTH;
+    var integer: rawDamage is DEFAULT_MONSTER_DAMAGE;
+    var integer: armorAbsorbed is 0;
+    var integer: healthDamage is 0;
+    var integer: playerArmorAfter is 0;
+    var integer: playerHealthAfter is DEFAULT_PLAYER_HEALTH;
+    var string: firstPdaAsset is "";
+    var string: firstArmorSource is "";
+    var string: firstDamageDef is "";
+    var string: firstMonsterClass is "";
+    var string: firstPlayerStart is "";
+    var string: firstArmorPath is "";
+  end struct;
+
+const proc: logInfo (in string: msg) is func
+  begin
+    writeln("[armor] " <& msg);
+  end func;
+
+const proc: logError (in string: msg) is func
+  begin
+    writeln("[armor-error] " <& msg);
+  end func;
+
+const func string: joinPath (in string: leftPath, in string: rightPath) is func
+  result
+    var string: joined is "";
+  begin
+    if leftPath = "" then
+      joined := rightPath;
+    elsif endsWith(leftPath, "/") or endsWith(leftPath, "\\") then
+      joined := leftPath <& rightPath;
+    else
+      joined := leftPath <& "/" <& rightPath;
+    end if;
+  end func;
+
+const func boolean: isPk4Name (in string: fileName) is
+    return endsWith(lower(fileName), ".pk4");
+
+const func string: normalizedAssetPath (in string: filePath) is
+    return replace(lower(filePath), "\\", "/");
+
+const func string: mapNameToAssetPath (in string: mapName) is func
+  result
+    var string: assetPath is "";
+  begin
+    assetPath := normalizedAssetPath(mapName);
+    if not startsWith(assetPath, "maps/") then
+      assetPath := "maps/" <& assetPath;
+    end if;
+    if not endsWith(assetPath, ".map") then
+      assetPath &:= ".map";
+    end if;
+  end func;
+
+const func string: compiledSiblingPath (in string: mapPath,
+    in string: suffix) is func
+  result
+    var string: siblingPath is "";
+  begin
+    if endsWith(mapPath, ".map") then
+      siblingPath := mapPath[.. length(mapPath) - 4] <& suffix;
+    else
+      siblingPath := mapPath <& suffix;
+    end if;
+  end func;
+
+const func string: cleanedToken (in string: token) is func
+  result
+    var string: clean is "";
+  local
+    var integer: idx is 1;
+    var char: ch is ' ';
+  begin
+    clean := trim(token);
+    while idx <= length(clean) do
+      ch := clean[idx];
+      if ch = '"' or ch = '(' or ch = ')' or ch = '{' or ch = '}' or
+          ch = ',' or ch = ';' then
+        clean := clean[.. pred(idx)] & clean[succ(idx) ..];
+      else
+        incr(idx);
+      end if;
+    end while;
+  end func;
+
+const func integer: countOccurrences (in string: content,
+    in string: token) is func
+  result
+    var integer: count is 0;
+  local
+    var integer: searchPos is 1;
+    var integer: foundPos is 0;
+  begin
+    foundPos := pos(content, token, searchPos);
+    while foundPos <> 0 do
+      count +:= 1;
+      searchPos := foundPos + length(token);
+      foundPos := pos(content, token, searchPos);
+    end while;
+  end func;
+
+const func integer: sumIntegersAfterWord (in string: content,
+    in string: keyName) is func
+  result
+    var integer: total is 0;
+  local
+    var array string: tokens is 0 times "";
+    var integer: tokenIndex is 1;
+    var integer: valueIndex is 0;
+    var integer: value is 0;
+    var boolean: foundValue is FALSE;
+  begin
+    tokens := noEmptyStrings(split(replace(replace(replace(content, "\n", " "),
+        "\r", " "), "\t", " "), ' '));
+    while tokenIndex < length(tokens) do
+      if lower(cleanedToken(tokens[tokenIndex])) = lower(keyName) then
+        foundValue := FALSE;
+        valueIndex := succ(tokenIndex);
+        while valueIndex <= length(tokens) and valueIndex <= tokenIndex + 4 and
+            not foundValue do
+          block
+            value := integer(cleanedToken(tokens[valueIndex]));
+            total +:= value;
+            foundValue := TRUE;
+          exception
+            catch RANGE_ERROR:
+              noop;
+          end block;
+          incr(valueIndex);
+        end while;
+      end if;
+      incr(tokenIndex);
+    end while;
+  end func;
+
+const func array string: quotedTokens (in string: content) is func
+  result
+    var array string: tokens is 0 times "";
+  local
+    var integer: idx is 1;
+    var integer: startIdx is 1;
+  begin
+    while idx <= length(content) do
+      if content[idx] = '"' then
+        incr(idx);
+        startIdx := idx;
+        while idx <= length(content) and content[idx] <> '"' do
+          incr(idx);
+        end while;
+        if idx > startIdx then
+          tokens &:= content[startIdx .. pred(idx)];
+        end if;
+      end if;
+      incr(idx);
+    end while;
+  end func;
+
+const func integer: intOrDefault (in string: text, in integer: defaultValue) is func
+  result
+    var integer: value is 0;
+  begin
+    value := defaultValue;
+    if text <> "" then
+      block
+        value := integer(text);
+      exception
+        catch RANGE_ERROR:
+          value := defaultValue;
+      end block;
+    end if;
+  end func;
+
+const func string: quotedValueAfter (in string: content, in string: keyName) is func
+  result
+    var string: value is "";
+  local
+    var string: keyText is "";
+    var integer: keyPos is 0;
+    var integer: keyEnd is 0;
+    var integer: valueStart is 0;
+    var integer: valueEnd is 0;
+  begin
+    keyText := "\"" <& keyName <& "\"";
+    keyPos := pos(lower(content), lower(keyText), 1);
+    if keyPos <> 0 then
+      keyEnd := pos(content, "\"", succ(keyPos));
+      if keyEnd <> 0 then
+        valueStart := pos(content, "\"", succ(keyEnd));
+        if valueStart <> 0 then
+          valueEnd := pos(content, "\"", succ(valueStart));
+          if valueEnd <> 0 then
+            value := content[succ(valueStart) .. pred(valueEnd)];
+          end if;
+        end if;
+      end if;
+    end if;
+  end func;
+
+const func string: declNameAfter (in string: content, in integer: startPos) is func
+  result
+    var string: declName is "";
+  local
+    var integer: idx is 0;
+    var char: ch is ' ';
+  begin
+    idx := startPos;
+    while idx <= length(content) and declName = "" do
+      ch := content[idx];
+      if ch <> ' ' and ch <> '\t' and ch <> '\n' and ch <> '\r' then
+        while idx <= length(content) and content[idx] <> ' ' and
+            content[idx] <> '\t' and content[idx] <> '\n' and
+            content[idx] <> '\r' and content[idx] <> '{' do
+          declName &:= content[idx];
+          incr(idx);
+        end while;
+      end if;
+      incr(idx);
+    end while;
+  end func;
+
+const func integer: matchingBlockEnd (in string: content,
+    in integer: blockStart) is func
+  result
+    var integer: blockEnd is 0;
+  local
+    var integer: idx is 0;
+    var integer: depth is 0;
+  begin
+    if blockStart <> 0 then
+      idx := blockStart;
+      while idx <= length(content) and blockEnd = 0 do
+        if content[idx] = '{' then
+          incr(depth);
+        elsif content[idx] = '}' then
+          decr(depth);
+          if depth = 0 then
+            blockEnd := idx;
+          end if;
+        end if;
+        incr(idx);
+      end while;
+    end if;
+  end func;
+
+const proc: inspectPdaContent (inout armorStats: stats,
+    in string: path, in string: content) is func
+  local
+    var array string: tokens is 0 times "";
+    var integer: idx is 1;
+    var string: idName is "";
+    var string: value is "";
+  begin
+    stats.pdaAssets +:= 1;
+    if stats.firstPdaAsset = "" then
+      stats.firstPdaAsset := normalizedAssetPath(path);
+    end if;
+    tokens := quotedTokens(content);
+    while idx < length(tokens) do
+      idName := lower(cleanedToken(tokens[idx]));
+      value := cleanedToken(tokens[succ(idx)]);
+      if idName = "armor" then
+        stats.pdaArmorEntries +:= 1;
+        stats.initialArmor := intOrDefault(value, stats.initialArmor);
+        if stats.firstArmorSource = "" then
+          stats.firstArmorSource := normalizedAssetPath(path);
+        end if;
+      elsif idName = "armor_protection" then
+        stats.pdaArmorProtectionEntries +:= 1;
+        stats.armorProtectionPercent := intOrDefault(value,
+            stats.armorProtectionPercent);
+      end if;
+      idx +:= 2;
+    end while;
+  end func;
+
+const proc: inspectDefContent (inout armorStats: stats,
+    in string: content) is func
+  local
+    var integer: searchPos is 1;
+    var integer: defPos is 0;
+    var integer: nameStart is 0;
+    var integer: blockStart is 0;
+    var integer: blockEnd is 0;
+    var string: className is "";
+    var string: entityBlock is "";
+    var string: damageText is "";
+  begin
+    defPos := pos(content, "entityDef", searchPos);
+    while defPos <> 0 do
+      nameStart := defPos + length("entityDef");
+      className := declNameAfter(content, nameStart);
+      blockStart := pos(content, "{", nameStart);
+      blockEnd := matchingBlockEnd(content, blockStart);
+      if blockStart <> 0 and blockEnd <> 0 then
+        stats.entityDefs +:= 1;
+        entityBlock := content[blockStart .. blockEnd];
+        damageText := quotedValueAfter(entityBlock, "damage_melee");
+        if damageText <> "" then
+          stats.monsterDamageDefs +:= 1;
+          stats.monsterDamage := intOrDefault(damageText, DEFAULT_MONSTER_DAMAGE);
+          if stats.firstDamageDef = "" then
+            stats.firstDamageDef := className;
+          end if;
+        end if;
+        searchPos := succ(blockEnd);
+      else
+        searchPos := nameStart;
+      end if;
+      defPos := pos(content, "entityDef", searchPos);
+    end while;
+  end func;
+
+const proc: inspectMapContent (inout armorStats: stats,
+    in string: content) is func
+  local
+    var array string: tokens is 0 times "";
+    var integer: idx is 1;
+    var string: idName is "";
+    var string: value is "";
+    var string: currentClass is "";
+  begin
+    stats.requestedMapFound := TRUE;
+    tokens := quotedTokens(content);
+    while idx < length(tokens) do
+      idName := lower(cleanedToken(tokens[idx]));
+      value := cleanedToken(tokens[succ(idx)]);
+      if idName = "classname" then
+        currentClass := value;
+        stats.selectedMapEntities +:= 1;
+        if value = "info_player_start" then
+          stats.playerStarts +:= 1;
+        elsif startsWith(value, "monster_") then
+          stats.monsters +:= 1;
+          if stats.firstMonsterClass = "" then
+            stats.firstMonsterClass := value;
+          end if;
+        end if;
+      elsif idName = "name" and currentClass = "info_player_start" and
+          stats.firstPlayerStart = "" then
+        stats.firstPlayerStart := value;
+      end if;
+      idx +:= 2;
+    end while;
+  end func;
+
+const proc: simulateArmorDamage (inout armorStats: stats) is func
+  begin
+    if stats.requestedMapFound and stats.requestedCollisionFound and
+        stats.collisionModels <> 0 and stats.collisionPolygons <> 0 and
+        stats.playerStarts <> 0 and stats.monsters <> 0 then
+      stats.rawDamage := stats.monsterDamage;
+      stats.armorAbsorbed := (stats.rawDamage * stats.armorProtectionPercent) div 100;
+      if stats.armorAbsorbed > stats.initialArmor then
+        stats.armorAbsorbed := stats.initialArmor;
+      end if;
+      stats.healthDamage := stats.rawDamage - stats.armorAbsorbed;
+      stats.playerArmorAfter := stats.initialArmor - stats.armorAbsorbed;
+      stats.playerHealthAfter := stats.playerHealthBefore - stats.healthDamage;
+      stats.firstArmorPath := "damage>" <& stats.rawDamage <& ">armor>" <&
+          stats.armorAbsorbed <& ">health>" <& stats.healthDamage;
+    end if;
+  end func;
+
+const proc: inspectCollisionContent (inout armorStats: stats,
+    in string: content) is func
+  begin
+    stats.collisionModels +:= countOccurrences(lower(content), "collisionmodel");
+    stats.collisionPolygons +:= sumIntegersAfterWord(lower(content), "polygons");
+  end func;
+
+const func string: armorBar (in integer: armorValue) is func
+  result
+    var string: bar is "";
+  local
+    var integer: idx is 0;
+  begin
+    for idx range 1 to armorValue div 10 do
+      bar &:= "*";
+    end for;
+  end func;
+
+const func array string: findPk4Archives (in string: basePath) is func
+  result
+    var array string: pk4Files is 0 times "";
+  local
+    var array string: names is 0 times "";
+    var string: name is "";
+  begin
+    if fileType(basePath) = FILE_DIR then
+      names := readDir(basePath);
+      for name range names do
+        if isPk4Name(name) and fileType(joinPath(basePath, name)) = FILE_REGULAR then
+          pk4Files &:= joinPath(basePath, name);
+        end if;
+      end for;
+    end if;
+  end func;
+
+const proc: scanArchive (inout armorStats: stats,
+    in string: pk4File) is func
+  local
+    var fileSys: zipFs is fileSys.value;
+    var array string: paths is 0 times "";
+    var string: path is "";
+    var string: pathLower is "";
+  begin
+    zipFs := openZip(pk4File);
+    if zipFs = fileSys.value then
+      logError("could not open pk4 archive: " <& pk4File);
+    else
+      paths := sort(readDir(zipFs, RECURSIVE));
+      for path range paths do
+        pathLower := normalizedAssetPath(path);
+        if endsWith(pathLower, ".pda") then
+          inspectPdaContent(stats, path, getFile(zipFs, path));
+        elsif endsWith(pathLower, ".def") then
+          inspectDefContent(stats, getFile(zipFs, path));
+        elsif pathLower = stats.requestedMapPath then
+          inspectMapContent(stats, getFile(zipFs, path));
+        elsif pathLower = stats.requestedCollisionPath then
+          stats.requestedCollisionFound := TRUE;
+          inspectCollisionContent(stats, getFile(zipFs, path));
+        end if;
+      end for;
+      close(zipFs);
+    end if;
+  end func;
+
+const proc: parseArgs (inout armorConfig: config) is func
+  local
+    var array string: args is 0 times "";
+    var integer: argIdx is 1;
+  begin
+    args := argv(PROGRAM);
+    while argIdx <= length(args) do
+      if args[argIdx] = "--help" or args[argIdx] = "-h" then
+        config.showHelp := TRUE;
+      elsif args[argIdx] = "--doom3_data_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.dataPath := convDosPath(args[argIdx]);
+      elsif args[argIdx] = "--doom3_base_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.basePath := convDosPath(args[argIdx]);
+      elsif args[argIdx] = "--doom3_start_map" and argIdx < length(args) then
+        incr(argIdx);
+        config.startMap := args[argIdx];
+      elsif args[argIdx] = "+set" and argIdx + 2 <= length(args) then
+        if args[argIdx + 1] = "fs_basepath" then
+          config.dataPath := convDosPath(args[argIdx + 2]);
+        elsif args[argIdx + 1] = "fs_game" then
+          config.basePath := convDosPath(args[argIdx + 2]);
+        end if;
+        argIdx +:= 2;
+      elsif args[argIdx] = "+map" and argIdx < length(args) then
+        incr(argIdx);
+        config.startMap := args[argIdx];
+      end if;
+      incr(argIdx);
+    end while;
+    if config.basePath = "" then
+      config.basePath := joinPath(config.dataPath, DEFAULT_BASE_DIR);
+    end if;
+  end func;
+
+const proc: showUsage is func
+  begin
+    writeln("Usage:");
+    writeln("  s7 doom3_seed7_armor.s7 --doom3_data_path <doom3-root>");
+    writeln("  s7 doom3_seed7_armor.s7 +set fs_basepath <doom3-root> +map <map>");
+    writeln("");
+    writeln("Scans user-owned Doom 3 pk4 files for armor/damage mitigation readiness.");
+  end func;
+
+const proc: printStats (in armorStats: stats) is func
+  begin
+    logInfo("pk4_archives=" <& stats.pk4Archives);
+    logInfo("requested_map=" <& stats.requestedMapPath);
+    logInfo("requested_map_found=" <& stats.requestedMapFound);
+    logInfo("armor_collision cm=" <& stats.requestedCollisionPath <&
+        " found=" <& stats.requestedCollisionFound <& " models=" <&
+        stats.collisionModels <& " polygons=" <& stats.collisionPolygons);
+    logInfo("pda_armor assets=" <& stats.pdaAssets <&
+        " armor_entries=" <& stats.pdaArmorEntries <&
+        " protection_entries=" <& stats.pdaArmorProtectionEntries);
+    logInfo("armor_state initial=" <& stats.initialArmor <&
+        " protection_percent=" <& stats.armorProtectionPercent);
+    logInfo("damage_defs entity_defs=" <& stats.entityDefs <&
+        " melee_damage_defs=" <& stats.monsterDamageDefs <&
+        " first_damage=" <& stats.monsterDamage);
+    logInfo("selected_map entities=" <& stats.selectedMapEntities <&
+        " player_starts=" <& stats.playerStarts <&
+        " monsters=" <& stats.monsters);
+    logInfo("damage_resolution raw=" <& stats.rawDamage <&
+        " armor_absorbed=" <& stats.armorAbsorbed <&
+        " health_damage=" <& stats.healthDamage <&
+        " collision_ready=" <& (stats.requestedCollisionFound and
+        stats.collisionModels <> 0 and stats.collisionPolygons <> 0));
+    logInfo("player_state health_before=" <& stats.playerHealthBefore <&
+        " armor_before=" <& stats.initialArmor <&
+        " health_after=" <& stats.playerHealthAfter <&
+        " armor_after=" <& stats.playerArmorAfter);
+    logInfo("hud_armor_value=" <& stats.playerArmorAfter);
+    logInfo("hud_armor_bar=" <& armorBar(stats.playerArmorAfter));
+    if stats.firstPdaAsset <> "" then
+      logInfo("first_armor_pda_asset=" <& stats.firstPdaAsset);
+    end if;
+    if stats.firstArmorSource <> "" then
+      logInfo("first_armor_source=" <& stats.firstArmorSource);
+    end if;
+    if stats.firstDamageDef <> "" then
+      logInfo("first_damage_def=" <& stats.firstDamageDef);
+    end if;
+    if stats.firstPlayerStart <> "" then
+      logInfo("first_armor_player_start=" <& stats.firstPlayerStart);
+    end if;
+    if stats.firstMonsterClass <> "" then
+      logInfo("first_armor_monster_class=" <& stats.firstMonsterClass);
+    end if;
+    logInfo("first_armor_path=" <& stats.firstArmorPath);
+    logInfo("armor_probe_ready=" <& (stats.pk4Archives <> 0 and
+        stats.requestedMapFound and stats.pdaArmorEntries <> 0 and
+        stats.requestedCollisionFound and stats.collisionModels <> 0 and
+        stats.collisionPolygons <> 0 and
+        stats.monsterDamageDefs <> 0 and stats.playerStarts <> 0 and
+        stats.monsters <> 0 and stats.initialArmor > 0 and
+        stats.armorAbsorbed > 0 and stats.healthDamage > 0));
+  end func;
+
+const proc: main is func
+  local
+    var armorConfig: config is armorConfig.value;
+    var armorStats: stats is armorStats.value;
+    var array string: pk4Files is 0 times "";
+    var string: pk4File is "";
+  begin
+    parseArgs(config);
+    if config.showHelp then
+      showUsage;
+      else
+        if fileType(config.basePath) <> FILE_DIR then
+          logError("Doom 3 base directory not found: " <& config.basePath);
+      else
+        stats.requestedMapPath := mapNameToAssetPath(config.startMap);
+        stats.requestedCollisionPath := compiledSiblingPath(stats.requestedMapPath,
+            ".cm");
+        pk4Files := sort(findPk4Archives(config.basePath));
+        stats.pk4Archives := length(pk4Files);
+        if length(pk4Files) = 0 then
+          logError("No .pk4 archives found in: " <& config.basePath);
+        else
+          for pk4File range pk4Files do
+            scanArchive(stats, pk4File);
+          end for;
+          simulateArmorDamage(stats);
+          printStats(stats);
+        end if;
+      end if;
+    end if;
+  end func;

@@ -1,0 +1,4594 @@
+(********************************************************************)
+(*  doom3_seed7.s7   Doom 3 / id Tech 4 Seed7 port foundation       *)
+(*                                                                  *)
+(*  Stage 1 is an asset/runtime scanner, not a playable renderer.   *)
+(*  It never ships commercial Doom 3 data. Point it at a legal       *)
+(*  Doom 3 installation that contains base/*.pk4 files.              *)
+(********************************************************************)
+
+$ include "seed7_05.s7i";
+$ include "osfiles.s7i";
+$ include "zip.s7i";
+$ include "math.s7i";
+
+const string: VERSION is "doom3-seed7 stage1";
+const string: DEFAULT_DATA_PATH is ".";
+const string: DEFAULT_BASE_DIR is "base";
+const string: DEFAULT_START_MAP is "game/mars_city1";
+const string: DEFAULT_RENDER_MODE is "metadata";
+const string: DEFAULT_SAVE_PATH is "doom3_seed7_user/save";
+const string: DEFAULT_CONFIG_PATH is "doom3_seed7_user/config";
+const float: PLAYER_PROBE_DISTANCE is 32.0;
+const float: PLAYER_SIM_STEP_DISTANCE is 16.0;
+const integer: PLAYER_SIM_STEPS is 4;
+const integer: DEBUG_RENDER_GRID_SIZE is 16;
+const float: DEBUG_RENDER_CELL_SIZE is 32.0;
+const float: TRIGGER_TOUCH_RADIUS is 32.0;
+const float: RUNTIME_ENTITY_COLLISION_RADIUS is 24.0;
+const integer: ENTITY_DEF_INHERIT_LIMIT is 8;
+
+const type: cvarRecord is new struct
+    var string: name is "";
+    var string: value is "";
+  end struct;
+
+const type: doom3Config is new struct
+    var string: dataPath is DEFAULT_DATA_PATH;
+    var string: basePath is "";
+    var string: startMap is DEFAULT_START_MAP;
+    var string: renderMode is DEFAULT_RENDER_MODE;
+    var string: savePath is DEFAULT_SAVE_PATH;
+    var string: configPath is DEFAULT_CONFIG_PATH;
+    var array cvarRecord: cvars is 0 times cvarRecord.value;
+    var boolean: showHelp is FALSE;
+  end struct;
+
+const type: selectedMapEntity is new struct
+    var string: className is "";
+    var string: entityName is "";
+    var string: originText is "";
+    var string: model is "";
+    var string: sound is "";
+    var string: target is "";
+    var string: angleText is "";
+    var string: healthText is "";
+    var string: lightRadius is "";
+    var string: lightColor is "";
+    var boolean: hasOrigin is FALSE;
+    var boolean: hasAngle is FALSE;
+    var boolean: hasHealth is FALSE;
+    var float: x is 0.0;
+    var float: y is 0.0;
+    var float: z is 0.0;
+    var float: yaw is 0.0;
+    var integer: health is 0;
+  end struct;
+
+const type: runtimeEntity is new struct
+    var string: className is "";
+    var string: entityName is "";
+    var string: kind is "";
+    var string: model is "";
+    var string: sound is "";
+    var boolean: active is FALSE;
+    var boolean: solid is FALSE;
+    var boolean: trigger is FALSE;
+    var boolean: hasOrigin is FALSE;
+    var integer: health is 0;
+    var float: x is 0.0;
+    var float: y is 0.0;
+    var float: z is 0.0;
+    var float: yaw is 0.0;
+  end struct;
+
+const type: selectedBrushPlane is new struct
+    var float: normalX is 0.0;
+    var float: normalY is 0.0;
+    var float: normalZ is 0.0;
+    var float: distance is 0.0;
+    var string: materialName is "";
+  end struct;
+
+const type: selectedBrushBounds is new struct
+    var integer: planeCount is 0;
+    var string: materialName is "";
+    var boolean: hasMinX is FALSE;
+    var boolean: hasMaxX is FALSE;
+    var boolean: hasMinY is FALSE;
+    var boolean: hasMaxY is FALSE;
+    var boolean: hasMinZ is FALSE;
+    var boolean: hasMaxZ is FALSE;
+    var float: minX is 0.0;
+    var float: maxX is 0.0;
+    var float: minY is 0.0;
+    var float: maxY is 0.0;
+    var float: minZ is 0.0;
+    var float: maxZ is 0.0;
+  end struct;
+
+const type: runtimeRenderSurface is new struct
+    var string: materialName is "";
+    var string: fallbackColor is "";
+    var boolean: visible is FALSE;
+    var float: minX is 0.0;
+    var float: minY is 0.0;
+    var float: minZ is 0.0;
+    var float: maxX is 0.0;
+    var float: maxY is 0.0;
+    var float: maxZ is 0.0;
+  end struct;
+
+const type: entityDefRecord is new struct
+    var string: className is "";
+    var boolean: hasParent is FALSE;
+    var string: parentClassName is "";
+    var boolean: hasHealth is FALSE;
+    var integer: health is 0;
+    var boolean: hasModel is FALSE;
+    var string: model is "";
+    var boolean: hasSound is FALSE;
+    var string: sound is "";
+  end struct;
+
+const type: archiveStats is new struct
+    var integer: totalFiles is 0;
+    var integer: declFiles is 0;
+    var integer: materialFiles is 0;
+    var integer: defFiles is 0;
+    var integer: mapFiles is 0;
+    var integer: scriptFiles is 0;
+    var integer: imageRefs is 0;
+    var integer: imageAssets is 0;
+    var integer: soundRefs is 0;
+    var integer: soundAssets is 0;
+    var integer: textSoundRefs is 0;
+    var integer: modelAssets is 0;
+    var integer: selectedModelRefs is 0;
+    var integer: entityDefs is 0;
+    var integer: entityDefNamed is 0;
+    var integer: entityDefHealthValues is 0;
+    var integer: entityDefModelValues is 0;
+    var integer: entityDefSoundValues is 0;
+    var integer: entityDefInheritValues is 0;
+    var integer: entityDefBoundsValues is 0;
+    var integer: materialDecls is 0;
+    var integer: materialTextureBindings is 0;
+    var integer: materialNoShadows is 0;
+    var integer: materialTwoSided is 0;
+    var integer: materialTranslucent is 0;
+    var integer: materialBlendStages is 0;
+    var integer: mapEntities is 0;
+    var integer: mapLights is 0;
+    var integer: mapFuncStatics is 0;
+    var integer: mapDoors is 0;
+    var integer: mapTriggers is 0;
+    var integer: mapMonsters is 0;
+    var integer: mapItems is 0;
+    var integer: mapPickups is 0;
+    var integer: mapPlayerStarts is 0;
+    var integer: mapBrushes is 0;
+    var integer: mapPatches is 0;
+    var integer: scriptFunctions is 0;
+    var integer: scriptSpawnargRefs is 0;
+    var integer: materialStages is 0;
+    var boolean: requestedMapFound is FALSE;
+    var boolean: worldspawnFound is FALSE;
+    var boolean: playerStartFound is FALSE;
+    var boolean: playerStartParsed is FALSE;
+    var integer: selectedMapEntities is 0;
+    var integer: selectedMapNamed is 0;
+    var integer: selectedMapWithOrigin is 0;
+    var integer: selectedMapWithModel is 0;
+    var integer: selectedMapWithTarget is 0;
+    var integer: selectedMapWithBounds is 0;
+    var integer: selectedTargetRefs is 0;
+    var integer: selectedMapSpawnReady is 0;
+    var integer: selectedMapMaterialRefs is 0;
+    var integer: selectedBrushMaterialRefs is 0;
+    var integer: selectedPatchMaterialRefs is 0;
+    var integer: selectedBrushPlaneLines is 0;
+    var integer: selectedOriginVectors is 0;
+    var integer: selectedLights is 0;
+    var integer: selectedLightsWithOrigin is 0;
+    var integer: selectedLightsWithRadius is 0;
+    var integer: selectedLightsWithColor is 0;
+    var integer: materialTextureRefs is 0;
+    var string: firstMap is "";
+    var string: firstDecl is "";
+    var string: firstMaterial is "";
+    var string: firstDef is "";
+    var string: firstScript is "";
+    var string: firstEntityDef is "";
+    var string: firstEntityDefHealthClass is "";
+    var string: firstEntityDefModelClass is "";
+    var string: firstEntityDefSoundClass is "";
+    var string: firstEntityDefInheritClass is "";
+    var string: firstEntityDefBoundsClass is "";
+    var string: firstMaterialDecl is "";
+    var string: firstMaterialTextureBinding is "";
+    var string: firstMapMaterialRef is "";
+    var string: firstImageAsset is "";
+    var string: firstMaterialTextureRef is "";
+    var string: firstSoundAsset is "";
+    var string: firstTextSoundRef is "";
+    var string: firstModelAsset is "";
+    var string: firstSelectedModelRef is "";
+    var string: requestedMapPath is "";
+    var string: firstSpawnClass is "";
+    var string: firstSpawnName is "";
+    var string: firstSpawnOrigin is "";
+    var string: firstSpawnModel is "";
+    var string: firstSpawnTarget is "";
+    var string: firstTargetRef is "";
+    var string: firstLightName is "";
+    var string: firstLightOrigin is "";
+    var string: firstLightRadius is "";
+    var string: firstLightColor is "";
+    var string: playerStartOrigin is "";
+    var string: playerStartAngle is "";
+    var float: playerStartX is 0.0;
+    var float: playerStartY is 0.0;
+    var float: playerStartZ is 0.0;
+    var float: playerStartYaw is 0.0;
+    var boolean: selectedBoundsValid is FALSE;
+    var float: selectedMinX is 0.0;
+    var float: selectedMinY is 0.0;
+    var float: selectedMinZ is 0.0;
+    var float: selectedMaxX is 0.0;
+    var float: selectedMaxY is 0.0;
+    var float: selectedMaxZ is 0.0;
+    var array string: entityDefNames is 0 times "";
+    var array entityDefRecord: entityDefRecords is 0 times entityDefRecord.value;
+    var array string: imageAssetStems is 0 times "";
+    var array string: materialTextureStems is 0 times "";
+    var array string: soundAssetStems is 0 times "";
+    var array string: textSoundStems is 0 times "";
+    var array string: modelAssetStems is 0 times "";
+    var array string: selectedModelStems is 0 times "";
+    var array string: runtimeModelStems is 0 times "";
+    var array string: runtimeSoundStems is 0 times "";
+    var array string: materialNames is 0 times "";
+    var array string: mtrBindingNames is 0 times "";
+    var array string: mtrBindingTextureStems is 0 times "";
+    var array string: selectedSpawnClasses is 0 times "";
+    var array string: selectedEntityNames is 0 times "";
+    var array string: selectedTargetNames is 0 times "";
+    var array string: selectedMapMaterials is 0 times "";
+    var array string: selectedBrushMaterials is 0 times "";
+    var array string: selectedPatchMaterials is 0 times "";
+    var array selectedMapEntity: selectedEntities is 0 times selectedMapEntity.value;
+    var array runtimeEntity: runtimeEntities is 0 times runtimeEntity.value;
+    var array selectedBrushPlane: selectedBrushPlanes is 0 times selectedBrushPlane.value;
+    var array selectedBrushBounds: selectedBrushBoundsList is 0 times selectedBrushBounds.value;
+    var array runtimeRenderSurface: runtimeRenderSurfaces is
+        0 times runtimeRenderSurface.value;
+  end struct;
+
+const proc: logInfo (in string: msg) is func
+  begin
+    writeln("[info] " <& msg);
+  end func;
+
+const proc: logWarn (in string: msg) is func
+  begin
+    writeln("[warn] " <& msg);
+  end func;
+
+const proc: logError (in string: msg) is func
+  begin
+    writeln("[error] " <& msg);
+  end func;
+
+const proc: setCvar (inout array cvarRecord: cvars, in string: cvarName,
+    in string: cvarValue) is func
+  local
+    var cvarRecord: cvar is cvarRecord.value;
+    var integer: cvarIdx is 1;
+    var string: normalizedName is "";
+    var boolean: updated is FALSE;
+  begin
+    normalizedName := lower(cvarName);
+    while cvarIdx <= length(cvars) and not updated do
+      if cvars[cvarIdx].name = normalizedName then
+        cvars[cvarIdx].value := cvarValue;
+        updated := TRUE;
+      end if;
+      incr(cvarIdx);
+    end while;
+    if not updated and normalizedName <> "" then
+      cvar.name := normalizedName;
+      cvar.value := cvarValue;
+      cvars &:= cvar;
+    end if;
+  end func;
+
+const func string: cvarValueForName (in array cvarRecord: cvars,
+    in string: cvarName) is func
+  result
+    var string: cvarValue is "";
+  local
+    var cvarRecord: cvar is cvarRecord.value;
+    var string: normalizedName is "";
+  begin
+    normalizedName := lower(cvarName);
+    for cvar range cvars do
+      if cvarValue = "" and cvar.name = normalizedName then
+        cvarValue := cvar.value;
+      end if;
+    end for;
+  end func;
+
+const func boolean: isRuntimeCoreCvar (in string: cvarName) is func
+  result
+    var boolean: coreCvar is FALSE;
+  begin
+    coreCvar := cvarName = "doom3_data_path" or
+        cvarName = "doom3_base_path" or cvarName = "doom3_start_map" or
+        cvarName = "doom3_render_mode" or cvarName = "doom3_save_path" or
+        cvarName = "doom3_config_path" or cvarName = "fs_basepath" or
+        cvarName = "fs_game";
+  end func;
+
+const func integer: countCustomCvars (in array cvarRecord: cvars) is func
+  result
+    var integer: customCvars is 0;
+  local
+    var cvarRecord: cvar is cvarRecord.value;
+  begin
+    for cvar range cvars do
+      if not isRuntimeCoreCvar(cvar.name) then
+        customCvars +:= 1;
+      end if;
+    end for;
+  end func;
+
+const func string: firstCustomCvarName (in array cvarRecord: cvars) is func
+  result
+    var string: cvarName is "";
+  local
+    var cvarRecord: cvar is cvarRecord.value;
+  begin
+    for cvar range cvars do
+      if cvarName = "" and not isRuntimeCoreCvar(cvar.name) then
+        cvarName := cvar.name;
+      end if;
+    end for;
+  end func;
+
+const func string: joinPath (in string: leftPath, in string: rightPath) is func
+  result
+    var string: path is "";
+  begin
+    if leftPath = "" or leftPath = "." then
+      path := rightPath;
+    elsif endsWith(leftPath, "/") or endsWith(leftPath, "\\") then
+      path := leftPath & rightPath;
+    else
+      path := leftPath & "/" & rightPath;
+    end if;
+  end func;
+
+const func boolean: isPk4Name (in string: fileName) is
+  return endsWith(lower(fileName), ".pk4");
+
+const func string: normalizedAssetPath (in string: filePath) is
+  return replace(lower(filePath), "\\", "/");
+
+const func string: mapNameToAssetPath (in string: mapName) is func
+  result
+    var string: mapPath is "";
+  begin
+    mapPath := normalizedAssetPath(mapName);
+    if not startsWith(mapPath, "maps/") then
+      mapPath := "maps/" & mapPath;
+    end if;
+    if not endsWith(mapPath, ".map") then
+      mapPath &:= ".map";
+    end if;
+  end func;
+
+const func string: compiledSiblingPath (in string: mapPath,
+    in string: suffix) is func
+  result
+    var string: sibling is "";
+  begin
+    sibling := mapPath[.. pred(pred(pred(pred(length(mapPath)))))] <& suffix;
+  end func;
+
+const func boolean: hasAnySuffix (in string: filePath, in string: suffix1,
+    in string: suffix2, in string: suffix3) is func
+  result
+    var boolean: matched is FALSE;
+  local
+    var string: pathLower is "";
+  begin
+    pathLower := lower(filePath);
+    matched := endsWith(pathLower, suffix1) or
+        endsWith(pathLower, suffix2) or
+        endsWith(pathLower, suffix3);
+  end func;
+
+const func boolean: isImageRef (in string: filePath) is
+  return hasAnySuffix(filePath, ".tga", ".dds", ".jpg") or
+      endsWith(lower(filePath), ".png");
+
+const func boolean: isSoundRef (in string: filePath) is
+  return hasAnySuffix(filePath, ".wav", ".ogg", ".mp3");
+
+const func boolean: isModelRef (in string: filePath) is func
+  result
+    var boolean: modelRef is FALSE;
+  local
+    var string: pathLower is "";
+  begin
+    pathLower := lower(filePath);
+    modelRef := hasAnySuffix(pathLower, ".lwo", ".ase", ".ma") or
+        endsWith(pathLower, ".md5mesh") or endsWith(pathLower, ".md5anim");
+  end func;
+
+const func boolean: isTextAssetPath (in string: filePath) is func
+  result
+    var boolean: isTextAsset is FALSE;
+  local
+    var string: pathLower is "";
+  begin
+    pathLower := lower(filePath);
+    isTextAsset := endsWith(pathLower, ".decl") or endsWith(pathLower, ".mtr") or
+        endsWith(pathLower, ".def") or endsWith(pathLower, ".map") or
+        endsWith(pathLower, ".script");
+  end func;
+
+const func integer: countOccurrences (in string: content, in string: token) is func
+  result
+    var integer: count is 0;
+  local
+    var integer: searchPos is 1;
+    var integer: foundPos is 0;
+  begin
+    foundPos := pos(content, token, searchPos);
+    while foundPos <> 0 do
+      count +:= 1;
+      searchPos := foundPos + length(token);
+      foundPos := pos(content, token, searchPos);
+    end while;
+  end func;
+
+const func integer: countAnyAssetRefs (in string: content, in string: ext1,
+    in string: ext2, in string: ext3) is func
+  result
+    var integer: refs is 0;
+  local
+    var string: contentLower is "";
+  begin
+    contentLower := lower(content);
+    refs := countOccurrences(contentLower, ext1) +
+        countOccurrences(contentLower, ext2) +
+        countOccurrences(contentLower, ext3);
+  end func;
+
+const func boolean: containsString (in array string: values,
+    in string: searched) is func
+  result
+    var boolean: found is FALSE;
+  local
+    var string: value is "";
+  begin
+    for value range values do
+      if value = searched then
+        found := TRUE;
+      end if;
+    end for;
+  end func;
+
+const proc: appendUnique (inout array string: values, in string: value) is func
+  begin
+    if value <> "" and not containsString(values, value) then
+      values &:= value;
+    end if;
+  end func;
+
+const func boolean: isTokenEdgeChar (in char: aChar) is func
+  result
+    var boolean: edgeChar is FALSE;
+  begin
+    edgeChar := aChar = '"' or aChar = '(' or aChar = ')' or aChar = '{' or
+        aChar = '}' or aChar = '[' or aChar = ']' or aChar = ',' or
+        aChar = ';';
+  end func;
+
+const func string: cleanedToken (in string: token) is func
+  result
+    var string: cleanToken is "";
+  local
+    var integer: firstIndex is 1;
+    var integer: lastIndex is 0;
+  begin
+    cleanToken := trim(token);
+    firstIndex := 1;
+    lastIndex := length(cleanToken);
+    while firstIndex <= lastIndex and isTokenEdgeChar(cleanToken[firstIndex]) do
+      incr(firstIndex);
+    end while;
+    while lastIndex >= firstIndex and isTokenEdgeChar(cleanToken[lastIndex]) do
+      decr(lastIndex);
+    end while;
+    if lastIndex >= firstIndex then
+      cleanToken := cleanToken[firstIndex .. lastIndex];
+    else
+      cleanToken := "";
+    end if;
+  end func;
+
+const func string: assetStem (in string: filePath) is func
+  result
+    var string: stem is "";
+  begin
+    stem := normalizedAssetPath(cleanedToken(filePath));
+    if endsWith(stem, ".tga") or endsWith(stem, ".dds") or
+        endsWith(stem, ".jpg") or endsWith(stem, ".png") or
+        endsWith(stem, ".wav") or endsWith(stem, ".ogg") or
+        endsWith(stem, ".mp3") or endsWith(stem, ".lwo") or
+        endsWith(stem, ".ase") or endsWith(stem, ".ma") then
+      stem := stem[.. length(stem) - 4];
+    elsif endsWith(stem, ".md5mesh") then
+      stem := stem[.. length(stem) - 8];
+    elsif endsWith(stem, ".md5anim") then
+      stem := stem[.. length(stem) - 8];
+    end if;
+  end func;
+
+const func boolean: isMaterialName (in string: token) is func
+  result
+    var boolean: materialName is FALSE;
+  local
+    var string: tokenLower is "";
+  begin
+    tokenLower := lower(cleanedToken(token));
+    materialName := (startsWith(tokenLower, "textures/") or
+        startsWith(tokenLower, "editor/")) and
+        not isImageRef(tokenLower) and not isSoundRef(tokenLower);
+  end func;
+
+const proc: updateSelectedBounds (inout archiveStats: stats,
+    in float: x, in float: y, in float: z) is func
+  begin
+    if not stats.selectedBoundsValid then
+      stats.selectedMinX := x;
+      stats.selectedMinY := y;
+      stats.selectedMinZ := z;
+      stats.selectedMaxX := x;
+      stats.selectedMaxY := y;
+      stats.selectedMaxZ := z;
+      stats.selectedBoundsValid := TRUE;
+    else
+      if x < stats.selectedMinX then
+        stats.selectedMinX := x;
+      end if;
+      if y < stats.selectedMinY then
+        stats.selectedMinY := y;
+      end if;
+      if z < stats.selectedMinZ then
+        stats.selectedMinZ := z;
+      end if;
+      if x > stats.selectedMaxX then
+        stats.selectedMaxX := x;
+      end if;
+      if y > stats.selectedMaxY then
+        stats.selectedMaxY := y;
+      end if;
+      if z > stats.selectedMaxZ then
+        stats.selectedMaxZ := z;
+      end if;
+    end if;
+  end func;
+
+const proc: addOriginToSelectedBounds (inout archiveStats: stats,
+    in string: origin) is func
+  local
+    var array string: originParts is 0 times "";
+    var float: x is 0.0;
+    var float: y is 0.0;
+    var float: z is 0.0;
+  begin
+    if origin <> "" then
+      originParts := noEmptyStrings(split(trim(origin), ' '));
+      if length(originParts) >= 3 then
+        block
+          x := float(originParts[1]);
+          y := float(originParts[2]);
+          z := float(originParts[3]);
+          updateSelectedBounds(stats, x, y, z);
+          stats.selectedOriginVectors +:= 1;
+        exception
+          catch RANGE_ERROR:
+            noop;
+        end block;
+      end if;
+    end if;
+  end func;
+
+const func boolean: canParseVector3 (in string: vectorText) is func
+  result
+    var boolean: parsed is FALSE;
+  local
+    var array string: parts is 0 times "";
+    var float: x is 0.0;
+    var float: y is 0.0;
+    var float: z is 0.0;
+  begin
+    if vectorText <> "" then
+      parts := noEmptyStrings(split(trim(vectorText), ' '));
+      if length(parts) >= 3 then
+        block
+          x := float(parts[1]);
+          y := float(parts[2]);
+          z := float(parts[3]);
+          parsed := TRUE;
+        exception
+          catch RANGE_ERROR:
+            parsed := FALSE;
+        end block;
+      end if;
+    end if;
+  end func;
+
+const proc: parseOriginIntoEntity (inout selectedMapEntity: mapEntity) is func
+  local
+    var array string: parts is 0 times "";
+  begin
+    mapEntity.hasOrigin := FALSE;
+    if mapEntity.originText <> "" then
+      parts := noEmptyStrings(split(trim(mapEntity.originText), ' '));
+      if length(parts) >= 3 then
+        block
+          mapEntity.x := float(parts[1]);
+          mapEntity.y := float(parts[2]);
+          mapEntity.z := float(parts[3]);
+          mapEntity.hasOrigin := TRUE;
+        exception
+          catch RANGE_ERROR:
+            mapEntity.hasOrigin := FALSE;
+        end block;
+      end if;
+    end if;
+  end func;
+
+const proc: parseAngleIntoEntity (inout selectedMapEntity: mapEntity) is func
+  begin
+    mapEntity.hasAngle := FALSE;
+    if mapEntity.angleText <> "" then
+      block
+        mapEntity.yaw := float(mapEntity.angleText);
+        mapEntity.hasAngle := TRUE;
+      exception
+        catch RANGE_ERROR:
+          mapEntity.hasAngle := FALSE;
+      end block;
+    end if;
+  end func;
+
+const proc: parseHealthIntoEntity (inout selectedMapEntity: mapEntity) is func
+  begin
+    mapEntity.hasHealth := FALSE;
+    if mapEntity.healthText <> "" then
+      block
+        mapEntity.health := integer(mapEntity.healthText);
+        mapEntity.hasHealth := TRUE;
+      exception
+        catch RANGE_ERROR:
+          mapEntity.hasHealth := FALSE;
+      end block;
+    end if;
+  end func;
+
+const func string: quotedValueAfter (in string: content, in string: keyName,
+    in integer: startPos) is func
+  result
+    var string: value is "";
+  local
+    var string: keyToken is "";
+    var integer: keyPos is 0;
+    var integer: quoteStart is 0;
+    var integer: quoteEnd is 0;
+  begin
+    keyToken := "\"" & lower(keyName) & "\"";
+    keyPos := pos(lower(content), keyToken, startPos);
+    if keyPos <> 0 then
+      quoteStart := pos(content, "\"", keyPos + length(keyToken));
+      if quoteStart <> 0 then
+        quoteEnd := pos(content, "\"", succ(quoteStart));
+        if quoteEnd <> 0 then
+          value := content[succ(quoteStart) .. pred(quoteEnd)];
+        end if;
+      end if;
+    end if;
+  end func;
+
+const func string: declNameAfter (in string: content, in integer: startPos) is func
+  result
+    var string: name is "";
+  local
+    var integer: nameStart is 0;
+    var integer: nameEnd is 0;
+    var char: currentChar is ' ';
+    var boolean: stillReading is TRUE;
+  begin
+    nameStart := startPos;
+    while nameStart <= length(content) and
+        (content[nameStart] = ' ' or content[nameStart] = '\t' or
+        content[nameStart] = '\n' or content[nameStart] = '\r') do
+      incr(nameStart);
+    end while;
+    if nameStart <= length(content) then
+      if content[nameStart] = '"' then
+        nameEnd := pos(content, "\"", succ(nameStart));
+        if nameEnd <> 0 then
+          name := content[succ(nameStart) .. pred(nameEnd)];
+        end if;
+      else
+        nameEnd := nameStart;
+        stillReading := TRUE;
+        while nameEnd <= length(content) and stillReading do
+          currentChar := content[nameEnd];
+          if currentChar = ' ' or currentChar = '\t' or currentChar = '\n' or
+              currentChar = '\r' or currentChar = '{' then
+            nameEnd := pred(nameEnd);
+            stillReading := FALSE;
+          else
+            incr(nameEnd);
+          end if;
+        end while;
+        if nameEnd > length(content) then
+          nameEnd := length(content);
+        end if;
+        if nameEnd >= nameStart then
+          name := content[nameStart .. nameEnd];
+        end if;
+      end if;
+    end if;
+  end func;
+
+const func integer: matchingBlockEnd (
+    in string: content, in integer: blockStart) is func
+  result
+    var integer: blockEnd is 0;
+  local
+    var integer: posIndex is 0;
+    var integer: depth is 0;
+    var boolean: done is FALSE;
+  begin
+    if blockStart >= 1 and blockStart <= length(content) and
+        content[blockStart] = '{' then
+      posIndex := blockStart;
+      while posIndex <= length(content) and not done do
+        if content[posIndex] = '{' then
+          depth +:= 1;
+        elsif content[posIndex] = '}' then
+          depth -:= 1;
+          if depth = 0 then
+            blockEnd := posIndex;
+            done := TRUE;
+          end if;
+        end if;
+        incr(posIndex);
+      end while;
+    end if;
+  end func;
+
+const func integer: integerQuotedValueAfter (
+    in string: content, in string: keyName, in integer: startPos,
+    in integer: defaultValue) is func
+  result
+    var integer: value is 0;
+  local
+    var string: textValue is "";
+  begin
+    value := defaultValue;
+    textValue := quotedValueAfter(content, keyName, startPos);
+    if textValue <> "" then
+      block
+        value := integer(textValue);
+      exception
+        catch RANGE_ERROR:
+          value := defaultValue;
+      end block;
+    end if;
+  end func;
+
+const func string: quotedValueAfterKeyPrefix (
+    in string: content, in string: keyPrefix, in integer: startPos) is func
+  result
+    var string: value is "";
+  local
+    var string: contentLower is "";
+    var string: prefixLower is "";
+    var integer: keyPos is 0;
+    var integer: quoteStart is 0;
+    var integer: quoteEnd is 0;
+    var integer: valueQuoteStart is 0;
+    var integer: valueQuoteEnd is 0;
+  begin
+    contentLower := lower(content);
+    prefixLower := "\"" & lower(keyPrefix);
+    keyPos := pos(contentLower, prefixLower, startPos);
+    while keyPos <> 0 and value = "" do
+      quoteStart := keyPos;
+      quoteEnd := pos(content, "\"", succ(quoteStart));
+      if quoteEnd <> 0 then
+        valueQuoteStart := pos(content, "\"", succ(quoteEnd));
+        if valueQuoteStart <> 0 then
+          valueQuoteEnd := pos(content, "\"", succ(valueQuoteStart));
+          if valueQuoteEnd <> 0 then
+            value := content[succ(valueQuoteStart) .. pred(valueQuoteEnd)];
+          end if;
+        end if;
+      end if;
+      if value = "" then
+        keyPos := pos(contentLower, prefixLower, succ(keyPos));
+      end if;
+    end while;
+  end func;
+
+const proc: addEntityDefNames (inout archiveStats: stats,
+    in string: content) is func
+  local
+    var string: contentLower is "";
+    var string: entityDefName is "";
+    var integer: searchPos is 1;
+    var integer: defPos is 0;
+  begin
+    contentLower := lower(content);
+    defPos := pos(contentLower, "entitydef ", searchPos);
+    while defPos <> 0 do
+      entityDefName := lower(declNameAfter(content, defPos + length("entitydef ")));
+      if entityDefName <> "" then
+        stats.entityDefNamed +:= 1;
+        appendUnique(stats.entityDefNames, entityDefName);
+        if stats.firstEntityDef = "" then
+          stats.firstEntityDef := entityDefName;
+        end if;
+      end if;
+      searchPos := defPos + length("entitydef ");
+      defPos := pos(contentLower, "entitydef ", searchPos);
+    end while;
+  end func;
+
+const proc: addEntityDefRecords (inout archiveStats: stats,
+    in string: content) is func
+  local
+    var string: contentLower is "";
+    var string: entityDefName is "";
+    var integer: searchPos is 1;
+    var integer: defPos is 0;
+    var integer: nameEnd is 0;
+    var integer: blockStart is 0;
+    var integer: blockEnd is 0;
+    var integer: parsedHealth is 0;
+    var string: parsedModel is "";
+    var string: parsedSound is "";
+    var string: parsedParent is "";
+    var string: parsedMins is "";
+    var string: parsedMaxs is "";
+    var entityDefRecord: defRecord is entityDefRecord.value;
+  begin
+    contentLower := lower(content);
+    defPos := pos(contentLower, "entitydef ", searchPos);
+    while defPos <> 0 do
+      entityDefName := lower(declNameAfter(content, defPos + length("entitydef ")));
+      if entityDefName <> "" then
+        nameEnd := defPos + length("entitydef ") + length(entityDefName);
+        blockStart := pos(content, "{", nameEnd);
+        blockEnd := matchingBlockEnd(content, blockStart);
+        if blockStart <> 0 and blockEnd <> 0 then
+          parsedHealth := integerQuotedValueAfter(content[blockStart .. blockEnd],
+              "health", 1, 0);
+          parsedModel := quotedValueAfter(content[blockStart .. blockEnd],
+              "model", 1);
+          parsedSound := quotedValueAfterKeyPrefix(
+              content[blockStart .. blockEnd], "snd_", 1);
+          parsedParent := lower(quotedValueAfter(content[blockStart .. blockEnd],
+              "inherit", 1));
+          parsedMins := quotedValueAfter(content[blockStart .. blockEnd],
+              "mins", 1);
+          parsedMaxs := quotedValueAfter(content[blockStart .. blockEnd],
+              "maxs", 1);
+          if parsedHealth <> 0 or parsedModel <> "" or parsedSound <> "" or
+              parsedParent <> "" or (canParseVector3(parsedMins) and
+              canParseVector3(parsedMaxs)) then
+            defRecord := entityDefRecord.value;
+            defRecord.className := entityDefName;
+            if parsedParent <> "" then
+              defRecord.hasParent := TRUE;
+              defRecord.parentClassName := parsedParent;
+              stats.entityDefInheritValues +:= 1;
+              if stats.firstEntityDefInheritClass = "" then
+                stats.firstEntityDefInheritClass := entityDefName;
+              end if;
+            end if;
+            if parsedHealth <> 0 then
+              defRecord.hasHealth := TRUE;
+              defRecord.health := parsedHealth;
+              stats.entityDefHealthValues +:= 1;
+              if stats.firstEntityDefHealthClass = "" then
+                stats.firstEntityDefHealthClass := entityDefName;
+              end if;
+            end if;
+            if parsedModel <> "" then
+              defRecord.hasModel := TRUE;
+              defRecord.model := parsedModel;
+              stats.entityDefModelValues +:= 1;
+              if stats.firstEntityDefModelClass = "" then
+                stats.firstEntityDefModelClass := entityDefName;
+              end if;
+            end if;
+            if parsedSound <> "" then
+              defRecord.hasSound := TRUE;
+              defRecord.sound := parsedSound;
+              stats.entityDefSoundValues +:= 1;
+              if stats.firstEntityDefSoundClass = "" then
+                stats.firstEntityDefSoundClass := entityDefName;
+              end if;
+            end if;
+            if canParseVector3(parsedMins) and canParseVector3(parsedMaxs) then
+              stats.entityDefBoundsValues +:= 1;
+              if stats.firstEntityDefBoundsClass = "" then
+                stats.firstEntityDefBoundsClass := entityDefName;
+              end if;
+            end if;
+            stats.entityDefRecords &:= defRecord;
+          end if;
+        end if;
+      end if;
+      searchPos := defPos + length("entitydef ");
+      defPos := pos(contentLower, "entitydef ", searchPos);
+    end while;
+  end func;
+
+const proc: addMaterialDeclNames (inout archiveStats: stats,
+    in string: content) is func
+  local
+    var array string: lines is 0 times "";
+    var string: line is "";
+    var string: materialName is "";
+  begin
+    lines := split(content, '\n');
+    for line range lines do
+      line := trim(line);
+      if line <> "" and not startsWith(line, "//") and isMaterialName(line) then
+        materialName := lower(cleanedToken(declNameAfter(line, 1)));
+        if isMaterialName(materialName) then
+          stats.materialDecls +:= 1;
+          appendUnique(stats.materialNames, materialName);
+          if stats.firstMaterialDecl = "" then
+            stats.firstMaterialDecl := materialName;
+          end if;
+        end if;
+      end if;
+    end for;
+  end func;
+
+const proc: addMaterialTextureBindings (inout archiveStats: stats,
+    in string: content) is func
+  local
+    var array string: lines is 0 times "";
+    var array string: tokens is 0 times "";
+    var string: line is "";
+    var string: lineLower is "";
+    var string: token is "";
+    var string: currentMaterial is "";
+    var string: textureStem is "";
+  begin
+    lines := split(content, '\n');
+    for line range lines do
+      lineLower := lower(trim(line));
+      if lineLower <> "" and not startsWith(lineLower, "//") then
+        if currentMaterial = "" and isMaterialName(lineLower) then
+          currentMaterial := lower(cleanedToken(declNameAfter(lineLower, 1)));
+        elsif currentMaterial <> "" then
+          tokens := noEmptyStrings(split(lineLower, ' '));
+          for token range tokens do
+            if textureStem = "" then
+              token := cleanedToken(token);
+              if isImageRef(token) then
+                textureStem := assetStem(token);
+              end if;
+            end if;
+          end for;
+          if textureStem <> "" then
+            stats.mtrBindingNames &:= currentMaterial;
+            stats.mtrBindingTextureStems &:= textureStem;
+            stats.materialTextureBindings +:= 1;
+            if stats.firstMaterialTextureBinding = "" then
+              stats.firstMaterialTextureBinding :=
+                  currentMaterial <& "=" <& textureStem;
+            end if;
+            currentMaterial := "";
+            textureStem := "";
+          elsif pos(lineLower, "}") <> 0 then
+            currentMaterial := "";
+          end if;
+        end if;
+      end if;
+    end for;
+  end func;
+
+const proc: addMaterialTextureRefs (inout archiveStats: stats,
+    in string: content) is func
+  local
+    var string: normalizedContent is "";
+    var array string: tokens is 0 times "";
+    var string: token is "";
+    var string: textureStem is "";
+  begin
+    normalizedContent := replace(lower(content), "\n", " ");
+    normalizedContent := replace(normalizedContent, "\r", " ");
+    normalizedContent := replace(normalizedContent, "\t", " ");
+    tokens := noEmptyStrings(split(normalizedContent, ' '));
+    for token range tokens do
+      token := cleanedToken(token);
+      if isImageRef(token) then
+        textureStem := assetStem(token);
+        if textureStem <> "" then
+          stats.materialTextureRefs +:= 1;
+          appendUnique(stats.materialTextureStems, textureStem);
+          if stats.firstMaterialTextureRef = "" then
+            stats.firstMaterialTextureRef := token;
+          end if;
+        end if;
+      end if;
+    end for;
+  end func;
+
+const proc: addTextSoundRefs (inout archiveStats: stats,
+    in string: content) is func
+  local
+    var string: normalizedContent is "";
+    var array string: tokens is 0 times "";
+    var string: token is "";
+    var string: soundStem is "";
+    var integer: soundPos is 0;
+  begin
+    normalizedContent := replace(lower(content), "\n", " ");
+    normalizedContent := replace(normalizedContent, "\r", " ");
+    normalizedContent := replace(normalizedContent, "\t", " ");
+    tokens := noEmptyStrings(split(normalizedContent, ' '));
+    for token range tokens do
+      token := cleanedToken(token);
+      token := normalizedAssetPath(token);
+      soundPos := pos(token, "sound/");
+      if soundPos <> 0 then
+        token := token[soundPos ..];
+        token := cleanedToken(token);
+      end if;
+      if isSoundRef(token) then
+        soundStem := assetStem(token);
+        if soundStem <> "" then
+          stats.textSoundRefs +:= 1;
+          appendUnique(stats.textSoundStems, soundStem);
+          if stats.firstTextSoundRef = "" then
+            stats.firstTextSoundRef := token;
+          end if;
+        end if;
+      end if;
+    end for;
+  end func;
+
+const proc: addSelectedMapMaterialRefs (inout archiveStats: stats,
+    in string: content) is func
+  local
+    var string: normalizedContent is "";
+    var array string: tokens is 0 times "";
+    var string: token is "";
+    var string: materialName is "";
+  begin
+    normalizedContent := replace(lower(content), "\n", " ");
+    normalizedContent := replace(normalizedContent, "\r", " ");
+    normalizedContent := replace(normalizedContent, "\t", " ");
+    tokens := noEmptyStrings(split(normalizedContent, ' '));
+    for token range tokens do
+      materialName := lower(cleanedToken(token));
+      if isMaterialName(materialName) then
+        stats.selectedMapMaterialRefs +:= 1;
+        appendUnique(stats.selectedMapMaterials, materialName);
+        if stats.firstMapMaterialRef = "" then
+          stats.firstMapMaterialRef := materialName;
+        end if;
+      end if;
+    end for;
+  end func;
+
+const proc: addSurfaceMaterialToken (inout archiveStats: stats,
+    in string: token, in string: sectionKind) is func
+  local
+    var string: materialName is "";
+  begin
+    materialName := lower(cleanedToken(token));
+    if isMaterialName(materialName) then
+      if sectionKind = "brush" then
+        stats.selectedBrushMaterialRefs +:= 1;
+        appendUnique(stats.selectedBrushMaterials, materialName);
+      elsif sectionKind = "patch" then
+        stats.selectedPatchMaterialRefs +:= 1;
+        appendUnique(stats.selectedPatchMaterials, materialName);
+      end if;
+    end if;
+  end func;
+
+const proc: addSelectedBrushPlaneRecord (inout archiveStats: stats,
+    in string: lineText) is func
+  local
+    var array string: tokens is 0 times "";
+    var string: token is "";
+    var string: cleanToken is "";
+    var selectedBrushPlane: brushPlane is selectedBrushPlane.value;
+    var integer: numericCount is 0;
+    var boolean: parsedNumber is FALSE;
+    var float: parsedValue is 0.0;
+  begin
+    tokens := noEmptyStrings(split(lineText, ' '));
+    for token range tokens do
+      cleanToken := lower(cleanedToken(token));
+      if numericCount < 4 then
+        parsedNumber := FALSE;
+        block
+          parsedValue := float(cleanToken);
+          parsedNumber := TRUE;
+        exception
+          catch RANGE_ERROR:
+            parsedNumber := FALSE;
+        end block;
+        if parsedNumber then
+          numericCount +:= 1;
+          if numericCount = 1 then
+            brushPlane.normalX := parsedValue;
+          elsif numericCount = 2 then
+            brushPlane.normalY := parsedValue;
+          elsif numericCount = 3 then
+            brushPlane.normalZ := parsedValue;
+          elsif numericCount = 4 then
+            brushPlane.distance := parsedValue;
+          end if;
+        end if;
+      end if;
+      if brushPlane.materialName = "" and isMaterialName(cleanToken) then
+        brushPlane.materialName := cleanToken;
+      end if;
+    end for;
+    if numericCount = 4 then
+      stats.selectedBrushPlanes &:= brushPlane;
+    end if;
+  end func;
+
+const proc: addSelectedBrushPlaneToBounds (
+    inout selectedBrushBounds: brushBounds, in string: lineText) is func
+  local
+    var array string: tokens is 0 times "";
+    var string: token is "";
+    var string: cleanToken is "";
+    var selectedBrushPlane: brushPlane is selectedBrushPlane.value;
+    var integer: numericCount is 0;
+    var boolean: parsedNumber is FALSE;
+    var float: parsedValue is 0.0;
+  begin
+    tokens := noEmptyStrings(split(lineText, ' '));
+    for token range tokens do
+      cleanToken := lower(cleanedToken(token));
+      if numericCount < 4 then
+        parsedNumber := FALSE;
+        block
+          parsedValue := float(cleanToken);
+          parsedNumber := TRUE;
+        exception
+          catch RANGE_ERROR:
+            parsedNumber := FALSE;
+        end block;
+        if parsedNumber then
+          numericCount +:= 1;
+          if numericCount = 1 then
+            brushPlane.normalX := parsedValue;
+          elsif numericCount = 2 then
+            brushPlane.normalY := parsedValue;
+          elsif numericCount = 3 then
+            brushPlane.normalZ := parsedValue;
+          elsif numericCount = 4 then
+            brushPlane.distance := parsedValue;
+          end if;
+        end if;
+      end if;
+      if brushBounds.materialName = "" and isMaterialName(cleanToken) then
+        brushBounds.materialName := cleanToken;
+      end if;
+    end for;
+    if numericCount = 4 then
+      brushBounds.planeCount +:= 1;
+      if brushPlane.normalX = 1.0 and brushPlane.normalY = 0.0 and
+          brushPlane.normalZ = 0.0 then
+        brushBounds.maxX := -brushPlane.distance;
+        brushBounds.hasMaxX := TRUE;
+      elsif brushPlane.normalX = -1.0 and brushPlane.normalY = 0.0 and
+          brushPlane.normalZ = 0.0 then
+        brushBounds.minX := brushPlane.distance;
+        brushBounds.hasMinX := TRUE;
+      elsif brushPlane.normalY = 1.0 and brushPlane.normalX = 0.0 and
+          brushPlane.normalZ = 0.0 then
+        brushBounds.maxY := -brushPlane.distance;
+        brushBounds.hasMaxY := TRUE;
+      elsif brushPlane.normalY = -1.0 and brushPlane.normalX = 0.0 and
+          brushPlane.normalZ = 0.0 then
+        brushBounds.minY := brushPlane.distance;
+        brushBounds.hasMinY := TRUE;
+      elsif brushPlane.normalZ = 1.0 and brushPlane.normalX = 0.0 and
+          brushPlane.normalY = 0.0 then
+        brushBounds.maxZ := -brushPlane.distance;
+        brushBounds.hasMaxZ := TRUE;
+      elsif brushPlane.normalZ = -1.0 and brushPlane.normalX = 0.0 and
+          brushPlane.normalY = 0.0 then
+        brushBounds.minZ := brushPlane.distance;
+        brushBounds.hasMinZ := TRUE;
+      end if;
+    end if;
+  end func;
+
+const func boolean: hasCompleteBrushBounds (
+    in selectedBrushBounds: brushBounds) is func
+  result
+    var boolean: complete is FALSE;
+  begin
+    complete := brushBounds.hasMinX and brushBounds.hasMaxX and
+        brushBounds.hasMinY and brushBounds.hasMaxY and
+        brushBounds.hasMinZ and brushBounds.hasMaxZ;
+  end func;
+
+const func string: fallbackColorForMaterial (in string: materialName) is func
+  result
+    var string: colorText is "96 96 112";
+  local
+    var string: materialLower is "";
+  begin
+    materialLower := lower(materialName);
+    if pos(materialLower, "door") <> 0 then
+      colorText := "148 88 48";
+    elsif pos(materialLower, "floor") <> 0 then
+      colorText := "72 76 80";
+    elsif pos(materialLower, "metal") <> 0 then
+      colorText := "92 104 112";
+    elsif pos(materialLower, "light") <> 0 then
+      colorText := "144 184 192";
+    elsif pos(materialLower, "wall") <> 0 then
+      colorText := "80 104 84";
+    elsif pos(materialLower, "trim") <> 0 then
+      colorText := "112 96 72";
+    end if;
+  end func;
+
+const func runtimeRenderSurface: renderSurfaceFromBrushBounds (
+    in selectedBrushBounds: brushBounds) is func
+  result
+    var runtimeRenderSurface: surface is runtimeRenderSurface.value;
+  begin
+    surface.materialName := brushBounds.materialName;
+    surface.fallbackColor := fallbackColorForMaterial(brushBounds.materialName);
+    surface.visible := hasCompleteBrushBounds(brushBounds);
+    surface.minX := brushBounds.minX;
+    surface.minY := brushBounds.minY;
+    surface.minZ := brushBounds.minZ;
+    surface.maxX := brushBounds.maxX;
+    surface.maxY := brushBounds.maxY;
+    surface.maxZ := brushBounds.maxZ;
+  end func;
+
+const proc: addSelectedMapSurfaceMaterials (inout archiveStats: stats,
+    in string: content) is func
+  local
+    var array string: lines is 0 times "";
+    var array string: tokens is 0 times "";
+    var string: line is "";
+    var string: lineLower is "";
+    var string: token is "";
+    var string: sectionKind is "";
+    var selectedBrushBounds: currentBrushBounds is selectedBrushBounds.value;
+  begin
+    lines := split(content, '\n');
+    for line range lines do
+      lineLower := lower(trim(line));
+      if pos(lineLower, "brushdef3") <> 0 then
+        sectionKind := "brush";
+        currentBrushBounds := selectedBrushBounds.value;
+      elsif pos(lineLower, "patchdef2") <> 0 or pos(lineLower, "patchdef3") <> 0 then
+        sectionKind := "patch";
+      elsif lineLower = "}" then
+        if sectionKind = "brush" and currentBrushBounds.planeCount > 0 then
+          stats.selectedBrushBoundsList &:= currentBrushBounds;
+          if hasCompleteBrushBounds(currentBrushBounds) then
+            stats.runtimeRenderSurfaces &:= renderSurfaceFromBrushBounds(
+                currentBrushBounds);
+          end if;
+        end if;
+        sectionKind := "";
+      else
+        if sectionKind = "brush" and pos(lineLower, "(") <> 0 then
+          stats.selectedBrushPlaneLines +:= 1;
+          addSelectedBrushPlaneRecord(stats, lineLower);
+          addSelectedBrushPlaneToBounds(currentBrushBounds, lineLower);
+        end if;
+        tokens := noEmptyStrings(split(lineLower, ' '));
+        for token range tokens do
+          addSurfaceMaterialToken(stats, token, sectionKind);
+        end for;
+      end if;
+    end for;
+  end func;
+
+const func string: quotedValueBetween (in string: content, in string: keyName,
+    in integer: startPos, in integer: endPos) is func
+  result
+    var string: value is "";
+  local
+    var string: blockText is "";
+  begin
+    if startPos >= 1 and endPos >= startPos and endPos <= length(content) then
+      blockText := content[startPos .. endPos];
+      value := quotedValueAfter(blockText, keyName, 1);
+    end if;
+  end func;
+
+const func boolean: isSpawnRelevantClass (in string: className) is func
+  result
+    var boolean: relevant is FALSE;
+  begin
+    relevant := className = "info_player_start" or className = "light" or
+        startsWith(className, "light_") or className = "func_static" or
+        className = "func_door" or className = "mover_door" or
+        startsWith(className, "door_") or startsWith(className, "trigger_") or
+        startsWith(className, "monster_") or startsWith(className, "item_") or
+        startsWith(className, "ammo_") or startsWith(className, "weapon_");
+  end func;
+
+const func boolean: isBuiltInSpawnClass (in string: className) is func
+  result
+    var boolean: builtIn is FALSE;
+  begin
+    builtIn := className = "info_player_start" or className = "light" or
+        className = "func_static" or className = "func_door" or
+        className = "mover_door" or startsWith(className, "trigger_");
+  end func;
+
+const func boolean: hasEntityDefinition (in archiveStats: stats,
+    in string: className) is func
+  result
+    var boolean: declared is FALSE;
+  begin
+    declared := isBuiltInSpawnClass(className) or
+        containsString(stats.entityDefNames, className);
+  end func;
+
+const func string: runtimeKindForClass (in string: className) is func
+  result
+    var string: kind is "unsupported";
+  begin
+    if className = "info_player_start" then
+      kind := "player_spawn";
+    elsif className = "light" or startsWith(className, "light_") then
+      kind := "light";
+    elsif className = "func_static" then
+      kind := "static";
+    elsif className = "func_door" or className = "mover_door" or
+        startsWith(className, "door_") then
+      kind := "door";
+    elsif startsWith(className, "trigger_") then
+      kind := "trigger";
+    elsif startsWith(className, "monster_") then
+      kind := "monster";
+    elsif startsWith(className, "item_") or startsWith(className, "ammo_") or
+        startsWith(className, "weapon_") then
+      kind := "pickup";
+    end if;
+  end func;
+
+const func integer: runtimeInitialHealthForClass (in string: className) is func
+  result
+    var integer: health is 0;
+  begin
+    if className = "info_player_start" then
+      health := 100;
+    elsif startsWith(className, "monster_") then
+      health := 100;
+    end if;
+  end func;
+
+const func integer: entityDefHealthForClass (
+    in archiveStats: stats, in string: className,
+    in integer: defaultHealth) is func
+  result
+    var integer: health is 0;
+  local
+    var entityDefRecord: defRecord is entityDefRecord.value;
+    var string: currentClass is "";
+    var integer: inheritDepth is 0;
+    var boolean: found is FALSE;
+  begin
+    health := defaultHealth;
+    currentClass := lower(className);
+    while currentClass <> "" and inheritDepth < ENTITY_DEF_INHERIT_LIMIT and
+        not found do
+      for defRecord range stats.entityDefRecords do
+        if lower(defRecord.className) = currentClass then
+          if defRecord.hasHealth then
+            health := defRecord.health;
+            found := TRUE;
+          elsif defRecord.hasParent then
+            currentClass := lower(defRecord.parentClassName);
+          else
+            currentClass := "";
+          end if;
+        end if;
+      end for;
+      inheritDepth +:= 1;
+    end while;
+  end func;
+
+const func string: entityDefModelForClass (
+    in archiveStats: stats, in string: className) is func
+  result
+    var string: model is "";
+  local
+    var entityDefRecord: defRecord is entityDefRecord.value;
+    var string: currentClass is "";
+    var integer: inheritDepth is 0;
+    var boolean: found is FALSE;
+  begin
+    currentClass := lower(className);
+    while currentClass <> "" and inheritDepth < ENTITY_DEF_INHERIT_LIMIT and
+        not found do
+      for defRecord range stats.entityDefRecords do
+        if lower(defRecord.className) = currentClass then
+          if defRecord.hasModel then
+            model := defRecord.model;
+            found := TRUE;
+          elsif defRecord.hasParent then
+            currentClass := lower(defRecord.parentClassName);
+          else
+            currentClass := "";
+          end if;
+        end if;
+      end for;
+      inheritDepth +:= 1;
+    end while;
+  end func;
+
+const func string: entityDefSoundForClass (
+    in archiveStats: stats, in string: className) is func
+  result
+    var string: sound is "";
+  local
+    var entityDefRecord: defRecord is entityDefRecord.value;
+    var string: currentClass is "";
+    var integer: inheritDepth is 0;
+    var boolean: found is FALSE;
+  begin
+    currentClass := lower(className);
+    while currentClass <> "" and inheritDepth < ENTITY_DEF_INHERIT_LIMIT and
+        not found do
+      for defRecord range stats.entityDefRecords do
+        if lower(defRecord.className) = currentClass then
+          if defRecord.hasSound then
+            sound := defRecord.sound;
+            found := TRUE;
+          elsif defRecord.hasParent then
+            currentClass := lower(defRecord.parentClassName);
+          else
+            currentClass := "";
+          end if;
+        end if;
+      end for;
+      inheritDepth +:= 1;
+    end while;
+  end func;
+
+const func boolean: runtimeSolidForClass (in string: className) is func
+  result
+    var boolean: solid is FALSE;
+  begin
+    solid := className = "func_static" or className = "func_door" or
+        className = "mover_door" or startsWith(className, "door_") or
+        startsWith(className, "monster_");
+  end func;
+
+const func runtimeEntity: runtimeEntityFromMapEntity (
+    in archiveStats: stats, in selectedMapEntity: mapEntity) is func
+  result
+    var runtimeEntity: entity is runtimeEntity.value;
+  local
+    var integer: fallbackHealth is 0;
+  begin
+    entity.className := mapEntity.className;
+    entity.entityName := mapEntity.entityName;
+    entity.kind := runtimeKindForClass(mapEntity.className);
+    if mapEntity.model <> "" then
+      entity.model := mapEntity.model;
+    else
+      entity.model := entityDefModelForClass(stats, mapEntity.className);
+    end if;
+    if mapEntity.sound <> "" then
+      entity.sound := mapEntity.sound;
+    else
+      entity.sound := entityDefSoundForClass(stats, mapEntity.className);
+    end if;
+    entity.active := TRUE;
+    entity.solid := runtimeSolidForClass(mapEntity.className);
+    entity.trigger := startsWith(mapEntity.className, "trigger_");
+    entity.hasOrigin := mapEntity.hasOrigin;
+    fallbackHealth := runtimeInitialHealthForClass(mapEntity.className);
+    if mapEntity.hasHealth then
+      entity.health := mapEntity.health;
+    else
+      entity.health := entityDefHealthForClass(stats, mapEntity.className,
+          fallbackHealth);
+    end if;
+    entity.x := mapEntity.x;
+    entity.y := mapEntity.y;
+    entity.z := mapEntity.z;
+    entity.yaw := mapEntity.yaw;
+  end func;
+
+const proc: rebuildRuntimeEntities (inout archiveStats: stats) is func
+  local
+    var selectedMapEntity: mapEntity is selectedMapEntity.value;
+    var runtimeEntity: entity is runtimeEntity.value;
+  begin
+    stats.runtimeEntities := 0 times runtimeEntity.value;
+    stats.runtimeModelStems := 0 times "";
+    stats.runtimeSoundStems := 0 times "";
+    for mapEntity range stats.selectedEntities do
+      if isSpawnRelevantClass(mapEntity.className) then
+        stats.runtimeEntities &:= runtimeEntityFromMapEntity(stats, mapEntity);
+      end if;
+    end for;
+    for entity range stats.runtimeEntities do
+      if isModelRef(entity.model) then
+        appendUnique(stats.runtimeModelStems, assetStem(entity.model));
+      end if;
+      if isSoundRef(entity.sound) then
+        appendUnique(stats.runtimeSoundStems, assetStem(entity.sound));
+      end if;
+    end for;
+  end func;
+
+const func integer: countDeclaredSpawnClasses (in archiveStats: stats) is func
+  result
+    var integer: classCount is 0;
+  local
+    var string: className is "";
+  begin
+    for className range stats.selectedSpawnClasses do
+      if hasEntityDefinition(stats, className) then
+        classCount +:= 1;
+      end if;
+    end for;
+  end func;
+
+const func integer: countMissingSpawnClasses (in archiveStats: stats) is func
+  result
+    var integer: classCount is 0;
+  local
+    var string: className is "";
+  begin
+    for className range stats.selectedSpawnClasses do
+      if not hasEntityDefinition(stats, className) then
+        classCount +:= 1;
+      end if;
+    end for;
+  end func;
+
+const func string: firstMissingSpawnClass (in archiveStats: stats) is func
+  result
+    var string: missingClass is "";
+  local
+    var string: className is "";
+  begin
+    for className range stats.selectedSpawnClasses do
+      if missingClass = "" and not hasEntityDefinition(stats, className) then
+        missingClass := className;
+      end if;
+    end for;
+  end func;
+
+const func integer: countDeclaredMapMaterials (in archiveStats: stats) is func
+  result
+    var integer: materialCount is 0;
+  local
+    var string: materialName is "";
+  begin
+    for materialName range stats.selectedMapMaterials do
+      if containsString(stats.materialNames, materialName) then
+        materialCount +:= 1;
+      end if;
+    end for;
+  end func;
+
+const func integer: countMissingMapMaterials (in archiveStats: stats) is func
+  result
+    var integer: materialCount is 0;
+  local
+    var string: materialName is "";
+  begin
+    for materialName range stats.selectedMapMaterials do
+      if not containsString(stats.materialNames, materialName) then
+        materialCount +:= 1;
+      end if;
+    end for;
+  end func;
+
+const func string: firstMissingMapMaterial (in archiveStats: stats) is func
+  result
+    var string: missingMaterial is "";
+  local
+    var string: materialName is "";
+  begin
+    for materialName range stats.selectedMapMaterials do
+      if missingMaterial = "" and not containsString(stats.materialNames, materialName) then
+        missingMaterial := materialName;
+      end if;
+    end for;
+  end func;
+
+const func integer: countDeclaredMaterials (in archiveStats: stats,
+    in array string: materialList) is func
+  result
+    var integer: materialCount is 0;
+  local
+    var string: materialName is "";
+  begin
+    for materialName range materialList do
+      if containsString(stats.materialNames, materialName) then
+        materialCount +:= 1;
+      end if;
+    end for;
+  end func;
+
+const func integer: countMissingMaterials (in archiveStats: stats,
+    in array string: materialList) is func
+  result
+    var integer: materialCount is 0;
+  local
+    var string: materialName is "";
+  begin
+    for materialName range materialList do
+      if not containsString(stats.materialNames, materialName) then
+        materialCount +:= 1;
+      end if;
+    end for;
+  end func;
+
+const func integer: countAvailableTextureRefs (in archiveStats: stats) is func
+  result
+    var integer: textureCount is 0;
+  local
+    var string: textureStem is "";
+  begin
+    for textureStem range stats.materialTextureStems do
+      if containsString(stats.imageAssetStems, textureStem) then
+        textureCount +:= 1;
+      end if;
+    end for;
+  end func;
+
+const func integer: countMissingTextureRefs (in archiveStats: stats) is func
+  result
+    var integer: textureCount is 0;
+  local
+    var string: textureStem is "";
+  begin
+    for textureStem range stats.materialTextureStems do
+      if not containsString(stats.imageAssetStems, textureStem) then
+        textureCount +:= 1;
+      end if;
+    end for;
+  end func;
+
+const func string: firstMissingTextureRef (in archiveStats: stats) is func
+  result
+    var string: missingTexture is "";
+  local
+    var string: textureStem is "";
+  begin
+    for textureStem range stats.materialTextureStems do
+      if missingTexture = "" and not containsString(stats.imageAssetStems, textureStem) then
+        missingTexture := textureStem;
+      end if;
+    end for;
+  end func;
+
+const func string: textureStemForMaterial (in archiveStats: stats,
+    in string: materialName) is func
+  result
+    var string: textureStem is "";
+  local
+    var integer: bindingIndex is 1;
+    var string: normalizedName is "";
+  begin
+    normalizedName := lower(materialName);
+    while bindingIndex <= length(stats.mtrBindingNames) and textureStem = "" do
+      if stats.mtrBindingNames[bindingIndex] = normalizedName then
+        textureStem := stats.mtrBindingTextureStems[bindingIndex];
+      end if;
+      incr(bindingIndex);
+    end while;
+  end func;
+
+const func integer: countRenderSurfaceTextureStatus (in archiveStats: stats,
+    in string: statusKind) is func
+  result
+    var integer: surfaceCount is 0;
+  local
+    var runtimeRenderSurface: surface is runtimeRenderSurface.value;
+    var string: textureStem is "";
+  begin
+    for surface range stats.runtimeRenderSurfaces do
+      if surface.visible then
+        textureStem := textureStemForMaterial(stats, surface.materialName);
+        if statusKind = "bound" and textureStem <> "" then
+          surfaceCount +:= 1;
+        elsif statusKind = "available" and textureStem <> "" and
+            containsString(stats.imageAssetStems, textureStem) then
+          surfaceCount +:= 1;
+        elsif statusKind = "missing" and textureStem <> "" and
+            not containsString(stats.imageAssetStems, textureStem) then
+          surfaceCount +:= 1;
+        end if;
+      end if;
+    end for;
+  end func;
+
+const func string: firstRenderSurfaceMaterialTexture (
+    in archiveStats: stats) is func
+  result
+    var string: textureStem is "";
+  local
+    var runtimeRenderSurface: surface is runtimeRenderSurface.value;
+  begin
+    for surface range stats.runtimeRenderSurfaces do
+      if textureStem = "" and surface.visible then
+        textureStem := textureStemForMaterial(stats, surface.materialName);
+      end if;
+    end for;
+  end func;
+
+const func integer: countAvailableSoundRefs (in archiveStats: stats) is func
+  result
+    var integer: soundCount is 0;
+  local
+    var string: soundStem is "";
+  begin
+    for soundStem range stats.textSoundStems do
+      if containsString(stats.soundAssetStems, soundStem) then
+        soundCount +:= 1;
+      end if;
+    end for;
+  end func;
+
+const func integer: countMissingSoundRefs (in archiveStats: stats) is func
+  result
+    var integer: soundCount is 0;
+  local
+    var string: soundStem is "";
+  begin
+    for soundStem range stats.textSoundStems do
+      if not containsString(stats.soundAssetStems, soundStem) then
+        soundCount +:= 1;
+      end if;
+    end for;
+  end func;
+
+const func string: firstMissingSoundRef (in archiveStats: stats) is func
+  result
+    var string: missingSound is "";
+  local
+    var string: soundStem is "";
+  begin
+    for soundStem range stats.textSoundStems do
+      if missingSound = "" and not containsString(stats.soundAssetStems, soundStem) then
+        missingSound := soundStem;
+      end if;
+    end for;
+  end func;
+
+const func integer: countAvailableModelRefs (in archiveStats: stats) is func
+  result
+    var integer: modelCount is 0;
+  local
+    var string: modelStem is "";
+  begin
+    for modelStem range stats.selectedModelStems do
+      if containsString(stats.modelAssetStems, modelStem) then
+        modelCount +:= 1;
+      end if;
+    end for;
+  end func;
+
+const func integer: countMissingModelRefs (in archiveStats: stats) is func
+  result
+    var integer: modelCount is 0;
+  local
+    var string: modelStem is "";
+  begin
+    for modelStem range stats.selectedModelStems do
+      if not containsString(stats.modelAssetStems, modelStem) then
+        modelCount +:= 1;
+      end if;
+    end for;
+  end func;
+
+const func string: firstMissingModelRef (in archiveStats: stats) is func
+  result
+    var string: missingModel is "";
+  local
+    var string: modelStem is "";
+  begin
+    for modelStem range stats.selectedModelStems do
+      if missingModel = "" and not containsString(stats.modelAssetStems, modelStem) then
+        missingModel := modelStem;
+      end if;
+    end for;
+  end func;
+
+const func integer: countResolvedTargetRefs (in archiveStats: stats) is func
+  result
+    var integer: targetCount is 0;
+  local
+    var string: targetName is "";
+  begin
+    for targetName range stats.selectedTargetNames do
+      if containsString(stats.selectedEntityNames, targetName) then
+        targetCount +:= 1;
+      end if;
+    end for;
+  end func;
+
+const func integer: countMissingTargetRefs (in archiveStats: stats) is func
+  result
+    var integer: targetCount is 0;
+  local
+    var string: targetName is "";
+  begin
+    for targetName range stats.selectedTargetNames do
+      if not containsString(stats.selectedEntityNames, targetName) then
+        targetCount +:= 1;
+      end if;
+    end for;
+  end func;
+
+const func string: firstMissingTargetRef (in archiveStats: stats) is func
+  result
+    var string: missingTarget is "";
+  local
+    var string: targetName is "";
+  begin
+    for targetName range stats.selectedTargetNames do
+      if missingTarget = "" and not containsString(stats.selectedEntityNames, targetName) then
+        missingTarget := targetName;
+      end if;
+    end for;
+  end func;
+
+const func integer: countSelectedEntityRecordsWithOrigin (
+    in archiveStats: stats) is func
+  result
+    var integer: entityCount is 0;
+  local
+    var selectedMapEntity: mapEntity is selectedMapEntity.value;
+  begin
+    for mapEntity range stats.selectedEntities do
+      if mapEntity.hasOrigin then
+        entityCount +:= 1;
+      end if;
+    end for;
+  end func;
+
+const func integer: countSelectedEntityRecordsWithAngle (
+    in archiveStats: stats) is func
+  result
+    var integer: entityCount is 0;
+  local
+    var selectedMapEntity: mapEntity is selectedMapEntity.value;
+  begin
+    for mapEntity range stats.selectedEntities do
+      if mapEntity.hasAngle then
+        entityCount +:= 1;
+      end if;
+    end for;
+  end func;
+
+const func integer: countSelectedEntityRecordsWithHealth (
+    in archiveStats: stats) is func
+  result
+    var integer: entityCount is 0;
+  local
+    var selectedMapEntity: mapEntity is selectedMapEntity.value;
+  begin
+    for mapEntity range stats.selectedEntities do
+      if mapEntity.hasHealth then
+        entityCount +:= 1;
+      end if;
+    end for;
+  end func;
+
+const func integer: countSelectedEntityRecordsWithSound (
+    in archiveStats: stats) is func
+  result
+    var integer: entityCount is 0;
+  local
+    var selectedMapEntity: mapEntity is selectedMapEntity.value;
+  begin
+    for mapEntity range stats.selectedEntities do
+      if mapEntity.sound <> "" then
+        entityCount +:= 1;
+      end if;
+    end for;
+  end func;
+
+const func integer: countRuntimeEntitiesWithOrigin (
+    in archiveStats: stats) is func
+  result
+    var integer: entityCount is 0;
+  local
+    var runtimeEntity: entity is runtimeEntity.value;
+  begin
+    for entity range stats.runtimeEntities do
+      if entity.hasOrigin then
+        entityCount +:= 1;
+      end if;
+    end for;
+  end func;
+
+const func integer: countRuntimeEntitiesByKind (
+    in archiveStats: stats, in string: kind) is func
+  result
+    var integer: entityCount is 0;
+  local
+    var runtimeEntity: entity is runtimeEntity.value;
+  begin
+    for entity range stats.runtimeEntities do
+      if entity.kind = kind then
+        entityCount +:= 1;
+      end if;
+    end for;
+  end func;
+
+const func integer: countActiveRuntimeEntities (in archiveStats: stats) is func
+  result
+    var integer: entityCount is 0;
+  local
+    var runtimeEntity: entity is runtimeEntity.value;
+  begin
+    for entity range stats.runtimeEntities do
+      if entity.active then
+        entityCount +:= 1;
+      end if;
+    end for;
+  end func;
+
+const func integer: countSolidRuntimeEntities (in archiveStats: stats) is func
+  result
+    var integer: entityCount is 0;
+  local
+    var runtimeEntity: entity is runtimeEntity.value;
+  begin
+    for entity range stats.runtimeEntities do
+      if entity.solid then
+        entityCount +:= 1;
+      end if;
+    end for;
+  end func;
+
+const func integer: countTriggerRuntimeEntities (in archiveStats: stats) is func
+  result
+    var integer: entityCount is 0;
+  local
+    var runtimeEntity: entity is runtimeEntity.value;
+  begin
+    for entity range stats.runtimeEntities do
+      if entity.trigger then
+        entityCount +:= 1;
+      end if;
+    end for;
+  end func;
+
+const func integer: countHostileRuntimeEntities (in archiveStats: stats) is func
+  result
+    var integer: entityCount is 0;
+  local
+    var runtimeEntity: entity is runtimeEntity.value;
+  begin
+    for entity range stats.runtimeEntities do
+      if entity.kind = "monster" then
+        entityCount +:= 1;
+      end if;
+    end for;
+  end func;
+
+const func string: firstRuntimeEntityName (in archiveStats: stats) is func
+  result
+    var string: entityName is "";
+  begin
+    if length(stats.runtimeEntities) >= 1 then
+      entityName := stats.runtimeEntities[1].entityName;
+      if entityName = "" then
+        entityName := stats.runtimeEntities[1].className;
+      end if;
+    end if;
+  end func;
+
+const func integer: countRuntimeEntitiesWithCustomHealth (
+    in archiveStats: stats) is func
+  result
+    var integer: entityCount is 0;
+  local
+    var runtimeEntity: entity is runtimeEntity.value;
+  begin
+    for entity range stats.runtimeEntities do
+      if entity.health <> 0 and
+          entity.health <> runtimeInitialHealthForClass(entity.className) then
+        entityCount +:= 1;
+      end if;
+    end for;
+  end func;
+
+const func integer: countRuntimeEntitiesWithMapHealthOverride (
+    in archiveStats: stats) is func
+  result
+    var integer: entityCount is 0;
+  local
+    var selectedMapEntity: mapEntity is selectedMapEntity.value;
+  begin
+    for mapEntity range stats.selectedEntities do
+      if isSpawnRelevantClass(mapEntity.className) and mapEntity.hasHealth then
+        entityCount +:= 1;
+      end if;
+    end for;
+  end func;
+
+const func integer: countRuntimeEntitiesWithMapSoundOverride (
+    in archiveStats: stats) is func
+  result
+    var integer: entityCount is 0;
+  local
+    var selectedMapEntity: mapEntity is selectedMapEntity.value;
+  begin
+    for mapEntity range stats.selectedEntities do
+      if isSpawnRelevantClass(mapEntity.className) and mapEntity.sound <> "" then
+        entityCount +:= 1;
+      end if;
+    end for;
+  end func;
+
+const func string: firstRuntimeEntityWithHealth (in archiveStats: stats) is func
+  result
+    var string: entityName is "";
+  local
+    var runtimeEntity: entity is runtimeEntity.value;
+  begin
+    for entity range stats.runtimeEntities do
+      if entityName = "" and entity.health <> 0 then
+        entityName := entity.entityName;
+        if entityName = "" then
+          entityName := entity.className;
+        end if;
+      end if;
+    end for;
+  end func;
+
+const func integer: firstRuntimeEntityHealth (in archiveStats: stats) is func
+  result
+    var integer: health is 0;
+  local
+    var runtimeEntity: entity is runtimeEntity.value;
+  begin
+    for entity range stats.runtimeEntities do
+      if health = 0 and entity.health <> 0 then
+        health := entity.health;
+      end if;
+    end for;
+  end func;
+
+const func string: firstRuntimeEntityWithCustomHealth (
+    in archiveStats: stats) is func
+  result
+    var string: entityName is "";
+  local
+    var runtimeEntity: entity is runtimeEntity.value;
+  begin
+    for entity range stats.runtimeEntities do
+      if entityName = "" and entity.health <>
+          runtimeInitialHealthForClass(entity.className) then
+        entityName := entity.entityName;
+        if entityName = "" then
+          entityName := entity.className;
+        end if;
+      end if;
+    end for;
+  end func;
+
+const func integer: firstRuntimeCustomHealth (in archiveStats: stats) is func
+  result
+    var integer: health is 0;
+  local
+    var runtimeEntity: entity is runtimeEntity.value;
+  begin
+    for entity range stats.runtimeEntities do
+      if health = 0 and entity.health <>
+          runtimeInitialHealthForClass(entity.className) then
+        health := entity.health;
+      end if;
+    end for;
+  end func;
+
+const func integer: countRuntimeEntitiesWithModel (
+    in archiveStats: stats) is func
+  result
+    var integer: entityCount is 0;
+  local
+    var runtimeEntity: entity is runtimeEntity.value;
+  begin
+    for entity range stats.runtimeEntities do
+      if entity.model <> "" then
+        entityCount +:= 1;
+      end if;
+    end for;
+  end func;
+
+const func integer: countRuntimeEntitiesWithAvailableModel (
+    in archiveStats: stats) is func
+  result
+    var integer: entityCount is 0;
+  local
+    var runtimeEntity: entity is runtimeEntity.value;
+  begin
+    for entity range stats.runtimeEntities do
+      if isModelRef(entity.model) and
+          containsString(stats.modelAssetStems, assetStem(entity.model)) then
+        entityCount +:= 1;
+      end if;
+    end for;
+  end func;
+
+const func integer: countRuntimeEntitiesWithMissingModel (
+    in archiveStats: stats) is func
+  result
+    var integer: entityCount is 0;
+  local
+    var runtimeEntity: entity is runtimeEntity.value;
+  begin
+    for entity range stats.runtimeEntities do
+      if isModelRef(entity.model) and
+          not containsString(stats.modelAssetStems, assetStem(entity.model)) then
+        entityCount +:= 1;
+      end if;
+    end for;
+  end func;
+
+const func string: firstRuntimeEntityWithModel (in archiveStats: stats) is func
+  result
+    var string: entityName is "";
+  local
+    var runtimeEntity: entity is runtimeEntity.value;
+  begin
+    for entity range stats.runtimeEntities do
+      if entityName = "" and entity.model <> "" then
+        entityName := entity.entityName;
+        if entityName = "" then
+          entityName := entity.className;
+        end if;
+      end if;
+    end for;
+  end func;
+
+const func string: firstRuntimeEntityModel (in archiveStats: stats) is func
+  result
+    var string: model is "";
+  local
+    var runtimeEntity: entity is runtimeEntity.value;
+  begin
+    for entity range stats.runtimeEntities do
+      if model = "" and entity.model <> "" then
+        model := entity.model;
+      end if;
+    end for;
+  end func;
+
+const func integer: countRuntimeEntitiesWithSound (
+    in archiveStats: stats) is func
+  result
+    var integer: entityCount is 0;
+  local
+    var runtimeEntity: entity is runtimeEntity.value;
+  begin
+    for entity range stats.runtimeEntities do
+      if entity.sound <> "" then
+        entityCount +:= 1;
+      end if;
+    end for;
+  end func;
+
+const func integer: countRuntimeEntitiesWithAvailableSound (
+    in archiveStats: stats) is func
+  result
+    var integer: entityCount is 0;
+  local
+    var runtimeEntity: entity is runtimeEntity.value;
+  begin
+    for entity range stats.runtimeEntities do
+      if isSoundRef(entity.sound) and
+          containsString(stats.soundAssetStems, assetStem(entity.sound)) then
+        entityCount +:= 1;
+      end if;
+    end for;
+  end func;
+
+const func integer: countRuntimeEntitiesWithMissingSound (
+    in archiveStats: stats) is func
+  result
+    var integer: entityCount is 0;
+  local
+    var runtimeEntity: entity is runtimeEntity.value;
+  begin
+    for entity range stats.runtimeEntities do
+      if isSoundRef(entity.sound) and
+          not containsString(stats.soundAssetStems, assetStem(entity.sound)) then
+        entityCount +:= 1;
+      end if;
+    end for;
+  end func;
+
+const func string: firstRuntimeEntityWithSound (in archiveStats: stats) is func
+  result
+    var string: entityName is "";
+  local
+    var runtimeEntity: entity is runtimeEntity.value;
+  begin
+    for entity range stats.runtimeEntities do
+      if entityName = "" and entity.sound <> "" then
+        entityName := entity.entityName;
+        if entityName = "" then
+          entityName := entity.className;
+        end if;
+      end if;
+    end for;
+  end func;
+
+const func string: firstRuntimeEntitySound (in archiveStats: stats) is func
+  result
+    var string: sound is "";
+  local
+    var runtimeEntity: entity is runtimeEntity.value;
+  begin
+    for entity range stats.runtimeEntities do
+      if sound = "" and entity.sound <> "" then
+        sound := entity.sound;
+      end if;
+    end for;
+  end func;
+
+const func string: firstUnsupportedSelectedEntityClass (
+    in archiveStats: stats) is func
+  result
+    var string: className is "";
+  local
+    var selectedMapEntity: mapEntity is selectedMapEntity.value;
+  begin
+    for mapEntity range stats.selectedEntities do
+      if className = "" and mapEntity.className <> "worldspawn" and
+          not isSpawnRelevantClass(mapEntity.className) then
+        className := mapEntity.className;
+      end if;
+    end for;
+  end func;
+
+const func integer: countUnsupportedSelectedEntities (
+    in archiveStats: stats) is func
+  result
+    var integer: entityCount is 0;
+  local
+    var selectedMapEntity: mapEntity is selectedMapEntity.value;
+  begin
+    for mapEntity range stats.selectedEntities do
+      if mapEntity.className <> "worldspawn" and
+          not isSpawnRelevantClass(mapEntity.className) then
+        entityCount +:= 1;
+      end if;
+    end for;
+  end func;
+
+const func integer: countSelectedBrushPlanesWithMaterial (
+    in archiveStats: stats) is func
+  result
+    var integer: planeCount is 0;
+  local
+    var selectedBrushPlane: brushPlane is selectedBrushPlane.value;
+  begin
+    for brushPlane range stats.selectedBrushPlanes do
+      if brushPlane.materialName <> "" then
+        planeCount +:= 1;
+      end if;
+    end for;
+  end func;
+
+const func integer: countCompleteSelectedBrushBounds (
+    in archiveStats: stats) is func
+  result
+    var integer: boundsCount is 0;
+  local
+    var selectedBrushBounds: brushBounds is selectedBrushBounds.value;
+  begin
+    for brushBounds range stats.selectedBrushBoundsList do
+      if hasCompleteBrushBounds(brushBounds) then
+        boundsCount +:= 1;
+      end if;
+    end for;
+  end func;
+
+const func integer: countVisibleRenderSurfaces (in archiveStats: stats) is func
+  result
+    var integer: surfaceCount is 0;
+  local
+    var runtimeRenderSurface: surface is runtimeRenderSurface.value;
+  begin
+    for surface range stats.runtimeRenderSurfaces do
+      if surface.visible then
+        surfaceCount +:= 1;
+      end if;
+    end for;
+  end func;
+
+const func integer: countDeclaredRenderSurfaceMaterials (
+    in archiveStats: stats) is func
+  result
+    var integer: surfaceCount is 0;
+  local
+    var runtimeRenderSurface: surface is runtimeRenderSurface.value;
+  begin
+    for surface range stats.runtimeRenderSurfaces do
+      if surface.materialName <> "" and
+          containsString(stats.materialNames, surface.materialName) then
+        surfaceCount +:= 1;
+      end if;
+    end for;
+  end func;
+
+const func integer: countFallbackRenderSurfaceMaterials (
+    in archiveStats: stats) is func
+  result
+    var integer: surfaceCount is 0;
+  local
+    var runtimeRenderSurface: surface is runtimeRenderSurface.value;
+  begin
+    for surface range stats.runtimeRenderSurfaces do
+      if surface.materialName = "" or
+          not containsString(stats.materialNames, surface.materialName) then
+        surfaceCount +:= 1;
+      end if;
+    end for;
+  end func;
+
+const func integer: countRenderSurfacesWithFallbackColor (
+    in archiveStats: stats) is func
+  result
+    var integer: surfaceCount is 0;
+  local
+    var runtimeRenderSurface: surface is runtimeRenderSurface.value;
+  begin
+    for surface range stats.runtimeRenderSurfaces do
+      if surface.fallbackColor <> "" then
+        surfaceCount +:= 1;
+      end if;
+    end for;
+  end func;
+
+const func string: firstRenderSurfaceMaterial (in archiveStats: stats) is func
+  result
+    var string: materialName is "";
+  begin
+    if length(stats.runtimeRenderSurfaces) >= 1 then
+      materialName := stats.runtimeRenderSurfaces[1].materialName;
+    end if;
+  end func;
+
+const func string: firstRenderSurfaceFallbackColor (
+    in archiveStats: stats) is func
+  result
+    var string: colorText is "";
+  begin
+    if length(stats.runtimeRenderSurfaces) >= 1 then
+      colorText := stats.runtimeRenderSurfaces[1].fallbackColor;
+    end if;
+  end func;
+
+const func float: renderSurfaceCenterX (
+    in runtimeRenderSurface: surface) is func
+  result
+    var float: centerX is 0.0;
+  begin
+    centerX := (surface.minX + surface.maxX) / 2.0;
+  end func;
+
+const func float: renderSurfaceCenterY (
+    in runtimeRenderSurface: surface) is func
+  result
+    var float: centerY is 0.0;
+  begin
+    centerY := (surface.minY + surface.maxY) / 2.0;
+  end func;
+
+const func float: renderSurfaceDistanceSquared (
+    in runtimeRenderSurface: surface,
+    in float: cameraX, in float: cameraY) is func
+  result
+    var float: distanceSquared is 0.0;
+  local
+    var float: deltaX is 0.0;
+    var float: deltaY is 0.0;
+  begin
+    deltaX := renderSurfaceCenterX(surface) - cameraX;
+    deltaY := renderSurfaceCenterY(surface) - cameraY;
+    distanceSquared := deltaX * deltaX + deltaY * deltaY;
+  end func;
+
+const func boolean: renderSurfaceInFrontOfCamera (
+    in runtimeRenderSurface: surface,
+    in float: cameraX, in float: cameraY, in float: cameraYaw) is func
+  result
+    var boolean: inFront is FALSE;
+  local
+    var float: forwardX is 0.0;
+    var float: forwardY is 0.0;
+    var float: deltaX is 0.0;
+    var float: deltaY is 0.0;
+  begin
+    if surface.visible then
+      forwardX := cos(cameraYaw * PI / 180.0);
+      forwardY := sin(cameraYaw * PI / 180.0);
+      deltaX := renderSurfaceCenterX(surface) - cameraX;
+      deltaY := renderSurfaceCenterY(surface) - cameraY;
+      inFront := deltaX * forwardX + deltaY * forwardY > 0.0;
+    end if;
+  end func;
+
+const func integer: countQueuedRenderSurfaces (
+    in archiveStats: stats,
+    in float: cameraX, in float: cameraY, in float: cameraYaw) is func
+  result
+    var integer: surfaceCount is 0;
+  local
+    var runtimeRenderSurface: surface is runtimeRenderSurface.value;
+  begin
+    for surface range stats.runtimeRenderSurfaces do
+      if renderSurfaceInFrontOfCamera(surface, cameraX, cameraY, cameraYaw) then
+        surfaceCount +:= 1;
+      end if;
+    end for;
+  end func;
+
+const func runtimeRenderSurface: nearestQueuedRenderSurface (
+    in archiveStats: stats,
+    in float: cameraX, in float: cameraY, in float: cameraYaw) is func
+  result
+    var runtimeRenderSurface: nearestSurface is runtimeRenderSurface.value;
+  local
+    var runtimeRenderSurface: surface is runtimeRenderSurface.value;
+    var float: nearestDistance is 0.0;
+    var float: surfaceDistance is 0.0;
+    var boolean: found is FALSE;
+  begin
+    for surface range stats.runtimeRenderSurfaces do
+      if renderSurfaceInFrontOfCamera(surface, cameraX, cameraY, cameraYaw) then
+        surfaceDistance := renderSurfaceDistanceSquared(surface, cameraX,
+            cameraY);
+        if not found or surfaceDistance < nearestDistance then
+          nearestSurface := surface;
+          nearestDistance := surfaceDistance;
+          found := TRUE;
+        end if;
+      end if;
+    end for;
+  end func;
+
+const func float: positiveFloat (in float: value) is func
+  result
+    var float: positive is 0.0;
+  begin
+    positive := value;
+    if positive < 0.0 then
+      positive := -positive;
+    end if;
+  end func;
+
+const func float: firstVectorComponentOrDefault (
+    in string: vectorText, in float: defaultValue) is func
+  result
+    var float: component is 0.0;
+  local
+    var array string: parts is 0 times "";
+  begin
+    component := defaultValue;
+    if vectorText <> "" then
+      parts := noEmptyStrings(split(trim(vectorText), ' '));
+      if length(parts) >= 1 then
+        block
+          component := positiveFloat(float(parts[1]));
+        exception
+          catch RANGE_ERROR:
+            component := defaultValue;
+        end block;
+      end if;
+    end if;
+  end func;
+
+const func boolean: lightAffectsRenderSurface (
+    in selectedMapEntity: lightEntity,
+    in runtimeRenderSurface: surface) is func
+  result
+    var boolean: affects is FALSE;
+  local
+    var float: deltaX is 0.0;
+    var float: deltaY is 0.0;
+    var float: lightRadius is 0.0;
+  begin
+    if (lightEntity.className = "light" or
+        startsWith(lightEntity.className, "light_")) and
+        lightEntity.hasOrigin and surface.visible then
+      lightRadius := firstVectorComponentOrDefault(lightEntity.lightRadius,
+          300.0);
+      deltaX := renderSurfaceCenterX(surface) - lightEntity.x;
+      deltaY := renderSurfaceCenterY(surface) - lightEntity.y;
+      affects := deltaX * deltaX + deltaY * deltaY <=
+          lightRadius * lightRadius;
+    end if;
+  end func;
+
+const func integer: countLightsAffectingRenderSurface (
+    in archiveStats: stats, in runtimeRenderSurface: surface) is func
+  result
+    var integer: lightCount is 0;
+  local
+    var selectedMapEntity: mapEntity is selectedMapEntity.value;
+  begin
+    if surface.visible then
+      for mapEntity range stats.selectedEntities do
+        if lightAffectsRenderSurface(mapEntity, surface) then
+          lightCount +:= 1;
+        end if;
+      end for;
+    end if;
+  end func;
+
+const func integer: countQueuedLitRenderSurfaces (
+    in archiveStats: stats,
+    in float: cameraX, in float: cameraY, in float: cameraYaw) is func
+  result
+    var integer: surfaceCount is 0;
+  local
+    var runtimeRenderSurface: surface is runtimeRenderSurface.value;
+  begin
+    for surface range stats.runtimeRenderSurfaces do
+      if renderSurfaceInFrontOfCamera(surface, cameraX, cameraY, cameraYaw) and
+          countLightsAffectingRenderSurface(stats, surface) <> 0 then
+        surfaceCount +:= 1;
+      end if;
+    end for;
+  end func;
+
+const func string: firstLightColorAffectingRenderSurface (
+    in archiveStats: stats, in runtimeRenderSurface: surface) is func
+  result
+    var string: colorText is "";
+  local
+    var selectedMapEntity: mapEntity is selectedMapEntity.value;
+  begin
+    if surface.visible then
+      for mapEntity range stats.selectedEntities do
+        if colorText = "" and lightAffectsRenderSurface(mapEntity, surface) then
+          if mapEntity.lightColor <> "" then
+            colorText := mapEntity.lightColor;
+          else
+            colorText := "1 1 1";
+          end if;
+        end if;
+      end for;
+    end if;
+  end func;
+
+const func boolean: pointInsideBrushBounds (
+    in selectedBrushBounds: brushBounds,
+    in float: x, in float: y, in float: z) is func
+  result
+    var boolean: inside is FALSE;
+  begin
+    if hasCompleteBrushBounds(brushBounds) then
+      inside := x >= brushBounds.minX and x <= brushBounds.maxX and
+          y >= brushBounds.minY and y <= brushBounds.maxY and
+          z >= brushBounds.minZ and z <= brushBounds.maxZ;
+    end if;
+  end func;
+
+const func integer: countBrushBoundsContainingPoint (
+    in archiveStats: stats, in float: x, in float: y, in float: z) is func
+  result
+    var integer: boundsCount is 0;
+  local
+    var selectedBrushBounds: brushBounds is selectedBrushBounds.value;
+  begin
+    for brushBounds range stats.selectedBrushBoundsList do
+      if pointInsideBrushBounds(brushBounds, x, y, z) then
+        boundsCount +:= 1;
+      end if;
+    end for;
+  end func;
+
+const func float: degreesToRadians (in float: degrees) is func
+  result
+    var float: radians is 0.0;
+  begin
+    radians := degrees * PI / 180.0;
+  end func;
+
+const func float: forwardProbeX (in archiveStats: stats) is func
+  result
+    var float: probeX is 0.0;
+  begin
+    probeX := stats.playerStartX +
+        cos(degreesToRadians(stats.playerStartYaw)) * PLAYER_PROBE_DISTANCE;
+  end func;
+
+const func float: forwardProbeY (in archiveStats: stats) is func
+  result
+    var float: probeY is 0.0;
+  begin
+    probeY := stats.playerStartY +
+        sin(degreesToRadians(stats.playerStartYaw)) * PLAYER_PROBE_DISTANCE;
+  end func;
+
+const func float: forwardStepX (in archiveStats: stats,
+    in float: currentX) is func
+  result
+    var float: stepX is 0.0;
+  begin
+    stepX := currentX + cos(degreesToRadians(stats.playerStartYaw)) *
+        PLAYER_SIM_STEP_DISTANCE;
+  end func;
+
+const func float: forwardStepY (in archiveStats: stats,
+    in float: currentY) is func
+  result
+    var float: stepY is 0.0;
+  begin
+    stepY := currentY + sin(degreesToRadians(stats.playerStartYaw)) *
+        PLAYER_SIM_STEP_DISTANCE;
+  end func;
+
+const func boolean: brushBoundsIntersectsView (
+    in selectedBrushBounds: brushBounds,
+    in float: viewMinX, in float: viewMinY,
+    in float: viewMaxX, in float: viewMaxY) is func
+  result
+    var boolean: intersects is FALSE;
+  begin
+    if hasCompleteBrushBounds(brushBounds) then
+      intersects := brushBounds.maxX >= viewMinX and brushBounds.minX <= viewMaxX and
+          brushBounds.maxY >= viewMinY and brushBounds.minY <= viewMaxY;
+    end if;
+  end func;
+
+const func integer: countBrushBoundsInView (
+    in archiveStats: stats,
+    in float: viewMinX, in float: viewMinY,
+    in float: viewMaxX, in float: viewMaxY) is func
+  result
+    var integer: boundsCount is 0;
+  local
+    var selectedBrushBounds: brushBounds is selectedBrushBounds.value;
+  begin
+    for brushBounds range stats.selectedBrushBoundsList do
+      if brushBoundsIntersectsView(brushBounds, viewMinX, viewMinY,
+          viewMaxX, viewMaxY) then
+        boundsCount +:= 1;
+      end if;
+    end for;
+  end func;
+
+const func integer: debugGridCell (in float: value,
+    in float: viewMinValue) is func
+  result
+    var integer: cell is 0;
+  begin
+    cell := trunc((value - viewMinValue) / DEBUG_RENDER_CELL_SIZE);
+    if cell < 0 then
+      cell := 0;
+    elsif cell >= DEBUG_RENDER_GRID_SIZE then
+      cell := pred(DEBUG_RENDER_GRID_SIZE);
+    end if;
+  end func;
+
+const func integer: countBrushBoundsInDebugCell (
+    in archiveStats: stats, in float: cellMinX, in float: cellMinY) is func
+  result
+    var integer: boundsCount is 0;
+  local
+    var float: cellMaxX is 0.0;
+    var float: cellMaxY is 0.0;
+  begin
+    cellMaxX := cellMinX + DEBUG_RENDER_CELL_SIZE;
+    cellMaxY := cellMinY + DEBUG_RENDER_CELL_SIZE;
+    boundsCount := countBrushBoundsInView(stats, cellMinX, cellMinY,
+        cellMaxX, cellMaxY);
+  end func;
+
+const func boolean: isLightEntity (in selectedMapEntity: mapEntity) is func
+  result
+    var boolean: lightEntity is FALSE;
+  begin
+    lightEntity := mapEntity.className = "light" or
+        startsWith(mapEntity.className, "light_");
+  end func;
+
+const func char: entityDebugMarker (in selectedMapEntity: mapEntity) is func
+  result
+    var char: marker is '.';
+  begin
+    if mapEntity.className = "func_static" then
+      marker := 'S';
+    elsif mapEntity.className = "func_door" or
+        mapEntity.className = "mover_door" or
+        startsWith(mapEntity.className, "door_") then
+      marker := 'D';
+    elsif startsWith(mapEntity.className, "trigger_") then
+      marker := 'T';
+    elsif startsWith(mapEntity.className, "monster_") then
+      marker := 'M';
+    elsif startsWith(mapEntity.className, "item_") or
+        startsWith(mapEntity.className, "ammo_") or
+        startsWith(mapEntity.className, "weapon_") then
+      marker := 'I';
+    end if;
+  end func;
+
+const func char: runtimeEntityDebugMarker (in runtimeEntity: entity) is func
+  result
+    var char: marker is '.';
+  begin
+    if entity.kind = "static" then
+      marker := 'S';
+    elsif entity.kind = "door" then
+      marker := 'D';
+    elsif entity.kind = "trigger" then
+      marker := 'T';
+    elsif entity.kind = "monster" then
+      marker := 'M';
+    elsif entity.kind = "pickup" then
+      marker := 'I';
+    end if;
+  end func;
+
+const func boolean: isTriggerEntity (in selectedMapEntity: mapEntity) is func
+  result
+    var boolean: triggerEntity is FALSE;
+  begin
+    triggerEntity := startsWith(mapEntity.className, "trigger_");
+  end func;
+
+const func boolean: isDoorEntity (in selectedMapEntity: mapEntity) is func
+  result
+    var boolean: doorEntity is FALSE;
+  begin
+    doorEntity := mapEntity.className = "func_door" or
+        mapEntity.className = "mover_door" or
+        startsWith(mapEntity.className, "door_");
+  end func;
+
+const func boolean: pointTouchesEntityOrigin (
+    in selectedMapEntity: mapEntity,
+    in float: x, in float: y) is func
+  result
+    var boolean: touches is FALSE;
+  local
+    var float: deltaX is 0.0;
+    var float: deltaY is 0.0;
+  begin
+    if mapEntity.hasOrigin then
+      deltaX := mapEntity.x - x;
+      deltaY := mapEntity.y - y;
+      touches := deltaX * deltaX + deltaY * deltaY <=
+          TRIGGER_TOUCH_RADIUS * TRIGGER_TOUCH_RADIUS;
+    end if;
+  end func;
+
+const func boolean: touchedTriggerTargetsName (
+    in archiveStats: stats, in float: x, in float: y,
+    in string: targetName) is func
+  result
+    var boolean: targeted is FALSE;
+  local
+    var selectedMapEntity: mapEntity is selectedMapEntity.value;
+  begin
+    for mapEntity range stats.selectedEntities do
+      if isTriggerEntity(mapEntity) and pointTouchesEntityOrigin(mapEntity, x, y) and
+          lower(mapEntity.target) = lower(targetName) then
+        targeted := TRUE;
+      end if;
+    end for;
+  end func;
+
+const func boolean: hasEntityNamed (in archiveStats: stats,
+    in string: entityName) is func
+  result
+    var boolean: found is FALSE;
+  local
+    var selectedMapEntity: mapEntity is selectedMapEntity.value;
+  begin
+    for mapEntity range stats.selectedEntities do
+      if lower(mapEntity.entityName) = lower(entityName) then
+        found := TRUE;
+      end if;
+    end for;
+  end func;
+
+const func integer: countTouchedTriggers (
+    in archiveStats: stats, in float: x, in float: y) is func
+  result
+    var integer: triggerCount is 0;
+  local
+    var selectedMapEntity: mapEntity is selectedMapEntity.value;
+  begin
+    for mapEntity range stats.selectedEntities do
+      if isTriggerEntity(mapEntity) and pointTouchesEntityOrigin(mapEntity, x, y) then
+        triggerCount +:= 1;
+      end if;
+    end for;
+  end func;
+
+const func integer: countResolvedTouchedTriggerTargets (
+    in archiveStats: stats, in float: x, in float: y) is func
+  result
+    var integer: targetCount is 0;
+  local
+    var selectedMapEntity: mapEntity is selectedMapEntity.value;
+  begin
+    for mapEntity range stats.selectedEntities do
+      if isTriggerEntity(mapEntity) and pointTouchesEntityOrigin(mapEntity, x, y) and
+          mapEntity.target <> "" and hasEntityNamed(stats, mapEntity.target) then
+        targetCount +:= 1;
+      end if;
+    end for;
+  end func;
+
+const func string: firstTouchedTriggerName (
+    in archiveStats: stats, in float: x, in float: y) is func
+  result
+    var string: triggerName is "";
+  local
+    var selectedMapEntity: mapEntity is selectedMapEntity.value;
+  begin
+    for mapEntity range stats.selectedEntities do
+      if triggerName = "" and isTriggerEntity(mapEntity) and
+          pointTouchesEntityOrigin(mapEntity, x, y) then
+        triggerName := mapEntity.entityName;
+      end if;
+    end for;
+  end func;
+
+const func string: firstTouchedTriggerTarget (
+    in archiveStats: stats, in float: x, in float: y) is func
+  result
+    var string: targetName is "";
+  local
+    var selectedMapEntity: mapEntity is selectedMapEntity.value;
+  begin
+    for mapEntity range stats.selectedEntities do
+      if targetName = "" and isTriggerEntity(mapEntity) and
+          pointTouchesEntityOrigin(mapEntity, x, y) then
+        targetName := mapEntity.target;
+      end if;
+    end for;
+  end func;
+
+const func integer: countActivatedDoors (
+    in archiveStats: stats, in float: x, in float: y) is func
+  result
+    var integer: doorCount is 0;
+  local
+    var selectedMapEntity: mapEntity is selectedMapEntity.value;
+  begin
+    for mapEntity range stats.selectedEntities do
+      if isDoorEntity(mapEntity) and mapEntity.entityName <> "" and
+          touchedTriggerTargetsName(stats, x, y, mapEntity.entityName) then
+        doorCount +:= 1;
+      end if;
+    end for;
+  end func;
+
+const func boolean: runtimeDoorActivatedAtPoint (
+    in archiveStats: stats, in runtimeEntity: entity,
+    in float: x, in float: y) is func
+  result
+    var boolean: activated is FALSE;
+  begin
+    if entity.kind = "door" and entity.entityName <> "" then
+      activated := touchedTriggerTargetsName(stats, x, y, entity.entityName);
+    end if;
+  end func;
+
+const func boolean: runtimeEntityBlocksPoint (
+    in archiveStats: stats, in runtimeEntity: entity,
+    in float: x, in float: y) is func
+  result
+    var boolean: blocks is FALSE;
+  local
+    var float: deltaX is 0.0;
+    var float: deltaY is 0.0;
+  begin
+    if entity.active and entity.solid and entity.hasOrigin and
+        not runtimeDoorActivatedAtPoint(stats, entity, x, y) then
+      deltaX := entity.x - x;
+      deltaY := entity.y - y;
+      blocks := deltaX * deltaX + deltaY * deltaY <=
+          RUNTIME_ENTITY_COLLISION_RADIUS * RUNTIME_ENTITY_COLLISION_RADIUS;
+    end if;
+  end func;
+
+const func integer: countRuntimeSolidEntitiesBlockingPoint (
+    in archiveStats: stats, in float: x, in float: y) is func
+  result
+    var integer: entityCount is 0;
+  local
+    var runtimeEntity: entity is runtimeEntity.value;
+  begin
+    for entity range stats.runtimeEntities do
+      if runtimeEntityBlocksPoint(stats, entity, x, y) then
+        entityCount +:= 1;
+      end if;
+    end for;
+  end func;
+
+const func integer: countActivatedRuntimeDoors (
+    in archiveStats: stats, in float: x, in float: y) is func
+  result
+    var integer: doorCount is 0;
+  local
+    var runtimeEntity: entity is runtimeEntity.value;
+  begin
+    for entity range stats.runtimeEntities do
+      if runtimeDoorActivatedAtPoint(stats, entity, x, y) then
+        doorCount +:= 1;
+      end if;
+    end for;
+  end func;
+
+const func string: firstActivatedDoorName (
+    in archiveStats: stats, in float: x, in float: y) is func
+  result
+    var string: doorName is "";
+  local
+    var selectedMapEntity: mapEntity is selectedMapEntity.value;
+  begin
+    for mapEntity range stats.selectedEntities do
+      if doorName = "" and isDoorEntity(mapEntity) and
+          mapEntity.entityName <> "" and
+          touchedTriggerTargetsName(stats, x, y, mapEntity.entityName) then
+        doorName := mapEntity.entityName;
+      end if;
+    end for;
+  end func;
+
+const func integer: countLightsInView (
+    in archiveStats: stats,
+    in float: viewMinX, in float: viewMinY,
+    in float: viewMaxX, in float: viewMaxY) is func
+  result
+    var integer: lightCount is 0;
+  local
+    var selectedMapEntity: mapEntity is selectedMapEntity.value;
+  begin
+    for mapEntity range stats.selectedEntities do
+      if isLightEntity(mapEntity) and mapEntity.hasOrigin and
+          mapEntity.x >= viewMinX and mapEntity.x <= viewMaxX and
+          mapEntity.y >= viewMinY and mapEntity.y <= viewMaxY then
+        lightCount +:= 1;
+      end if;
+    end for;
+  end func;
+
+const func integer: countLightsInDebugCell (
+    in archiveStats: stats, in float: cellMinX, in float: cellMinY) is func
+  result
+    var integer: lightCount is 0;
+  local
+    var float: cellMaxX is 0.0;
+    var float: cellMaxY is 0.0;
+  begin
+    cellMaxX := cellMinX + DEBUG_RENDER_CELL_SIZE;
+    cellMaxY := cellMinY + DEBUG_RENDER_CELL_SIZE;
+    lightCount := countLightsInView(stats, cellMinX, cellMinY,
+        cellMaxX, cellMaxY);
+  end func;
+
+const func integer: countGameplayEntitiesInView (
+    in archiveStats: stats,
+    in float: viewMinX, in float: viewMinY,
+    in float: viewMaxX, in float: viewMaxY) is func
+  result
+    var integer: entityCount is 0;
+  local
+    var runtimeEntity: entity is runtimeEntity.value;
+  begin
+    for entity range stats.runtimeEntities do
+      if runtimeEntityDebugMarker(entity) <> '.' and entity.hasOrigin and
+          entity.x >= viewMinX and entity.x <= viewMaxX and
+          entity.y >= viewMinY and entity.y <= viewMaxY then
+        entityCount +:= 1;
+      end if;
+    end for;
+  end func;
+
+const func char: gameplayEntityMarkerInDebugCell (
+    in archiveStats: stats, in float: cellMinX, in float: cellMinY) is func
+  result
+    var char: marker is '.';
+  local
+    var runtimeEntity: entity is runtimeEntity.value;
+    var float: cellMaxX is 0.0;
+    var float: cellMaxY is 0.0;
+  begin
+    cellMaxX := cellMinX + DEBUG_RENDER_CELL_SIZE;
+    cellMaxY := cellMinY + DEBUG_RENDER_CELL_SIZE;
+    for entity range stats.runtimeEntities do
+      if marker = '.' and runtimeEntityDebugMarker(entity) <> '.' and
+          entity.hasOrigin and entity.x >= cellMinX and
+          entity.x <= cellMaxX and entity.y >= cellMinY and
+          entity.y <= cellMaxY then
+        marker := runtimeEntityDebugMarker(entity);
+      end if;
+    end for;
+  end func;
+
+const func integer: countActivatedDoorsInView (
+    in archiveStats: stats,
+    in float: playerX, in float: playerY,
+    in float: viewMinX, in float: viewMinY,
+    in float: viewMaxX, in float: viewMaxY) is func
+  result
+    var integer: doorCount is 0;
+  local
+    var selectedMapEntity: mapEntity is selectedMapEntity.value;
+  begin
+    for mapEntity range stats.selectedEntities do
+      if isDoorEntity(mapEntity) and mapEntity.hasOrigin and
+          touchedTriggerTargetsName(stats, playerX, playerY, mapEntity.entityName) and
+          mapEntity.x >= viewMinX and mapEntity.x <= viewMaxX and
+          mapEntity.y >= viewMinY and mapEntity.y <= viewMaxY then
+        doorCount +:= 1;
+      end if;
+    end for;
+  end func;
+
+const func boolean: activatedDoorInDebugCell (
+    in archiveStats: stats, in float: playerX, in float: playerY,
+    in float: cellMinX, in float: cellMinY) is func
+  result
+    var boolean: found is FALSE;
+  local
+    var selectedMapEntity: mapEntity is selectedMapEntity.value;
+    var float: cellMaxX is 0.0;
+    var float: cellMaxY is 0.0;
+  begin
+    cellMaxX := cellMinX + DEBUG_RENDER_CELL_SIZE;
+    cellMaxY := cellMinY + DEBUG_RENDER_CELL_SIZE;
+    for mapEntity range stats.selectedEntities do
+      if not found and isDoorEntity(mapEntity) and mapEntity.hasOrigin and
+          touchedTriggerTargetsName(stats, playerX, playerY, mapEntity.entityName) and
+          mapEntity.x >= cellMinX and mapEntity.x <= cellMaxX and
+          mapEntity.y >= cellMinY and mapEntity.y <= cellMaxY then
+        found := TRUE;
+      end if;
+    end for;
+  end func;
+
+const func string: debugRenderRow (
+    in archiveStats: stats, in integer: rowIndex,
+    in float: viewMinX, in float: viewMinY,
+    in integer: playerCellX, in integer: playerCellY,
+    in float: playerX, in float: playerY) is func
+  result
+    var string: rowText is "";
+  local
+    var integer: colIndex is 0;
+    var integer: gridY is 0;
+    var float: cellMinX is 0.0;
+    var float: cellMinY is 0.0;
+    var char: gameplayMarker is '.';
+  begin
+    gridY := pred(DEBUG_RENDER_GRID_SIZE) - rowIndex;
+    for colIndex range 0 to pred(DEBUG_RENDER_GRID_SIZE) do
+      cellMinX := viewMinX + float(colIndex) * DEBUG_RENDER_CELL_SIZE;
+      cellMinY := viewMinY + float(gridY) * DEBUG_RENDER_CELL_SIZE;
+      if colIndex = playerCellX and gridY = playerCellY then
+        rowText &:= "P";
+      elsif countLightsInDebugCell(stats, cellMinX, cellMinY) <> 0 then
+        rowText &:= "L";
+      elsif activatedDoorInDebugCell(stats, playerX, playerY, cellMinX,
+          cellMinY) then
+        rowText &:= "O";
+      else
+        gameplayMarker := gameplayEntityMarkerInDebugCell(stats, cellMinX,
+            cellMinY);
+        if gameplayMarker <> '.' then
+          rowText &:= str(gameplayMarker);
+        elsif countBrushBoundsInDebugCell(stats, cellMinX, cellMinY) <> 0 then
+          rowText &:= "#";
+        else
+          rowText &:= ".";
+        end if;
+      end if;
+    end for;
+  end func;
+
+const proc: addMapClassnameStats (inout archiveStats: stats,
+    in string: content) is func
+  local
+    var string: contentLower is "";
+    var string: className is "";
+    var integer: searchPos is 1;
+    var integer: keyPos is 0;
+  begin
+    contentLower := lower(content);
+    keyPos := pos(contentLower, "\"classname\"", searchPos);
+    while keyPos <> 0 do
+      className := lower(quotedValueAfter(content, "classname", keyPos));
+      if className = "light" or startsWith(className, "light_") then
+        stats.mapLights +:= 1;
+      elsif className = "func_static" then
+        stats.mapFuncStatics +:= 1;
+      elsif className = "func_door" or className = "mover_door" or
+          startsWith(className, "door_") then
+        stats.mapDoors +:= 1;
+      elsif startsWith(className, "trigger_") then
+        stats.mapTriggers +:= 1;
+      elsif startsWith(className, "monster_") then
+        stats.mapMonsters +:= 1;
+      elsif startsWith(className, "item_") then
+        stats.mapItems +:= 1;
+      elsif startsWith(className, "ammo_") or startsWith(className, "weapon_") then
+        stats.mapPickups +:= 1;
+      elsif className = "info_player_start" then
+        stats.mapPlayerStarts +:= 1;
+      end if;
+      searchPos := keyPos + length("\"classname\"");
+      keyPos := pos(contentLower, "\"classname\"", searchPos);
+    end while;
+  end func;
+
+const proc: addSelectedMapEntityInfo (inout archiveStats: stats,
+    in string: content) is func
+  local
+    var string: contentLower is "";
+    var string: className is "";
+    var string: entityName is "";
+    var string: origin is "";
+    var string: model is "";
+    var string: sound is "";
+    var string: target is "";
+    var string: angle is "";
+    var string: health is "";
+    var string: mins is "";
+    var string: maxs is "";
+    var string: lightRadius is "";
+    var string: lightColor is "";
+    var selectedMapEntity: mapEntity is selectedMapEntity.value;
+    var integer: searchPos is 1;
+    var integer: keyPos is 0;
+    var integer: entityStart is 0;
+    var integer: entityEnd is 0;
+  begin
+    contentLower := lower(content);
+    keyPos := pos(contentLower, "\"classname\"", searchPos);
+    while keyPos <> 0 do
+      entityStart := rpos(content, "{", keyPos);
+      if entityStart = 0 then
+        entityStart := keyPos;
+      end if;
+      entityEnd := pos(content, "\n}", keyPos);
+      if entityEnd = 0 then
+        entityEnd := pos(content, "}", keyPos);
+      end if;
+      if entityEnd = 0 then
+        entityEnd := length(content);
+      end if;
+
+      className := lower(quotedValueBetween(content, "classname", entityStart, entityEnd));
+      entityName := quotedValueBetween(content, "name", entityStart, entityEnd);
+      origin := quotedValueBetween(content, "origin", entityStart, entityEnd);
+      model := quotedValueBetween(content, "model", entityStart, entityEnd);
+      sound := quotedValueAfterKeyPrefix(content[entityStart .. entityEnd],
+          "snd_", 1);
+      target := quotedValueBetween(content, "target", entityStart, entityEnd);
+      angle := quotedValueBetween(content, "angle", entityStart, entityEnd);
+      health := quotedValueBetween(content, "health", entityStart, entityEnd);
+      mins := quotedValueBetween(content, "mins", entityStart, entityEnd);
+      maxs := quotedValueBetween(content, "maxs", entityStart, entityEnd);
+      lightRadius := quotedValueBetween(content, "light_radius", entityStart, entityEnd);
+      lightColor := quotedValueBetween(content, "_color", entityStart, entityEnd);
+
+      if className <> "" then
+        mapEntity := selectedMapEntity.value;
+        mapEntity.className := className;
+        mapEntity.entityName := entityName;
+        mapEntity.originText := origin;
+        mapEntity.model := model;
+        mapEntity.sound := sound;
+        mapEntity.target := target;
+        mapEntity.angleText := angle;
+        mapEntity.healthText := health;
+        mapEntity.lightRadius := lightRadius;
+        mapEntity.lightColor := lightColor;
+        parseOriginIntoEntity(mapEntity);
+        parseAngleIntoEntity(mapEntity);
+        parseHealthIntoEntity(mapEntity);
+        stats.selectedEntities &:= mapEntity;
+        stats.selectedMapEntities +:= 1;
+        if entityName <> "" then
+          stats.selectedMapNamed +:= 1;
+          appendUnique(stats.selectedEntityNames, lower(entityName));
+        end if;
+        if origin <> "" then
+          stats.selectedMapWithOrigin +:= 1;
+          addOriginToSelectedBounds(stats, origin);
+        end if;
+        if model <> "" then
+          stats.selectedMapWithModel +:= 1;
+          if isModelRef(model) then
+            stats.selectedModelRefs +:= 1;
+            appendUnique(stats.selectedModelStems, assetStem(model));
+            if stats.firstSelectedModelRef = "" then
+              stats.firstSelectedModelRef := model;
+            end if;
+          end if;
+        end if;
+        if target <> "" then
+          stats.selectedMapWithTarget +:= 1;
+          stats.selectedTargetRefs +:= 1;
+          appendUnique(stats.selectedTargetNames, lower(target));
+          if stats.firstTargetRef = "" then
+            stats.firstTargetRef := target;
+          end if;
+        end if;
+        if canParseVector3(mins) and canParseVector3(maxs) then
+          stats.selectedMapWithBounds +:= 1;
+        end if;
+        if className = "light" or startsWith(className, "light_") then
+          stats.selectedLights +:= 1;
+          if canParseVector3(origin) then
+            stats.selectedLightsWithOrigin +:= 1;
+          end if;
+          if canParseVector3(lightRadius) then
+            stats.selectedLightsWithRadius +:= 1;
+          end if;
+          if canParseVector3(lightColor) then
+            stats.selectedLightsWithColor +:= 1;
+          end if;
+          if stats.firstLightName = "" then
+            stats.firstLightName := entityName;
+            stats.firstLightOrigin := origin;
+            stats.firstLightRadius := lightRadius;
+            stats.firstLightColor := lightColor;
+          end if;
+        end if;
+        if isSpawnRelevantClass(className) then
+          stats.selectedMapSpawnReady +:= 1;
+          appendUnique(stats.selectedSpawnClasses, className);
+          if stats.firstSpawnClass = "" then
+            stats.firstSpawnClass := className;
+            stats.firstSpawnName := entityName;
+            stats.firstSpawnOrigin := origin;
+            stats.firstSpawnModel := model;
+            stats.firstSpawnTarget := target;
+          end if;
+        end if;
+      end if;
+      searchPos := keyPos + length("\"classname\"");
+      keyPos := pos(contentLower, "\"classname\"", searchPos);
+    end while;
+  end func;
+
+const proc: parsePlayerStartNumbers (inout archiveStats: stats) is func
+  local
+    var array string: originParts is 0 times "";
+  begin
+    stats.playerStartParsed := FALSE;
+    if stats.playerStartOrigin <> "" then
+      originParts := noEmptyStrings(split(trim(stats.playerStartOrigin), ' '));
+      if length(originParts) >= 3 then
+        block
+          stats.playerStartX := float(originParts[1]);
+          stats.playerStartY := float(originParts[2]);
+          stats.playerStartZ := float(originParts[3]);
+          if stats.playerStartAngle <> "" then
+            stats.playerStartYaw := float(trim(stats.playerStartAngle));
+          else
+            stats.playerStartYaw := 0.0;
+          end if;
+          stats.playerStartParsed := TRUE;
+        exception
+          catch RANGE_ERROR:
+            stats.playerStartParsed := FALSE;
+        end block;
+      end if;
+    end if;
+  end func;
+
+const proc: addRequestedMapInfo (inout archiveStats: stats,
+    in string: filePath, in string: content) is func
+  local
+    var string: contentLower is "";
+    var integer: playerStartPos is 0;
+  begin
+    stats.requestedMapFound := TRUE;
+    stats.requestedMapPath := filePath;
+    contentLower := lower(content);
+    addSelectedMapEntityInfo(stats, content);
+    addSelectedMapMaterialRefs(stats, content);
+    addSelectedMapSurfaceMaterials(stats, content);
+    stats.worldspawnFound := pos(contentLower, "\"classname\" \"worldspawn\"") <> 0;
+    playerStartPos := pos(contentLower, "\"classname\" \"info_player_start\"");
+    if playerStartPos <> 0 then
+      stats.playerStartFound := TRUE;
+      stats.playerStartOrigin := quotedValueAfter(content, "origin", playerStartPos);
+      stats.playerStartAngle := quotedValueAfter(content, "angle", playerStartPos);
+      parsePlayerStartNumbers(stats);
+    end if;
+  end func;
+
+const proc: showUsage is func
+  begin
+    writeln("Usage:");
+    writeln("  s7 doom3_seed7.s7 --doom3_data_path <doom3-root> [--doom3_start_map <map>]");
+    writeln("  s7 doom3_seed7.s7 +set fs_basepath <doom3-root> +map <map>");
+    writeln("");
+    writeln("Required assets:");
+    writeln("  A legal Doom 3 install with base/*.pk4 files. No commercial assets are bundled.");
+    writeln("");
+    writeln("Options:");
+    writeln("  --doom3_data_path, +set fs_basepath   Doom 3 install root");
+    writeln("  --doom3_base_path, +set fs_game       Base directory, default: base");
+    writeln("  --doom3_start_map, +map               Map metadata target, default: game/mars_city1");
+    writeln("  --doom3_render_mode                   metadata for Stage 1");
+    writeln("  --doom3_save_path                     Save directory, not written in Stage 1");
+    writeln("  --doom3_config_path                   Config directory, not written in Stage 1");
+    writeln("  --set <name> <value>, +set <name> <value>");
+    writeln("                                           Store a Doom-style console variable");
+  end func;
+
+const proc: parseArgs (inout doom3Config: config) is func
+  local
+    var array string: args is 0 times "";
+    var integer: argIdx is 1;
+  begin
+    args := argv(PROGRAM);
+    while argIdx <= length(args) do
+      if args[argIdx] = "--help" or args[argIdx] = "-h" then
+        config.showHelp := TRUE;
+      elsif args[argIdx] = "--doom3_data_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.dataPath := convDosPath(args[argIdx]);
+        setCvar(config.cvars, "doom3_data_path", config.dataPath);
+      elsif args[argIdx] = "--doom3_base_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.basePath := convDosPath(args[argIdx]);
+        setCvar(config.cvars, "doom3_base_path", config.basePath);
+      elsif args[argIdx] = "--doom3_start_map" and argIdx < length(args) then
+        incr(argIdx);
+        config.startMap := args[argIdx];
+        setCvar(config.cvars, "doom3_start_map", config.startMap);
+      elsif args[argIdx] = "--doom3_render_mode" and argIdx < length(args) then
+        incr(argIdx);
+        config.renderMode := args[argIdx];
+        setCvar(config.cvars, "doom3_render_mode", config.renderMode);
+      elsif args[argIdx] = "--doom3_save_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.savePath := convDosPath(args[argIdx]);
+        setCvar(config.cvars, "doom3_save_path", config.savePath);
+      elsif args[argIdx] = "--doom3_config_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.configPath := convDosPath(args[argIdx]);
+        setCvar(config.cvars, "doom3_config_path", config.configPath);
+      elsif args[argIdx] = "--set" and argIdx + 2 <= length(args) then
+        setCvar(config.cvars, args[argIdx + 1], args[argIdx + 2]);
+        argIdx +:= 2;
+      elsif args[argIdx] = "+set" and argIdx + 2 <= length(args) then
+        setCvar(config.cvars, args[argIdx + 1], args[argIdx + 2]);
+        if args[argIdx + 1] = "fs_basepath" then
+          config.dataPath := convDosPath(args[argIdx + 2]);
+        elsif args[argIdx + 1] = "fs_game" then
+          config.basePath := convDosPath(args[argIdx + 2]);
+        end if;
+        argIdx +:= 2;
+      elsif args[argIdx] = "+map" and argIdx < length(args) then
+        incr(argIdx);
+        config.startMap := args[argIdx];
+      else
+        logWarn("ignored argument: " <& args[argIdx]);
+      end if;
+      incr(argIdx);
+    end while;
+    if config.basePath = "" then
+      config.basePath := joinPath(config.dataPath, DEFAULT_BASE_DIR);
+    end if;
+    setCvar(config.cvars, "doom3_data_path", config.dataPath);
+    setCvar(config.cvars, "doom3_base_path", config.basePath);
+    setCvar(config.cvars, "doom3_start_map", config.startMap);
+    setCvar(config.cvars, "doom3_render_mode", config.renderMode);
+    setCvar(config.cvars, "doom3_save_path", config.savePath);
+    setCvar(config.cvars, "doom3_config_path", config.configPath);
+    setCvar(config.cvars, "fs_basepath", config.dataPath);
+    setCvar(config.cvars, "fs_game", config.basePath);
+  end func;
+
+const func array string: findPk4Archives (in string: basePath) is func
+  result
+    var array string: pk4Files is 0 times "";
+  local
+    var array string: names is 0 times "";
+    var string: name is "";
+  begin
+    if fileType(basePath) = FILE_DIR then
+      names := readDir(basePath);
+      for name range names do
+        if isPk4Name(name) and fileType(joinPath(basePath, name)) = FILE_REGULAR then
+          pk4Files &:= joinPath(basePath, name);
+        end if;
+      end for;
+    end if;
+  end func;
+
+const proc: addCompiledCompanionStats (in string: pk4File,
+    in string: targetProcPath, in string: targetCmPath,
+    inout integer: procAssets, inout integer: cmAssets,
+    inout boolean: targetProcFound, inout boolean: targetCmFound) is func
+  local
+    var fileSys: zipFs is fileSys.value;
+    var array string: paths is 0 times "";
+    var string: path is "";
+    var string: pathLower is "";
+  begin
+    zipFs := openZip(pk4File);
+    if zipFs <> fileSys.value then
+      paths := readDir(zipFs, RECURSIVE);
+      for path range paths do
+        pathLower := normalizedAssetPath(path);
+        if endsWith(pathLower, ".proc") then
+          procAssets +:= 1;
+          if pathLower = targetProcPath then
+            targetProcFound := TRUE;
+          end if;
+        elsif endsWith(pathLower, ".cm") then
+          cmAssets +:= 1;
+          if pathLower = targetCmPath then
+            targetCmFound := TRUE;
+          end if;
+        end if;
+      end for;
+      close(zipFs);
+    end if;
+  end func;
+
+const proc: addFileToStats (inout archiveStats: stats, in string: filePath) is func
+  local
+    var string: pathLower is "";
+  begin
+    pathLower := lower(filePath);
+    stats.totalFiles +:= 1;
+    if endsWith(pathLower, ".decl") then
+      stats.declFiles +:= 1;
+      if stats.firstDecl = "" then
+        stats.firstDecl := filePath;
+      end if;
+    elsif endsWith(pathLower, ".mtr") then
+      stats.materialFiles +:= 1;
+      if stats.firstMaterial = "" then
+        stats.firstMaterial := filePath;
+      end if;
+    elsif endsWith(pathLower, ".def") then
+      stats.defFiles +:= 1;
+      if stats.firstDef = "" then
+        stats.firstDef := filePath;
+      end if;
+    elsif endsWith(pathLower, ".map") then
+      stats.mapFiles +:= 1;
+      if stats.firstMap = "" then
+        stats.firstMap := filePath;
+      end if;
+    elsif endsWith(pathLower, ".script") then
+      stats.scriptFiles +:= 1;
+      if stats.firstScript = "" then
+        stats.firstScript := filePath;
+      end if;
+    elsif isImageRef(pathLower) then
+      stats.imageRefs +:= 1;
+      stats.imageAssets +:= 1;
+      appendUnique(stats.imageAssetStems, assetStem(pathLower));
+      if stats.firstImageAsset = "" then
+        stats.firstImageAsset := filePath;
+      end if;
+    elsif isSoundRef(pathLower) then
+      stats.soundRefs +:= 1;
+      stats.soundAssets +:= 1;
+      appendUnique(stats.soundAssetStems, assetStem(pathLower));
+      if stats.firstSoundAsset = "" then
+        stats.firstSoundAsset := filePath;
+      end if;
+    elsif isModelRef(pathLower) then
+      stats.modelAssets +:= 1;
+      appendUnique(stats.modelAssetStems, assetStem(pathLower));
+      if stats.firstModelAsset = "" then
+        stats.firstModelAsset := filePath;
+      end if;
+    end if;
+  end func;
+
+const proc: addContentToStats (inout archiveStats: stats, in string: filePath,
+    in string: content) is func
+  local
+    var string: pathLower is "";
+    var string: contentLower is "";
+  begin
+    pathLower := lower(filePath);
+    contentLower := lower(content);
+    stats.imageRefs +:= countAnyAssetRefs(contentLower, ".tga", ".dds", ".jpg") +
+        countOccurrences(contentLower, ".png");
+    stats.soundRefs +:= countAnyAssetRefs(contentLower, ".wav", ".ogg", ".mp3");
+    addTextSoundRefs(stats, content);
+
+    if endsWith(pathLower, ".def") or endsWith(pathLower, ".decl") then
+      stats.entityDefs +:= countOccurrences(contentLower, "entitydef ");
+      stats.scriptSpawnargRefs +:= countOccurrences(contentLower,
+          "\"scriptobject\"") + countOccurrences(contentLower, "\"call\"");
+      addEntityDefNames(stats, content);
+      addEntityDefRecords(stats, content);
+    elsif endsWith(pathLower, ".map") then
+      stats.mapEntities +:= countOccurrences(contentLower, "\"classname\"");
+      stats.scriptSpawnargRefs +:= countOccurrences(contentLower,
+          "\"scriptobject\"") + countOccurrences(contentLower, "\"call\"");
+      addMapClassnameStats(stats, content);
+      stats.mapBrushes +:= countOccurrences(contentLower, "brushdef3");
+      stats.mapPatches +:= countOccurrences(contentLower, "patchdef2") +
+          countOccurrences(contentLower, "patchdef3");
+    elsif endsWith(pathLower, ".script") then
+      stats.scriptFunctions +:= countOccurrences(contentLower, "void ");
+    elsif endsWith(pathLower, ".mtr") then
+      stats.materialStages +:= countOccurrences(contentLower, "{");
+      stats.materialNoShadows +:= countOccurrences(contentLower, "noshadows");
+      stats.materialTwoSided +:= countOccurrences(contentLower, "twosided");
+      stats.materialTranslucent +:= countOccurrences(contentLower, "translucent");
+      stats.materialBlendStages +:= countOccurrences(contentLower, "blend ");
+      addMaterialDeclNames(stats, content);
+      addMaterialTextureBindings(stats, content);
+      addMaterialTextureRefs(stats, content);
+    end if;
+  end func;
+
+const func archiveStats: scanArchive (in string: pk4File,
+    in string: targetMapPath) is func
+  result
+    var archiveStats: stats is archiveStats.value;
+  local
+    var fileSys: zipFs is fileSys.value;
+    var array string: paths is 0 times "";
+    var string: path is "";
+    var string: content is "";
+  begin
+    zipFs := openZip(pk4File);
+    if zipFs = fileSys.value then
+      logWarn("could not open pk4 archive: " <& pk4File);
+    else
+      paths := readDir(zipFs, RECURSIVE);
+      for path range paths do
+        addFileToStats(stats, path);
+        if isTextAssetPath(path) then
+          content := getFile(zipFs, path);
+          addContentToStats(stats, path, content);
+          if normalizedAssetPath(path) = targetMapPath then
+            addRequestedMapInfo(stats, path, content);
+          end if;
+        end if;
+      end for;
+      close(zipFs);
+    end if;
+  end func;
+
+const proc: mergeStats (inout archiveStats: totalStats,
+    in archiveStats: archiveStatsValue) is func
+  local
+    var string: className is "";
+    var entityDefRecord: defRecord is entityDefRecord.value;
+    var selectedMapEntity: mapEntity is selectedMapEntity.value;
+    var runtimeEntity: entity is runtimeEntity.value;
+    var integer: bindingIndex is 1;
+    var selectedBrushPlane: brushPlane is selectedBrushPlane.value;
+    var selectedBrushBounds: brushBounds is selectedBrushBounds.value;
+    var runtimeRenderSurface: surface is runtimeRenderSurface.value;
+  begin
+    totalStats.totalFiles +:= archiveStatsValue.totalFiles;
+    totalStats.declFiles +:= archiveStatsValue.declFiles;
+    totalStats.materialFiles +:= archiveStatsValue.materialFiles;
+    totalStats.defFiles +:= archiveStatsValue.defFiles;
+    totalStats.mapFiles +:= archiveStatsValue.mapFiles;
+    totalStats.scriptFiles +:= archiveStatsValue.scriptFiles;
+    totalStats.imageRefs +:= archiveStatsValue.imageRefs;
+    totalStats.imageAssets +:= archiveStatsValue.imageAssets;
+    totalStats.soundRefs +:= archiveStatsValue.soundRefs;
+    totalStats.soundAssets +:= archiveStatsValue.soundAssets;
+    totalStats.textSoundRefs +:= archiveStatsValue.textSoundRefs;
+    totalStats.modelAssets +:= archiveStatsValue.modelAssets;
+    totalStats.selectedModelRefs +:= archiveStatsValue.selectedModelRefs;
+    totalStats.entityDefs +:= archiveStatsValue.entityDefs;
+    totalStats.entityDefNamed +:= archiveStatsValue.entityDefNamed;
+    totalStats.entityDefHealthValues +:= archiveStatsValue.entityDefHealthValues;
+    totalStats.entityDefModelValues +:= archiveStatsValue.entityDefModelValues;
+    totalStats.entityDefSoundValues +:= archiveStatsValue.entityDefSoundValues;
+    totalStats.entityDefInheritValues +:= archiveStatsValue.entityDefInheritValues;
+    totalStats.entityDefBoundsValues +:= archiveStatsValue.entityDefBoundsValues;
+    totalStats.materialDecls +:= archiveStatsValue.materialDecls;
+    totalStats.materialTextureBindings +:= archiveStatsValue.materialTextureBindings;
+    totalStats.materialNoShadows +:= archiveStatsValue.materialNoShadows;
+    totalStats.materialTwoSided +:= archiveStatsValue.materialTwoSided;
+    totalStats.materialTranslucent +:= archiveStatsValue.materialTranslucent;
+    totalStats.materialBlendStages +:= archiveStatsValue.materialBlendStages;
+    totalStats.materialTextureRefs +:= archiveStatsValue.materialTextureRefs;
+    totalStats.mapEntities +:= archiveStatsValue.mapEntities;
+    totalStats.mapLights +:= archiveStatsValue.mapLights;
+    totalStats.mapFuncStatics +:= archiveStatsValue.mapFuncStatics;
+    totalStats.mapDoors +:= archiveStatsValue.mapDoors;
+    totalStats.mapTriggers +:= archiveStatsValue.mapTriggers;
+    totalStats.mapMonsters +:= archiveStatsValue.mapMonsters;
+    totalStats.mapItems +:= archiveStatsValue.mapItems;
+    totalStats.mapPickups +:= archiveStatsValue.mapPickups;
+    totalStats.mapPlayerStarts +:= archiveStatsValue.mapPlayerStarts;
+    totalStats.mapBrushes +:= archiveStatsValue.mapBrushes;
+    totalStats.mapPatches +:= archiveStatsValue.mapPatches;
+    totalStats.scriptFunctions +:= archiveStatsValue.scriptFunctions;
+    totalStats.scriptSpawnargRefs +:= archiveStatsValue.scriptSpawnargRefs;
+    totalStats.materialStages +:= archiveStatsValue.materialStages;
+    if not totalStats.requestedMapFound and archiveStatsValue.requestedMapFound then
+      totalStats.requestedMapFound := TRUE;
+      totalStats.requestedMapPath := archiveStatsValue.requestedMapPath;
+      totalStats.worldspawnFound := archiveStatsValue.worldspawnFound;
+      totalStats.playerStartFound := archiveStatsValue.playerStartFound;
+      totalStats.playerStartParsed := archiveStatsValue.playerStartParsed;
+      totalStats.selectedMapEntities := archiveStatsValue.selectedMapEntities;
+      totalStats.selectedMapNamed := archiveStatsValue.selectedMapNamed;
+      totalStats.selectedMapWithOrigin := archiveStatsValue.selectedMapWithOrigin;
+      totalStats.selectedMapWithModel := archiveStatsValue.selectedMapWithModel;
+      totalStats.selectedMapWithTarget := archiveStatsValue.selectedMapWithTarget;
+      totalStats.selectedMapWithBounds := archiveStatsValue.selectedMapWithBounds;
+      totalStats.selectedTargetRefs := archiveStatsValue.selectedTargetRefs;
+      totalStats.selectedModelRefs := archiveStatsValue.selectedModelRefs;
+      totalStats.selectedMapSpawnReady := archiveStatsValue.selectedMapSpawnReady;
+      totalStats.selectedMapMaterialRefs := archiveStatsValue.selectedMapMaterialRefs;
+      totalStats.selectedBrushMaterialRefs := archiveStatsValue.selectedBrushMaterialRefs;
+      totalStats.selectedPatchMaterialRefs := archiveStatsValue.selectedPatchMaterialRefs;
+      totalStats.selectedBrushPlaneLines := archiveStatsValue.selectedBrushPlaneLines;
+      totalStats.selectedOriginVectors := archiveStatsValue.selectedOriginVectors;
+      totalStats.selectedLights := archiveStatsValue.selectedLights;
+      totalStats.selectedLightsWithOrigin := archiveStatsValue.selectedLightsWithOrigin;
+      totalStats.selectedLightsWithRadius := archiveStatsValue.selectedLightsWithRadius;
+      totalStats.selectedLightsWithColor := archiveStatsValue.selectedLightsWithColor;
+      totalStats.selectedBoundsValid := archiveStatsValue.selectedBoundsValid;
+      totalStats.selectedMinX := archiveStatsValue.selectedMinX;
+      totalStats.selectedMinY := archiveStatsValue.selectedMinY;
+      totalStats.selectedMinZ := archiveStatsValue.selectedMinZ;
+      totalStats.selectedMaxX := archiveStatsValue.selectedMaxX;
+      totalStats.selectedMaxY := archiveStatsValue.selectedMaxY;
+      totalStats.selectedMaxZ := archiveStatsValue.selectedMaxZ;
+      totalStats.firstSpawnClass := archiveStatsValue.firstSpawnClass;
+      totalStats.firstSpawnName := archiveStatsValue.firstSpawnName;
+      totalStats.firstSpawnOrigin := archiveStatsValue.firstSpawnOrigin;
+      totalStats.firstSpawnModel := archiveStatsValue.firstSpawnModel;
+      totalStats.firstSpawnTarget := archiveStatsValue.firstSpawnTarget;
+      totalStats.firstTargetRef := archiveStatsValue.firstTargetRef;
+      totalStats.firstSelectedModelRef := archiveStatsValue.firstSelectedModelRef;
+      totalStats.firstLightName := archiveStatsValue.firstLightName;
+      totalStats.firstLightOrigin := archiveStatsValue.firstLightOrigin;
+      totalStats.firstLightRadius := archiveStatsValue.firstLightRadius;
+      totalStats.firstLightColor := archiveStatsValue.firstLightColor;
+      totalStats.firstMapMaterialRef := archiveStatsValue.firstMapMaterialRef;
+      totalStats.playerStartOrigin := archiveStatsValue.playerStartOrigin;
+      totalStats.playerStartAngle := archiveStatsValue.playerStartAngle;
+      totalStats.playerStartX := archiveStatsValue.playerStartX;
+      totalStats.playerStartY := archiveStatsValue.playerStartY;
+      totalStats.playerStartZ := archiveStatsValue.playerStartZ;
+      totalStats.playerStartYaw := archiveStatsValue.playerStartYaw;
+    end if;
+    if totalStats.firstMap = "" then
+      totalStats.firstMap := archiveStatsValue.firstMap;
+    end if;
+    if totalStats.firstDecl = "" then
+      totalStats.firstDecl := archiveStatsValue.firstDecl;
+    end if;
+    if totalStats.firstMaterial = "" then
+      totalStats.firstMaterial := archiveStatsValue.firstMaterial;
+    end if;
+    if totalStats.firstDef = "" then
+      totalStats.firstDef := archiveStatsValue.firstDef;
+    end if;
+    if totalStats.firstScript = "" then
+      totalStats.firstScript := archiveStatsValue.firstScript;
+    end if;
+    if totalStats.firstEntityDef = "" then
+      totalStats.firstEntityDef := archiveStatsValue.firstEntityDef;
+    end if;
+    if totalStats.firstEntityDefHealthClass = "" then
+      totalStats.firstEntityDefHealthClass :=
+          archiveStatsValue.firstEntityDefHealthClass;
+    end if;
+    if totalStats.firstEntityDefModelClass = "" then
+      totalStats.firstEntityDefModelClass :=
+          archiveStatsValue.firstEntityDefModelClass;
+    end if;
+    if totalStats.firstEntityDefSoundClass = "" then
+      totalStats.firstEntityDefSoundClass :=
+          archiveStatsValue.firstEntityDefSoundClass;
+    end if;
+    if totalStats.firstEntityDefInheritClass = "" then
+      totalStats.firstEntityDefInheritClass :=
+          archiveStatsValue.firstEntityDefInheritClass;
+    end if;
+    if totalStats.firstEntityDefBoundsClass = "" then
+      totalStats.firstEntityDefBoundsClass :=
+          archiveStatsValue.firstEntityDefBoundsClass;
+    end if;
+    if totalStats.firstMaterialDecl = "" then
+      totalStats.firstMaterialDecl := archiveStatsValue.firstMaterialDecl;
+    end if;
+    if totalStats.firstMaterialTextureBinding = "" then
+      totalStats.firstMaterialTextureBinding :=
+          archiveStatsValue.firstMaterialTextureBinding;
+    end if;
+    if totalStats.firstImageAsset = "" then
+      totalStats.firstImageAsset := archiveStatsValue.firstImageAsset;
+    end if;
+    if totalStats.firstMaterialTextureRef = "" then
+      totalStats.firstMaterialTextureRef := archiveStatsValue.firstMaterialTextureRef;
+    end if;
+    if totalStats.firstSoundAsset = "" then
+      totalStats.firstSoundAsset := archiveStatsValue.firstSoundAsset;
+    end if;
+    if totalStats.firstTextSoundRef = "" then
+      totalStats.firstTextSoundRef := archiveStatsValue.firstTextSoundRef;
+    end if;
+    if totalStats.firstModelAsset = "" then
+      totalStats.firstModelAsset := archiveStatsValue.firstModelAsset;
+    end if;
+    for className range archiveStatsValue.entityDefNames do
+      appendUnique(totalStats.entityDefNames, className);
+    end for;
+    for defRecord range archiveStatsValue.entityDefRecords do
+      totalStats.entityDefRecords &:= defRecord;
+    end for;
+    for className range archiveStatsValue.imageAssetStems do
+      appendUnique(totalStats.imageAssetStems, className);
+    end for;
+    for className range archiveStatsValue.materialTextureStems do
+      appendUnique(totalStats.materialTextureStems, className);
+    end for;
+    for className range archiveStatsValue.soundAssetStems do
+      appendUnique(totalStats.soundAssetStems, className);
+    end for;
+    for className range archiveStatsValue.textSoundStems do
+      appendUnique(totalStats.textSoundStems, className);
+    end for;
+    for className range archiveStatsValue.modelAssetStems do
+      appendUnique(totalStats.modelAssetStems, className);
+    end for;
+    for className range archiveStatsValue.selectedModelStems do
+      appendUnique(totalStats.selectedModelStems, className);
+    end for;
+    for className range archiveStatsValue.runtimeModelStems do
+      appendUnique(totalStats.runtimeModelStems, className);
+    end for;
+    for className range archiveStatsValue.runtimeSoundStems do
+      appendUnique(totalStats.runtimeSoundStems, className);
+    end for;
+    for className range archiveStatsValue.materialNames do
+      appendUnique(totalStats.materialNames, className);
+    end for;
+    for bindingIndex range 1 to length(archiveStatsValue.mtrBindingNames) do
+      totalStats.mtrBindingNames &:=
+          archiveStatsValue.mtrBindingNames[bindingIndex];
+      totalStats.mtrBindingTextureStems &:=
+          archiveStatsValue.mtrBindingTextureStems[bindingIndex];
+    end for;
+    for className range archiveStatsValue.selectedSpawnClasses do
+      appendUnique(totalStats.selectedSpawnClasses, className);
+    end for;
+    for className range archiveStatsValue.selectedEntityNames do
+      appendUnique(totalStats.selectedEntityNames, className);
+    end for;
+    for className range archiveStatsValue.selectedTargetNames do
+      appendUnique(totalStats.selectedTargetNames, className);
+    end for;
+    for className range archiveStatsValue.selectedMapMaterials do
+      appendUnique(totalStats.selectedMapMaterials, className);
+    end for;
+    for className range archiveStatsValue.selectedBrushMaterials do
+      appendUnique(totalStats.selectedBrushMaterials, className);
+    end for;
+    for className range archiveStatsValue.selectedPatchMaterials do
+      appendUnique(totalStats.selectedPatchMaterials, className);
+    end for;
+    for mapEntity range archiveStatsValue.selectedEntities do
+      totalStats.selectedEntities &:= mapEntity;
+    end for;
+    for entity range archiveStatsValue.runtimeEntities do
+      totalStats.runtimeEntities &:= entity;
+    end for;
+    for brushPlane range archiveStatsValue.selectedBrushPlanes do
+      totalStats.selectedBrushPlanes &:= brushPlane;
+    end for;
+    for brushBounds range archiveStatsValue.selectedBrushBoundsList do
+      totalStats.selectedBrushBoundsList &:= brushBounds;
+    end for;
+    for surface range archiveStatsValue.runtimeRenderSurfaces do
+      totalStats.runtimeRenderSurfaces &:= surface;
+    end for;
+  end func;
+
+const proc: printStats (in archiveStats: stats) is func
+  local
+    var integer: declaredSpawnClasses is 0;
+    var integer: missingSpawnClasses is 0;
+    var integer: declaredMapMaterials is 0;
+    var integer: missingMapMaterials is 0;
+    var integer: declaredBrushMaterials is 0;
+    var integer: missingBrushMaterials is 0;
+    var integer: declaredPatchMaterials is 0;
+    var integer: missingPatchMaterials is 0;
+    var integer: availableTextureRefs is 0;
+    var integer: missingTextureRefs is 0;
+    var integer: availableSoundRefs is 0;
+    var integer: missingSoundRefs is 0;
+    var integer: availableModelRefs is 0;
+    var integer: missingModelRefs is 0;
+    var integer: resolvedTargetRefs is 0;
+    var integer: missingTargetRefs is 0;
+    var integer: entityRecordsWithOrigin is 0;
+    var integer: entityRecordsWithAngle is 0;
+    var integer: entityRecordsWithHealth is 0;
+    var integer: entityRecordsWithSound is 0;
+    var integer: runtimeEntitiesWithOrigin is 0;
+    var integer: runtimeActiveEntities is 0;
+    var integer: runtimeSolidEntities is 0;
+    var integer: runtimeTriggerEntities is 0;
+    var integer: runtimeHostileEntities is 0;
+    var integer: runtimeUnsupportedSelectedEntities is 0;
+    var integer: runtimeCustomHealthEntities is 0;
+    var integer: runtimeMapHealthOverrides is 0;
+    var integer: runtimeMapSoundOverrides is 0;
+    var integer: runtimeEntitiesWithModel is 0;
+    var integer: runtimeEntitiesWithAvailableModel is 0;
+    var integer: runtimeEntitiesWithMissingModel is 0;
+    var integer: runtimeEntitiesWithSound is 0;
+    var integer: runtimeEntitiesWithAvailableSound is 0;
+    var integer: runtimeEntitiesWithMissingSound is 0;
+    var string: firstRuntimeEntity is "";
+    var string: firstRuntimeHealthEntity is "";
+    var integer: firstRuntimeHealth is 0;
+    var string: firstRuntimeCustomHealthEntity is "";
+    var integer: firstRuntimeCustomHealthValue is 0;
+    var string: firstRuntimeModelEntity is "";
+    var string: firstRuntimeModel is "";
+    var string: firstRuntimeSoundEntity is "";
+    var string: firstRuntimeSound is "";
+    var string: firstUnsupportedSelectedClass is "";
+    var integer: brushPlanesWithMaterial is 0;
+    var integer: completeBrushBounds is 0;
+    var integer: visibleRenderSurfaces is 0;
+    var integer: declaredRenderSurfaceMaterials is 0;
+    var integer: fallbackRenderSurfaceMaterials is 0;
+    var integer: renderSurfacesWithFallbackColor is 0;
+    var string: firstRenderMaterial is "";
+    var string: firstRenderFallbackColor is "";
+    var string: firstRenderMaterialTexture is "";
+    var boolean: firstRenderMaterialTextureAvailable is FALSE;
+    var integer: queuedRenderSurfaces is 0;
+    var integer: queuedLitRenderSurfaces is 0;
+    var runtimeRenderSurface: nearestRenderSurface is runtimeRenderSurface.value;
+    var float: nearestRenderSurfaceDistanceSquared is 0.0;
+    var integer: nearestRenderSurfaceLights is 0;
+    var string: nearestRenderSurfaceLightColor is "";
+    var integer: playerSpawnBlockingBounds is 0;
+    var integer: playerSpawnBlockingEntities is 0;
+    var integer: playerProbeBlockingBounds is 0;
+    var integer: playerProbeBlockingEntities is 0;
+    var float: playerProbeX is 0.0;
+    var float: playerProbeY is 0.0;
+    var boolean: playerFirstMoveAccepted is FALSE;
+    var float: playerFirstMoveX is 0.0;
+    var float: playerFirstMoveY is 0.0;
+    var integer: playerSimAcceptedSteps is 0;
+    var integer: playerSimBlockingBounds is 0;
+    var integer: playerSimBlockingEntities is 0;
+    var boolean: playerSimStoppedByCollision is FALSE;
+    var float: playerSimX is 0.0;
+    var float: playerSimY is 0.0;
+    var float: playerSimNextX is 0.0;
+    var float: playerSimNextY is 0.0;
+    var integer: simStep is 0;
+    var float: debugViewSize is 0.0;
+    var float: debugViewMinX is 0.0;
+    var float: debugViewMinY is 0.0;
+    var float: debugViewMaxX is 0.0;
+    var float: debugViewMaxY is 0.0;
+    var integer: debugVisibleBrushBounds is 0;
+    var integer: debugVisibleLights is 0;
+    var integer: debugVisibleGameplayEntities is 0;
+    var integer: debugPlayerCellX is 0;
+    var integer: debugPlayerCellY is 0;
+    var boolean: debugRenderReady is FALSE;
+    var integer: debugRowIndex is 0;
+    var integer: touchedTriggers is 0;
+    var integer: resolvedTouchedTargets is 0;
+    var string: firstTouchedName is "";
+    var string: firstTouchedTarget is "";
+    var integer: activatedDoors is 0;
+    var integer: activatedRuntimeDoors is 0;
+    var integer: debugVisibleActivatedDoors is 0;
+    var string: firstActivatedDoor is "";
+    var string: missingClass is "";
+    var string: missingMaterial is "";
+    var string: missingTexture is "";
+    var string: missingSound is "";
+    var string: missingModel is "";
+    var string: missingTarget is "";
+  begin
+    logInfo("files=" <& stats.totalFiles);
+    logInfo("decl=" <& stats.declFiles <& " material=" <& stats.materialFiles <&
+        " def=" <& stats.defFiles <& " map=" <& stats.mapFiles <&
+        " script=" <& stats.scriptFiles);
+    logInfo("image_refs=" <& stats.imageRefs <& " image_assets=" <&
+        stats.imageAssets <& " unique_image_assets=" <&
+        length(stats.imageAssetStems) <& " sound_refs=" <& stats.soundRefs <&
+        " sound_assets=" <& stats.soundAssets <& " unique_sound_assets=" <&
+        length(stats.soundAssetStems));
+    logInfo("model_assets=" <& stats.modelAssets <& " unique_model_assets=" <&
+        length(stats.modelAssetStems));
+    logInfo("entity_defs=" <& stats.entityDefs <& " named_entity_defs=" <&
+        stats.entityDefNamed <& " unique_entity_defs=" <&
+        length(stats.entityDefNames));
+    logInfo("entity_def_spawnargs health=" <& stats.entityDefHealthValues <&
+        " model=" <& stats.entityDefModelValues <& " sound=" <&
+        stats.entityDefSoundValues <& " inherit=" <&
+        stats.entityDefInheritValues <& " bounds=" <&
+        stats.entityDefBoundsValues);
+    if stats.firstEntityDefHealthClass <> "" then
+      logInfo("first_entity_def_health_class=" <&
+          stats.firstEntityDefHealthClass);
+    end if;
+    if stats.firstEntityDefModelClass <> "" then
+      logInfo("first_entity_def_model_class=" <&
+          stats.firstEntityDefModelClass);
+    end if;
+    if stats.firstEntityDefSoundClass <> "" then
+      logInfo("first_entity_def_sound_class=" <&
+          stats.firstEntityDefSoundClass);
+    end if;
+    if stats.firstEntityDefInheritClass <> "" then
+      logInfo("first_entity_def_inherit_class=" <&
+          stats.firstEntityDefInheritClass);
+    end if;
+    if stats.firstEntityDefBoundsClass <> "" then
+      logInfo("first_entity_def_bounds_class=" <&
+          stats.firstEntityDefBoundsClass);
+    end if;
+    logInfo("material_decls=" <& stats.materialDecls <& " unique_materials=" <&
+        length(stats.materialNames));
+    logInfo("material_texture_bindings=" <& stats.materialTextureBindings <&
+        " material_records=" <& length(stats.mtrBindingNames));
+    if stats.firstMaterialTextureBinding <> "" then
+      logInfo("first_material_texture_binding=" <&
+          stats.firstMaterialTextureBinding);
+    end if;
+    logInfo("material_flags noshadows=" <& stats.materialNoShadows <&
+        " twosided=" <& stats.materialTwoSided <& " translucent=" <&
+        stats.materialTranslucent <& " blend_stages=" <&
+        stats.materialBlendStages);
+    availableTextureRefs := countAvailableTextureRefs(stats);
+    missingTextureRefs := countMissingTextureRefs(stats);
+    missingTexture := firstMissingTextureRef(stats);
+    logInfo("material_texture_refs=" <& stats.materialTextureRefs <&
+        " unique=" <& length(stats.materialTextureStems) <& " available=" <&
+        availableTextureRefs <& " missing=" <& missingTextureRefs);
+    if stats.firstImageAsset <> "" then
+      logInfo("first_image_asset=" <& stats.firstImageAsset);
+    end if;
+    if stats.firstMaterialTextureRef <> "" then
+      logInfo("first_material_texture_ref=" <& stats.firstMaterialTextureRef);
+    end if;
+    if missingTexture <> "" then
+      logWarn("first material texture without image asset: " <& missingTexture);
+    end if;
+    availableSoundRefs := countAvailableSoundRefs(stats);
+    missingSoundRefs := countMissingSoundRefs(stats);
+    missingSound := firstMissingSoundRef(stats);
+    logInfo("text_sound_refs=" <& stats.textSoundRefs <& " unique=" <&
+        length(stats.textSoundStems) <& " available=" <& availableSoundRefs <&
+        " missing=" <& missingSoundRefs);
+    if stats.firstSoundAsset <> "" then
+      logInfo("first_sound_asset=" <& stats.firstSoundAsset);
+    end if;
+    if stats.firstTextSoundRef <> "" then
+      logInfo("first_text_sound_ref=" <& stats.firstTextSoundRef);
+    end if;
+    if missingSound <> "" then
+      logWarn("first sound reference without sound asset: " <& missingSound);
+    end if;
+    availableModelRefs := countAvailableModelRefs(stats);
+    missingModelRefs := countMissingModelRefs(stats);
+    missingModel := firstMissingModelRef(stats);
+    logInfo("selected_model_refs=" <& stats.selectedModelRefs <& " unique=" <&
+        length(stats.selectedModelStems) <& " available=" <& availableModelRefs <&
+        " missing=" <& missingModelRefs);
+    if stats.firstModelAsset <> "" then
+      logInfo("first_model_asset=" <& stats.firstModelAsset);
+    end if;
+    if stats.firstSelectedModelRef <> "" then
+      logInfo("first_selected_model_ref=" <& stats.firstSelectedModelRef);
+    end if;
+    if missingModel <> "" then
+      logWarn("first selected model without model asset: " <& missingModel);
+    end if;
+    logInfo("map_entities=" <&
+        stats.mapEntities <& " script_functions=" <& stats.scriptFunctions <&
+        " script_spawnargs=" <& stats.scriptSpawnargRefs <&
+        " material_stages=" <& stats.materialStages);
+    logInfo("map_classes light=" <& stats.mapLights <& " func_static=" <&
+        stats.mapFuncStatics <& " door=" <& stats.mapDoors <&
+        " trigger=" <& stats.mapTriggers <& " monster=" <& stats.mapMonsters);
+    logInfo("map_classes item=" <& stats.mapItems <& " pickup=" <&
+        stats.mapPickups <& " player_start=" <& stats.mapPlayerStarts);
+    logInfo("map_brushes=" <& stats.mapBrushes <& " map_patches=" <& stats.mapPatches);
+    if stats.firstMap <> "" then
+      logInfo("first_map=" <& stats.firstMap);
+    end if;
+    if stats.firstDecl <> "" then
+      logInfo("first_decl=" <& stats.firstDecl);
+    end if;
+    if stats.firstMaterial <> "" then
+      logInfo("first_material=" <& stats.firstMaterial);
+    end if;
+    if stats.firstDef <> "" then
+      logInfo("first_def=" <& stats.firstDef);
+    end if;
+    if stats.firstScript <> "" then
+      logInfo("first_script=" <& stats.firstScript);
+    end if;
+    if stats.firstEntityDef <> "" then
+      logInfo("first_entity_def=" <& stats.firstEntityDef);
+    end if;
+    if stats.firstMaterialDecl <> "" then
+      logInfo("first_material_decl=" <& stats.firstMaterialDecl);
+    end if;
+    if stats.requestedMapFound then
+      declaredSpawnClasses := countDeclaredSpawnClasses(stats);
+      missingSpawnClasses := countMissingSpawnClasses(stats);
+      missingClass := firstMissingSpawnClass(stats);
+      declaredMapMaterials := countDeclaredMapMaterials(stats);
+      missingMapMaterials := countMissingMapMaterials(stats);
+      missingMaterial := firstMissingMapMaterial(stats);
+      declaredBrushMaterials := countDeclaredMaterials(stats, stats.selectedBrushMaterials);
+      missingBrushMaterials := countMissingMaterials(stats, stats.selectedBrushMaterials);
+      declaredPatchMaterials := countDeclaredMaterials(stats, stats.selectedPatchMaterials);
+      missingPatchMaterials := countMissingMaterials(stats, stats.selectedPatchMaterials);
+      resolvedTargetRefs := countResolvedTargetRefs(stats);
+      missingTargetRefs := countMissingTargetRefs(stats);
+      missingTarget := firstMissingTargetRef(stats);
+      entityRecordsWithOrigin := countSelectedEntityRecordsWithOrigin(stats);
+      entityRecordsWithAngle := countSelectedEntityRecordsWithAngle(stats);
+      entityRecordsWithHealth := countSelectedEntityRecordsWithHealth(stats);
+      entityRecordsWithSound := countSelectedEntityRecordsWithSound(stats);
+      runtimeEntitiesWithOrigin := countRuntimeEntitiesWithOrigin(stats);
+      runtimeActiveEntities := countActiveRuntimeEntities(stats);
+      runtimeSolidEntities := countSolidRuntimeEntities(stats);
+      runtimeTriggerEntities := countTriggerRuntimeEntities(stats);
+      runtimeHostileEntities := countHostileRuntimeEntities(stats);
+      runtimeUnsupportedSelectedEntities := countUnsupportedSelectedEntities(stats);
+      runtimeCustomHealthEntities := countRuntimeEntitiesWithCustomHealth(stats);
+      runtimeMapHealthOverrides := countRuntimeEntitiesWithMapHealthOverride(stats);
+      runtimeMapSoundOverrides := countRuntimeEntitiesWithMapSoundOverride(stats);
+      runtimeEntitiesWithModel := countRuntimeEntitiesWithModel(stats);
+      runtimeEntitiesWithAvailableModel := countRuntimeEntitiesWithAvailableModel(stats);
+      runtimeEntitiesWithMissingModel := countRuntimeEntitiesWithMissingModel(stats);
+      runtimeEntitiesWithSound := countRuntimeEntitiesWithSound(stats);
+      runtimeEntitiesWithAvailableSound := countRuntimeEntitiesWithAvailableSound(stats);
+      runtimeEntitiesWithMissingSound := countRuntimeEntitiesWithMissingSound(stats);
+      firstRuntimeEntity := firstRuntimeEntityName(stats);
+      firstRuntimeHealthEntity := firstRuntimeEntityWithHealth(stats);
+      firstRuntimeHealth := firstRuntimeEntityHealth(stats);
+      firstRuntimeCustomHealthEntity := firstRuntimeEntityWithCustomHealth(stats);
+      firstRuntimeCustomHealthValue := firstRuntimeCustomHealth(stats);
+      firstRuntimeModelEntity := firstRuntimeEntityWithModel(stats);
+      firstRuntimeModel := firstRuntimeEntityModel(stats);
+      firstRuntimeSoundEntity := firstRuntimeEntityWithSound(stats);
+      firstRuntimeSound := firstRuntimeEntitySound(stats);
+      firstUnsupportedSelectedClass := firstUnsupportedSelectedEntityClass(stats);
+      brushPlanesWithMaterial := countSelectedBrushPlanesWithMaterial(stats);
+      completeBrushBounds := countCompleteSelectedBrushBounds(stats);
+      visibleRenderSurfaces := countVisibleRenderSurfaces(stats);
+      declaredRenderSurfaceMaterials := countDeclaredRenderSurfaceMaterials(stats);
+      fallbackRenderSurfaceMaterials := countFallbackRenderSurfaceMaterials(stats);
+      renderSurfacesWithFallbackColor := countRenderSurfacesWithFallbackColor(stats);
+      firstRenderMaterial := firstRenderSurfaceMaterial(stats);
+      firstRenderFallbackColor := firstRenderSurfaceFallbackColor(stats);
+      firstRenderMaterialTexture := firstRenderSurfaceMaterialTexture(stats);
+      firstRenderMaterialTextureAvailable :=
+          containsString(stats.imageAssetStems, firstRenderMaterialTexture);
+      if stats.playerStartParsed then
+        playerSpawnBlockingBounds := countBrushBoundsContainingPoint(stats,
+            stats.playerStartX, stats.playerStartY, stats.playerStartZ);
+        playerSpawnBlockingEntities := countRuntimeSolidEntitiesBlockingPoint(stats,
+            stats.playerStartX, stats.playerStartY);
+        playerProbeX := forwardProbeX(stats);
+        playerProbeY := forwardProbeY(stats);
+        playerProbeBlockingBounds := countBrushBoundsContainingPoint(stats,
+            playerProbeX, playerProbeY, stats.playerStartZ);
+        playerProbeBlockingEntities := countRuntimeSolidEntitiesBlockingPoint(stats,
+            playerProbeX, playerProbeY);
+        playerFirstMoveAccepted := playerSpawnBlockingBounds = 0 and
+            playerSpawnBlockingEntities = 0 and playerProbeBlockingBounds = 0 and
+            playerProbeBlockingEntities = 0;
+        if playerFirstMoveAccepted then
+          playerFirstMoveX := playerProbeX;
+          playerFirstMoveY := playerProbeY;
+        else
+          playerFirstMoveX := stats.playerStartX;
+          playerFirstMoveY := stats.playerStartY;
+        end if;
+        playerSimX := stats.playerStartX;
+        playerSimY := stats.playerStartY;
+        if playerSpawnBlockingBounds <> 0 or playerSpawnBlockingEntities <> 0 then
+          playerSimStoppedByCollision := TRUE;
+          playerSimBlockingBounds := playerSpawnBlockingBounds;
+          playerSimBlockingEntities := playerSpawnBlockingEntities;
+        else
+          for simStep range 1 to PLAYER_SIM_STEPS do
+            if not playerSimStoppedByCollision then
+              playerSimNextX := forwardStepX(stats, playerSimX);
+              playerSimNextY := forwardStepY(stats, playerSimY);
+              playerSimBlockingBounds := countBrushBoundsContainingPoint(stats,
+                  playerSimNextX, playerSimNextY, stats.playerStartZ);
+              playerSimBlockingEntities := countRuntimeSolidEntitiesBlockingPoint(stats,
+                  playerSimNextX, playerSimNextY);
+              if playerSimBlockingBounds = 0 and playerSimBlockingEntities = 0 then
+                playerSimX := playerSimNextX;
+                playerSimY := playerSimNextY;
+                playerSimAcceptedSteps +:= 1;
+              else
+                playerSimStoppedByCollision := TRUE;
+              end if;
+            end if;
+          end for;
+        end if;
+        debugViewSize := float(DEBUG_RENDER_GRID_SIZE) * DEBUG_RENDER_CELL_SIZE;
+        debugViewMinX := playerSimX - debugViewSize / 2.0;
+        debugViewMinY := playerSimY - debugViewSize / 2.0;
+        debugViewMaxX := debugViewMinX + debugViewSize;
+        debugViewMaxY := debugViewMinY + debugViewSize;
+        debugVisibleBrushBounds := countBrushBoundsInView(stats,
+            debugViewMinX, debugViewMinY, debugViewMaxX, debugViewMaxY);
+        debugVisibleLights := countLightsInView(stats, debugViewMinX,
+            debugViewMinY, debugViewMaxX, debugViewMaxY);
+        debugVisibleGameplayEntities := countGameplayEntitiesInView(stats,
+            debugViewMinX, debugViewMinY, debugViewMaxX, debugViewMaxY);
+        debugPlayerCellX := debugGridCell(playerSimX, debugViewMinX);
+        debugPlayerCellY := debugGridCell(playerSimY, debugViewMinY);
+        debugRenderReady := completeBrushBounds > 0;
+        touchedTriggers := countTouchedTriggers(stats, playerSimX, playerSimY);
+        resolvedTouchedTargets := countResolvedTouchedTriggerTargets(stats,
+            playerSimX, playerSimY);
+        firstTouchedName := firstTouchedTriggerName(stats, playerSimX, playerSimY);
+        firstTouchedTarget := firstTouchedTriggerTarget(stats, playerSimX, playerSimY);
+        activatedDoors := countActivatedDoors(stats, playerSimX, playerSimY);
+        activatedRuntimeDoors := countActivatedRuntimeDoors(stats, playerSimX, playerSimY);
+        firstActivatedDoor := firstActivatedDoorName(stats, playerSimX, playerSimY);
+        debugVisibleActivatedDoors := countActivatedDoorsInView(stats,
+            playerSimX, playerSimY, debugViewMinX, debugViewMinY,
+            debugViewMaxX, debugViewMaxY);
+        queuedRenderSurfaces := countQueuedRenderSurfaces(stats,
+            playerSimX, playerSimY, stats.playerStartYaw);
+        queuedLitRenderSurfaces := countQueuedLitRenderSurfaces(stats,
+            playerSimX, playerSimY, stats.playerStartYaw);
+        nearestRenderSurface := nearestQueuedRenderSurface(stats,
+            playerSimX, playerSimY, stats.playerStartYaw);
+        if nearestRenderSurface.visible then
+          nearestRenderSurfaceDistanceSquared := renderSurfaceDistanceSquared(
+              nearestRenderSurface, playerSimX, playerSimY);
+          nearestRenderSurfaceLights := countLightsAffectingRenderSurface(stats,
+              nearestRenderSurface);
+          nearestRenderSurfaceLightColor := firstLightColorAffectingRenderSurface(
+              stats, nearestRenderSurface);
+        end if;
+      end if;
+      logInfo("requested_map=" <& stats.requestedMapPath);
+      logInfo("selected_map_entities=" <& stats.selectedMapEntities <&
+          " spawn_ready=" <& stats.selectedMapSpawnReady <& " named=" <&
+          stats.selectedMapNamed);
+      logInfo("selected_entity_records=" <& length(stats.selectedEntities) <&
+          " parsed_origin=" <& entityRecordsWithOrigin <&
+          " parsed_angle=" <& entityRecordsWithAngle <&
+          " parsed_health=" <& entityRecordsWithHealth <&
+          " parsed_sound=" <& entityRecordsWithSound);
+      logInfo("runtime_entities=" <& length(stats.runtimeEntities) <&
+          " active=" <& runtimeActiveEntities <& " origin=" <&
+          runtimeEntitiesWithOrigin <& " solid=" <& runtimeSolidEntities <&
+          " trigger=" <& runtimeTriggerEntities <& " hostile=" <&
+          runtimeHostileEntities);
+      logInfo("runtime_entity_kinds player_spawn=" <&
+          countRuntimeEntitiesByKind(stats, "player_spawn") <& " light=" <&
+          countRuntimeEntitiesByKind(stats, "light") <& " static=" <&
+          countRuntimeEntitiesByKind(stats, "static") <& " door=" <&
+          countRuntimeEntitiesByKind(stats, "door") <& " trigger=" <&
+          countRuntimeEntitiesByKind(stats, "trigger") <& " monster=" <&
+          countRuntimeEntitiesByKind(stats, "monster") <& " pickup=" <&
+          countRuntimeEntitiesByKind(stats, "pickup"));
+      logInfo("runtime_unsupported_selected_entities=" <&
+          runtimeUnsupportedSelectedEntities);
+      logInfo("runtime_custom_health_entities=" <&
+          runtimeCustomHealthEntities);
+      logInfo("runtime_map_overrides health=" <& runtimeMapHealthOverrides <&
+          " sound=" <& runtimeMapSoundOverrides);
+      logInfo("runtime_model_refs=" <& runtimeEntitiesWithModel <&
+          " unique=" <& length(stats.runtimeModelStems) <& " available=" <&
+          runtimeEntitiesWithAvailableModel <& " missing=" <&
+          runtimeEntitiesWithMissingModel);
+      logInfo("runtime_sound_refs=" <& runtimeEntitiesWithSound <&
+          " unique=" <& length(stats.runtimeSoundStems) <& " available=" <&
+          runtimeEntitiesWithAvailableSound <& " missing=" <&
+          runtimeEntitiesWithMissingSound);
+      if firstRuntimeEntity <> "" then
+        logInfo("first_runtime_entity=" <& firstRuntimeEntity);
+      end if;
+      if firstRuntimeHealthEntity <> "" then
+        logInfo("first_runtime_health_entity=" <& firstRuntimeHealthEntity);
+        logInfo("first_runtime_health=" <& firstRuntimeHealth);
+      end if;
+      if firstRuntimeCustomHealthEntity <> "" then
+        logInfo("first_runtime_custom_health_entity=" <&
+            firstRuntimeCustomHealthEntity);
+        logInfo("first_runtime_custom_health=" <&
+            firstRuntimeCustomHealthValue);
+      end if;
+      if firstRuntimeModelEntity <> "" then
+        logInfo("first_runtime_model_entity=" <& firstRuntimeModelEntity);
+        logInfo("first_runtime_model=" <& firstRuntimeModel);
+      end if;
+      if firstRuntimeSoundEntity <> "" then
+        logInfo("first_runtime_sound_entity=" <& firstRuntimeSoundEntity);
+        logInfo("first_runtime_sound=" <& firstRuntimeSound);
+      end if;
+      if firstUnsupportedSelectedClass <> "" then
+        logWarn("first selected entity without runtime spawn support: " <&
+            firstUnsupportedSelectedClass);
+      end if;
+      if length(stats.selectedEntities) >= 1 then
+        logInfo("first_entity_record_class=" <&
+            stats.selectedEntities[1].className);
+        if stats.selectedEntities[1].entityName <> "" then
+          logInfo("first_entity_record_name=" <&
+              stats.selectedEntities[1].entityName);
+        end if;
+      end if;
+      logInfo("selected_spawn_classes=" <& length(stats.selectedSpawnClasses) <&
+          " declared_or_builtin=" <& declaredSpawnClasses <&
+          " missing_decl=" <& missingSpawnClasses);
+      if missingClass <> "" then
+        logWarn("first spawn class without entityDef: " <& missingClass);
+      end if;
+      logInfo("selected_map_material_refs=" <& stats.selectedMapMaterialRefs <&
+          " unique=" <& length(stats.selectedMapMaterials) <&
+          " declared=" <& declaredMapMaterials <& " missing=" <&
+          missingMapMaterials);
+      if stats.firstMapMaterialRef <> "" then
+        logInfo("first_map_material_ref=" <& stats.firstMapMaterialRef);
+      end if;
+      if missingMaterial <> "" then
+        logWarn("first map material without declaration: " <& missingMaterial);
+      end if;
+      logInfo("surface_materials brush_refs=" <& stats.selectedBrushMaterialRefs <&
+          " brush_unique=" <& length(stats.selectedBrushMaterials) <&
+          " brush_declared=" <& declaredBrushMaterials <&
+          " brush_missing=" <& missingBrushMaterials);
+      logInfo("surface_materials patch_refs=" <& stats.selectedPatchMaterialRefs <&
+          " patch_unique=" <& length(stats.selectedPatchMaterials) <&
+          " patch_declared=" <& declaredPatchMaterials <&
+          " patch_missing=" <& missingPatchMaterials);
+      logInfo("selected_brush_plane_lines=" <& stats.selectedBrushPlaneLines);
+      logInfo("selected_brush_plane_records=" <&
+          length(stats.selectedBrushPlanes) <& " with_material=" <&
+          brushPlanesWithMaterial);
+      if length(stats.selectedBrushPlanes) >= 1 then
+        logInfo("first_brush_plane=" <& stats.selectedBrushPlanes[1].normalX <&
+            " " <& stats.selectedBrushPlanes[1].normalY <& " " <&
+            stats.selectedBrushPlanes[1].normalZ <& " " <&
+            stats.selectedBrushPlanes[1].distance);
+        if stats.selectedBrushPlanes[1].materialName <> "" then
+          logInfo("first_brush_plane_material=" <&
+              stats.selectedBrushPlanes[1].materialName);
+        end if;
+      end if;
+      logInfo("selected_brush_bounds=" <&
+          length(stats.selectedBrushBoundsList) <& " complete=" <&
+          completeBrushBounds);
+      logInfo("render_surfaces=" <& length(stats.runtimeRenderSurfaces) <&
+          " visible=" <& visibleRenderSurfaces <& " declared_material=" <&
+          declaredRenderSurfaceMaterials <& " fallback_material=" <&
+          fallbackRenderSurfaceMaterials <& " fallback_color=" <&
+          renderSurfacesWithFallbackColor);
+      if firstRenderMaterial <> "" then
+        logInfo("first_render_surface_material=" <& firstRenderMaterial);
+      end if;
+      if firstRenderMaterialTexture <> "" then
+        logInfo("first_render_surface_texture=" <& firstRenderMaterialTexture);
+        logInfo("first_render_surface_texture_available=" <&
+            firstRenderMaterialTextureAvailable);
+      end if;
+      if firstRenderFallbackColor <> "" then
+        logInfo("first_render_surface_fallback_color=" <&
+            firstRenderFallbackColor);
+      end if;
+      if length(stats.selectedBrushBoundsList) >= 1 and
+          hasCompleteBrushBounds(stats.selectedBrushBoundsList[1]) then
+        logInfo("first_brush_bounds_min=" <&
+            stats.selectedBrushBoundsList[1].minX <& " " <&
+            stats.selectedBrushBoundsList[1].minY <& " " <&
+            stats.selectedBrushBoundsList[1].minZ);
+        logInfo("first_brush_bounds_max=" <&
+            stats.selectedBrushBoundsList[1].maxX <& " " <&
+            stats.selectedBrushBoundsList[1].maxY <& " " <&
+            stats.selectedBrushBoundsList[1].maxZ);
+        if stats.selectedBrushBoundsList[1].materialName <> "" then
+          logInfo("first_brush_bounds_material=" <&
+              stats.selectedBrushBoundsList[1].materialName);
+        end if;
+      end if;
+      logInfo("selected_origin_vectors=" <& stats.selectedOriginVectors);
+      if stats.selectedBoundsValid then
+        logInfo("selected_origin_bounds_min=" <& stats.selectedMinX <& " " <&
+            stats.selectedMinY <& " " <& stats.selectedMinZ);
+        logInfo("selected_origin_bounds_max=" <& stats.selectedMaxX <& " " <&
+            stats.selectedMaxY <& " " <& stats.selectedMaxZ);
+      end if;
+      logInfo("selected_lights=" <& stats.selectedLights <& " origin=" <&
+          stats.selectedLightsWithOrigin <& " radius=" <&
+          stats.selectedLightsWithRadius <& " color=" <&
+          stats.selectedLightsWithColor);
+      if stats.firstLightName <> "" then
+        logInfo("first_light_name=" <& stats.firstLightName);
+      end if;
+      if stats.firstLightOrigin <> "" then
+        logInfo("first_light_origin=" <& stats.firstLightOrigin);
+      end if;
+      if stats.firstLightRadius <> "" then
+        logInfo("first_light_radius=" <& stats.firstLightRadius);
+      end if;
+      if stats.firstLightColor <> "" then
+        logInfo("first_light_color=" <& stats.firstLightColor);
+      end if;
+      logInfo("selected_map_keys origin=" <& stats.selectedMapWithOrigin <&
+          " model=" <& stats.selectedMapWithModel <& " target=" <&
+          stats.selectedMapWithTarget <& " bounds=" <&
+          stats.selectedMapWithBounds);
+      logInfo("selected_target_refs=" <& stats.selectedTargetRefs <&
+          " unique=" <& length(stats.selectedTargetNames) <&
+          " named_entities=" <& length(stats.selectedEntityNames) <&
+          " resolved=" <& resolvedTargetRefs <& " missing=" <&
+          missingTargetRefs);
+      if stats.firstTargetRef <> "" then
+        logInfo("first_target_ref=" <& stats.firstTargetRef);
+      end if;
+      if missingTarget <> "" then
+        logWarn("first selected target without entity name: " <& missingTarget);
+      end if;
+      if stats.firstSpawnClass <> "" then
+        logInfo("first_spawn_class=" <& stats.firstSpawnClass);
+        if stats.firstSpawnName <> "" then
+          logInfo("first_spawn_name=" <& stats.firstSpawnName);
+        end if;
+        if stats.firstSpawnOrigin <> "" then
+          logInfo("first_spawn_origin=" <& stats.firstSpawnOrigin);
+        end if;
+        if stats.firstSpawnModel <> "" then
+          logInfo("first_spawn_model=" <& stats.firstSpawnModel);
+        end if;
+        if stats.firstSpawnTarget <> "" then
+          logInfo("first_spawn_target=" <& stats.firstSpawnTarget);
+        end if;
+      end if;
+      logInfo("worldspawn_found=" <& stats.worldspawnFound);
+      logInfo("player_start_found=" <& stats.playerStartFound);
+      logInfo("player_start_parsed=" <& stats.playerStartParsed);
+      if stats.playerStartOrigin <> "" then
+        logInfo("player_start_origin=" <& stats.playerStartOrigin);
+      end if;
+      if stats.playerStartAngle <> "" then
+        logInfo("player_start_angle=" <& stats.playerStartAngle);
+      end if;
+      if stats.playerStartParsed then
+        logInfo("player_spawn_x=" <& stats.playerStartX);
+        logInfo("player_spawn_y=" <& stats.playerStartY);
+        logInfo("player_spawn_z=" <& stats.playerStartZ);
+        logInfo("player_spawn_yaw=" <& stats.playerStartYaw);
+        logInfo("player_spawn_blocking_bounds=" <& playerSpawnBlockingBounds);
+        logInfo("player_spawn_blocking_runtime_entities=" <&
+            playerSpawnBlockingEntities);
+        logInfo("player_spawn_clear=" <&
+            (playerSpawnBlockingBounds = 0 and playerSpawnBlockingEntities = 0));
+        logInfo("player_forward_probe_x=" <& playerProbeX);
+        logInfo("player_forward_probe_y=" <& playerProbeY);
+        logInfo("player_forward_probe_blocking_bounds=" <&
+            playerProbeBlockingBounds);
+        logInfo("player_forward_probe_blocking_runtime_entities=" <&
+            playerProbeBlockingEntities);
+        logInfo("player_forward_probe_clear=" <&
+            (playerProbeBlockingBounds = 0 and playerProbeBlockingEntities = 0));
+        logInfo("player_first_move_accepted=" <& playerFirstMoveAccepted);
+        logInfo("player_first_move_x=" <& playerFirstMoveX);
+        logInfo("player_first_move_y=" <& playerFirstMoveY);
+        logInfo("player_sim_requested_steps=" <& PLAYER_SIM_STEPS);
+        logInfo("player_sim_accepted_steps=" <& playerSimAcceptedSteps);
+        logInfo("player_sim_stopped_by_collision=" <&
+            playerSimStoppedByCollision);
+        logInfo("player_sim_blocking_bounds=" <& playerSimBlockingBounds);
+        logInfo("player_sim_blocking_runtime_entities=" <&
+            playerSimBlockingEntities);
+        logInfo("player_sim_final_x=" <& playerSimX);
+        logInfo("player_sim_final_y=" <& playerSimY);
+        logInfo("trigger_touch_radius=" <& TRIGGER_TOUCH_RADIUS);
+        logInfo("touched_triggers=" <& touchedTriggers);
+        logInfo("resolved_touched_trigger_targets=" <& resolvedTouchedTargets);
+        if firstTouchedName <> "" then
+          logInfo("first_touched_trigger=" <& firstTouchedName);
+        end if;
+        if firstTouchedTarget <> "" then
+          logInfo("first_touched_trigger_target=" <& firstTouchedTarget);
+          logInfo("first_touched_trigger_target_resolved=" <&
+              hasEntityNamed(stats, firstTouchedTarget));
+        end if;
+        logInfo("activated_doors=" <& activatedDoors);
+        logInfo("activated_runtime_doors=" <& activatedRuntimeDoors);
+        if firstActivatedDoor <> "" then
+          logInfo("first_activated_door=" <& firstActivatedDoor);
+        end if;
+        logInfo("debug_render_grid=" <& DEBUG_RENDER_GRID_SIZE <& "x" <&
+            DEBUG_RENDER_GRID_SIZE);
+        logInfo("debug_render_view_min=" <& debugViewMinX <& " " <&
+            debugViewMinY);
+        logInfo("debug_render_view_max=" <& debugViewMaxX <& " " <&
+            debugViewMaxY);
+        logInfo("debug_render_player_cell=" <& debugPlayerCellX <& " " <&
+            debugPlayerCellY);
+        logInfo("debug_render_visible_brush_bounds=" <&
+            debugVisibleBrushBounds);
+        logInfo("debug_render_visible_lights=" <& debugVisibleLights);
+        logInfo("debug_render_visible_gameplay_entities=" <&
+            debugVisibleGameplayEntities);
+        logInfo("debug_render_visible_activated_doors=" <&
+            debugVisibleActivatedDoors);
+        logInfo("render_queue_surfaces=" <& queuedRenderSurfaces);
+        logInfo("render_queue_lit_surfaces=" <& queuedLitRenderSurfaces);
+        logInfo("render_queue_ready=" <& (queuedRenderSurfaces <> 0));
+        if nearestRenderSurface.visible then
+          logInfo("nearest_render_surface_material=" <&
+              nearestRenderSurface.materialName);
+          logInfo("nearest_render_surface_fallback_color=" <&
+              nearestRenderSurface.fallbackColor);
+          logInfo("nearest_render_surface_distance_sq=" <&
+              nearestRenderSurfaceDistanceSquared);
+          logInfo("nearest_render_surface_lights=" <&
+              nearestRenderSurfaceLights);
+          if nearestRenderSurfaceLightColor <> "" then
+            logInfo("nearest_render_surface_light_color=" <&
+                nearestRenderSurfaceLightColor);
+          end if;
+        end if;
+        logInfo("debug_render_ready=" <& debugRenderReady);
+        if debugRenderReady then
+          for debugRowIndex range 0 to pred(DEBUG_RENDER_GRID_SIZE) do
+            logInfo("debug_render_row_" <& debugRowIndex <& "=" <&
+                debugRenderRow(stats, debugRowIndex, debugViewMinX,
+                debugViewMinY, debugPlayerCellX, debugPlayerCellY,
+                playerSimX, playerSimY));
+          end for;
+        end if;
+        logInfo("world_init_ready=" <& stats.worldspawnFound);
+      else
+        logWarn("player start exists but origin/angle could not be parsed as numbers");
+      end if;
+    else
+      logWarn("requested map was not found in mounted pk4 archives");
+    end if;
+  end func;
+
+const proc: main is func
+  local
+    var doom3Config: config is doom3Config.value;
+    var array string: pk4Files is 0 times "";
+    var string: pk4File is "";
+    var string: targetMapPath is "";
+    var string: targetProcPath is "";
+    var string: targetCmPath is "";
+    var integer: procAssets is 0;
+    var integer: cmAssets is 0;
+    var boolean: targetProcFound is FALSE;
+    var boolean: targetCmFound is FALSE;
+    var archiveStats: stats is archiveStats.value;
+    var archiveStats: totalStats is archiveStats.value;
+  begin
+    parseArgs(config);
+    if config.showHelp then
+      showUsage;
+    else
+      logInfo(VERSION);
+      logInfo("doom3_data_path=" <& config.dataPath);
+      logInfo("doom3_base_path=" <& config.basePath);
+      logInfo("doom3_start_map=" <& config.startMap);
+      logInfo("doom3_render_mode=" <& config.renderMode);
+      logInfo("doom3_save_path=" <& config.savePath);
+      logInfo("doom3_config_path=" <& config.configPath);
+      logInfo("cvars_registered=" <& length(config.cvars));
+      if length(config.cvars) <> 0 then
+        logInfo("first_cvar=" <& config.cvars[1].name <& "=" <&
+            config.cvars[1].value);
+      end if;
+      logInfo("custom_cvars=" <& countCustomCvars(config.cvars));
+      if firstCustomCvarName(config.cvars) <> "" then
+        logInfo("first_custom_cvar=" <& firstCustomCvarName(config.cvars) <&
+            "=" <& cvarValueForName(config.cvars,
+            firstCustomCvarName(config.cvars)));
+      end if;
+      logInfo("cvar_fs_basepath=" <& cvarValueForName(config.cvars,
+          "fs_basepath"));
+      logInfo("cvar_fs_game=" <& cvarValueForName(config.cvars, "fs_game"));
+      targetMapPath := mapNameToAssetPath(config.startMap);
+      targetProcPath := compiledSiblingPath(targetMapPath, ".proc");
+      targetCmPath := compiledSiblingPath(targetMapPath, ".cm");
+      logInfo("target_map_asset=" <& targetMapPath);
+      logInfo("target_compiled_assets proc=" <& targetProcPath <&
+          " cm=" <& targetCmPath);
+      logInfo("commercial Doom 3 assets are external and must not be committed");
+
+      if fileType(config.basePath) <> FILE_DIR then
+        logError("Doom 3 base directory not found: " <& config.basePath);
+        logError("Expected a legal install path containing base/*.pk4");
+      else
+        pk4Files := findPk4Archives(config.basePath);
+        if length(pk4Files) = 0 then
+          logError("No .pk4 archives found in: " <& config.basePath);
+        else
+          logInfo("pk4_archives=" <& length(pk4Files));
+          for pk4File range sort(pk4Files) do
+            logInfo("mount=" <& pk4File);
+            addCompiledCompanionStats(pk4File, targetProcPath, targetCmPath,
+                procAssets, cmAssets, targetProcFound, targetCmFound);
+            stats := scanArchive(pk4File, targetMapPath);
+            mergeStats(totalStats, stats);
+          end for;
+          logInfo("compiled_assets proc=" <& procAssets <& " cm=" <&
+              cmAssets);
+          logInfo("selected_compiled_map proc_found=" <& targetProcFound <&
+              " cm_found=" <& targetCmFound);
+          rebuildRuntimeEntities(totalStats);
+          printStats(totalStats);
+          if totalStats.mapFiles = 0 then
+            logWarn("No .map metadata found yet; renderer/gameplay stages will need map data.");
+          end if;
+          logInfo("Stage 1 asset pipeline complete.");
+        end if;
+      end if;
+    end if;
+  end func;

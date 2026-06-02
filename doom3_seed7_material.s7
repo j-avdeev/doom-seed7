@@ -1,0 +1,544 @@
+(********************************************************************)
+(*  doom3_seed7_material.s7                                         *)
+(*                                                                  *)
+(*  Focused Doom 3 / id Tech 4 material-compatibility probe for     *)
+(*  Seed7. It classifies .mtr declarations into renderer-ready       *)
+(*  features, fallback features, and unsupported shader features.    *)
+(********************************************************************)
+
+$ include "seed7_05.s7i";
+$ include "osfiles.s7i";
+$ include "zip.s7i";
+
+const string: DEFAULT_DATA_PATH is ".";
+const string: DEFAULT_BASE_DIR is "base";
+
+const type: materialConfig is new struct
+    var string: dataPath is DEFAULT_DATA_PATH;
+    var string: basePath is "";
+    var boolean: showHelp is FALSE;
+  end struct;
+
+const type: materialStats is new struct
+    var integer: pk4Archives is 0;
+    var integer: materialFiles is 0;
+    var integer: materialDecls is 0;
+    var integer: uniqueMaterialDecls is 0;
+    var integer: overrideMaterialDecls is 0;
+    var integer: stageBlocks is 0;
+    var integer: blendStages is 0;
+    var integer: additiveStages is 0;
+    var integer: filterStages is 0;
+    var integer: blendFallbackStages is 0;
+    var integer: mapStages is 0;
+    var integer: diffuseMaps is 0;
+    var integer: bumpMaps is 0;
+    var integer: specularMaps is 0;
+    var integer: editorImages is 0;
+    var integer: scrollTransforms is 0;
+    var integer: rotateTransforms is 0;
+    var integer: scaleTransforms is 0;
+    var integer: animatedMaterials is 0;
+    var integer: timeExpressions is 0;
+    var integer: noShadows is 0;
+    var integer: twoSided is 0;
+    var integer: translucent is 0;
+    var integer: nonSolid is 0;
+    var integer: sortDirectives is 0;
+    var integer: guiSurfDirectives is 0;
+    var integer: spectrumDirectives is 0;
+    var integer: unsupportedPrograms is 0;
+    var integer: unsupportedConditionals is 0;
+    var integer: unsupportedCubeMaps is 0;
+    var integer: unsupportedDeforms is 0;
+    var integer: fallbackMaterials is 0;
+    var integer: rendererReadyMaterials is 0;
+    var string: firstMaterialFile is "";
+    var string: firstMaterial is "";
+    var string: firstStageTexture is "";
+    var string: firstFallbackMaterial is "";
+    var string: firstUnsupportedFeature is "";
+    var string: firstAnimatedMaterial is "";
+    var string: firstCompatibilityPath is "";
+    var array string: materialNames is 0 times "";
+  end struct;
+
+const proc: logInfo (in string: msg) is func
+  begin
+    writeln("[material] " <& msg);
+  end func;
+
+const proc: logError (in string: msg) is func
+  begin
+    writeln("[material-error] " <& msg);
+  end func;
+
+const func string: joinPath (in string: leftPath, in string: rightPath) is func
+  result
+    var string: joined is "";
+  begin
+    if leftPath = "" then
+      joined := rightPath;
+    elsif endsWith(leftPath, "/") or endsWith(leftPath, "\\") then
+      joined := leftPath <& rightPath;
+    else
+      joined := leftPath <& "/" <& rightPath;
+    end if;
+  end func;
+
+const func boolean: isPk4Name (in string: fileName) is
+    return endsWith(lower(fileName), ".pk4");
+
+const func string: normalizedAssetPath (in string: filePath) is func
+  result
+    var string: assetPath is "";
+  begin
+    assetPath := replace(lower(filePath), "\\", "/");
+    if endsWith(assetPath, ".tga") or endsWith(assetPath, ".dds") or
+        endsWith(assetPath, ".png") or endsWith(assetPath, ".jpg") then
+      assetPath := assetPath[.. length(assetPath) - 4];
+    end if;
+  end func;
+
+const func boolean: containsString (in array string: values,
+    in string: value) is func
+  result
+    var boolean: found is FALSE;
+  local
+    var string: current is "";
+  begin
+    for current range values do
+      if current = value then
+        found := TRUE;
+      end if;
+    end for;
+  end func;
+
+const proc: appendUnique (inout array string: values, in string: value) is func
+  begin
+    if value <> "" and not containsString(values, value) then
+      values &:= value;
+    end if;
+  end func;
+
+const func string: cleanedToken (in string: token) is func
+  result
+    var string: clean is "";
+  local
+    var integer: idx is 1;
+    var char: ch is ' ';
+  begin
+    clean := trim(token);
+    while idx <= length(clean) do
+      ch := clean[idx];
+      if ch = '"' or ch = '(' or ch = ')' or ch = '{' or ch = '}' or
+          ch = ',' or ch = ';' then
+        clean := clean[.. pred(idx)] & clean[succ(idx) ..];
+      else
+        incr(idx);
+      end if;
+    end while;
+  end func;
+
+const func integer: countOccurrences (in string: content,
+    in string: needle) is func
+  result
+    var integer: count is 0;
+  local
+    var integer: searchPos is 1;
+    var integer: foundPos is 0;
+  begin
+    if needle <> "" then
+      foundPos := pos(content, needle, searchPos);
+      while foundPos <> 0 do
+        count +:= 1;
+        searchPos := foundPos + length(needle);
+        foundPos := pos(content, needle, searchPos);
+      end while;
+    end if;
+  end func;
+
+const func integer: matchingBlockEnd (in string: content,
+    in integer: blockStart) is func
+  result
+    var integer: blockEnd is 0;
+  local
+    var integer: idx is 0;
+    var integer: depth is 0;
+  begin
+    if blockStart <> 0 then
+      idx := blockStart;
+      while idx <= length(content) and blockEnd = 0 do
+        if content[idx] = '{' then
+          incr(depth);
+        elsif content[idx] = '}' then
+          decr(depth);
+          if depth = 0 then
+            blockEnd := idx;
+          end if;
+        end if;
+        incr(idx);
+      end while;
+    end if;
+  end func;
+
+const func string: declNameBeforeBlock (in string: content,
+    in integer: blockStart) is func
+  result
+    var string: declName is "";
+  local
+    var integer: idx is 0;
+    var integer: endPos is 0;
+    var integer: startPos is 0;
+  begin
+    idx := pred(blockStart);
+    while idx >= 1 and
+        (content[idx] = ' ' or content[idx] = '\t' or
+        content[idx] = '\n' or content[idx] = '\r') do
+      decr(idx);
+    end while;
+    endPos := idx;
+    while idx >= 1 and content[idx] <> ' ' and content[idx] <> '\t' and
+        content[idx] <> '\n' and content[idx] <> '\r' and
+        content[idx] <> '}' do
+      decr(idx);
+    end while;
+    startPos := succ(idx);
+    if startPos <= endPos then
+      declName := lower(cleanedToken(content[startPos .. endPos]));
+    end if;
+  end func;
+
+const func string: firstTextureAfter (in string: blockText,
+    in string: directive) is func
+  result
+    var string: textureName is "";
+  local
+    var string: blockLower is "";
+    var integer: directivePos is 0;
+    var array string: tokens is 0 times "";
+  begin
+    blockLower := lower(blockText);
+    directivePos := pos(blockLower, directive, 1);
+    if directivePos <> 0 then
+      tokens := noEmptyStrings(split(blockText[directivePos ..], ' '));
+      if length(tokens) >= 2 then
+        textureName := normalizedAssetPath(cleanedToken(tokens[2]));
+      end if;
+    end if;
+  end func;
+
+const proc: rememberUnsupported (inout materialStats: stats,
+    in string: materialName, in string: featureName) is func
+  begin
+    if stats.firstUnsupportedFeature = "" then
+      stats.firstUnsupportedFeature := materialName <& ":" <& featureName;
+    end if;
+  end func;
+
+const proc: inspectMaterialBlock (inout materialStats: stats,
+    in string: materialName, in string: blockText) is func
+  local
+    var string: blockLower is "";
+    var string: stageTexture is "";
+    var integer: blockStages is 0;
+    var integer: blockUnsupported is 0;
+    var boolean: materialAnimated is FALSE;
+    var boolean: materialFallback is FALSE;
+    var array string: lines is 0 times "";
+    var array string: tokens is 0 times "";
+    var string: line is "";
+    var string: directiveName is "";
+  begin
+    blockLower := lower(blockText);
+    blockStages := countOccurrences(blockLower, "{") - 1;
+    stats.stageBlocks +:= blockStages;
+    stats.blendStages +:= countOccurrences(blockLower, "blend ");
+    stats.additiveStages +:= countOccurrences(blockLower, "blend add");
+    stats.filterStages +:= countOccurrences(blockLower, "blend filter");
+    if stats.blendStages >
+        stats.additiveStages + stats.filterStages then
+      stats.blendFallbackStages +:= stats.blendStages -
+          stats.additiveStages - stats.filterStages;
+      materialFallback := TRUE;
+    end if;
+
+    lines := split(blockText, '\n');
+    for line range lines do
+      tokens := noEmptyStrings(split(lower(trim(line)), ' '));
+      directiveName := "";
+      if length(tokens) >= 2 then
+        directiveName := cleanedToken(tokens[1]);
+      end if;
+      if directiveName = "map" then
+        stats.mapStages +:= 1;
+        if stats.firstStageTexture = "" then
+          stageTexture := normalizedAssetPath(cleanedToken(tokens[2]));
+          if stageTexture <> "" then
+            stats.firstStageTexture := stageTexture;
+          end if;
+        end if;
+      end if;
+    end for;
+    stats.diffuseMaps +:= countOccurrences(blockLower, "diffusemap ");
+    stats.bumpMaps +:= countOccurrences(blockLower, "bumpmap ");
+    stats.specularMaps +:= countOccurrences(blockLower, "specularmap ");
+    stats.editorImages +:= countOccurrences(blockLower, "qer_editorimage ");
+
+    if pos(blockLower, "scroll ", 1) <> 0 then
+      stats.scrollTransforms +:= 1;
+      materialAnimated := TRUE;
+    end if;
+    if pos(blockLower, "rotate ", 1) <> 0 then
+      stats.rotateTransforms +:= 1;
+      materialAnimated := TRUE;
+    end if;
+    if pos(blockLower, "scale ", 1) <> 0 then
+      stats.scaleTransforms +:= 1;
+      materialAnimated := TRUE;
+    end if;
+    if pos(blockLower, "time", 1) <> 0 then
+      stats.timeExpressions +:= 1;
+      materialAnimated := TRUE;
+    end if;
+    if materialAnimated then
+      stats.animatedMaterials +:= 1;
+      if stats.firstAnimatedMaterial = "" then
+        stats.firstAnimatedMaterial := materialName;
+      end if;
+    end if;
+
+    if pos(blockLower, "noshadows", 1) <> 0 then stats.noShadows +:= 1; end if;
+    if pos(blockLower, "twosided", 1) <> 0 then stats.twoSided +:= 1; end if;
+    if pos(blockLower, "translucent", 1) <> 0 then stats.translucent +:= 1; end if;
+    if pos(blockLower, "nonsolid", 1) <> 0 then stats.nonSolid +:= 1; end if;
+    if pos(blockLower, "sort ", 1) <> 0 then stats.sortDirectives +:= 1; end if;
+    if pos(blockLower, "guisurf", 1) <> 0 then stats.guiSurfDirectives +:= 1; end if;
+    if pos(blockLower, "spectrum", 1) <> 0 then stats.spectrumDirectives +:= 1; end if;
+
+    blockUnsupported := countOccurrences(blockLower, "vertexprogram ") +
+        countOccurrences(blockLower, "fragmentprogram ") +
+        countOccurrences(blockLower, "program ");
+    if blockUnsupported <> 0 then
+      stats.unsupportedPrograms +:= blockUnsupported;
+      materialFallback := TRUE;
+      rememberUnsupported(stats, materialName, "gpu_program");
+    end if;
+    if pos(blockLower, "if ", 1) <> 0 then
+      stats.unsupportedConditionals +:= 1;
+      materialFallback := TRUE;
+      rememberUnsupported(stats, materialName, "conditional_stage");
+    end if;
+    if pos(blockLower, "cubemap ", 1) <> 0 then
+      stats.unsupportedCubeMaps +:= 1;
+      materialFallback := TRUE;
+      rememberUnsupported(stats, materialName, "cube_map");
+    end if;
+    if pos(blockLower, "deform ", 1) <> 0 then
+      stats.unsupportedDeforms +:= 1;
+      materialFallback := TRUE;
+      rememberUnsupported(stats, materialName, "deform");
+    end if;
+
+    if materialFallback then
+      stats.fallbackMaterials +:= 1;
+      if stats.firstFallbackMaterial = "" then
+        stats.firstFallbackMaterial := materialName;
+      end if;
+    else
+      stats.rendererReadyMaterials +:= 1;
+      if stats.firstCompatibilityPath = "" then
+        stats.firstCompatibilityPath := materialName <& ":direct";
+      end if;
+    end if;
+  end func;
+
+const proc: inspectMaterialContent (inout materialStats: stats,
+    in string: content) is func
+  local
+    var integer: searchPos is 1;
+    var integer: blockStart is 0;
+    var integer: blockEnd is 0;
+    var string: materialName is "";
+    var string: blockText is "";
+  begin
+    blockStart := pos(content, "{", searchPos);
+    while blockStart <> 0 do
+      materialName := declNameBeforeBlock(content, blockStart);
+      blockEnd := matchingBlockEnd(content, blockStart);
+      if materialName <> "" and blockEnd <> 0 then
+        stats.materialDecls +:= 1;
+        if containsString(stats.materialNames, materialName) then
+          stats.overrideMaterialDecls +:= 1;
+        else
+          appendUnique(stats.materialNames, materialName);
+          stats.uniqueMaterialDecls +:= 1;
+        end if;
+        if stats.firstMaterial = "" then
+          stats.firstMaterial := materialName;
+        end if;
+        blockText := content[blockStart .. blockEnd];
+        inspectMaterialBlock(stats, materialName, blockText);
+      end if;
+      if blockEnd <> 0 then
+        searchPos := succ(blockEnd);
+      else
+        searchPos := succ(blockStart);
+      end if;
+      blockStart := pos(content, "{", searchPos);
+    end while;
+  end func;
+
+const proc: scanArchiveMaterials (inout materialStats: stats,
+    in string: pk4File) is func
+  local
+    var fileSys: zipFs is fileSys.value;
+    var array string: paths is 0 times "";
+    var string: path is "";
+    var string: pathLower is "";
+  begin
+    zipFs := openZip(pk4File);
+    if zipFs = fileSys.value then
+      logError("could not open pk4 archive: " <& pk4File);
+    else
+      paths := readDir(zipFs, RECURSIVE);
+      for path range paths do
+        pathLower := normalizedAssetPath(path);
+        if endsWith(pathLower, ".mtr") then
+          stats.materialFiles +:= 1;
+          if stats.firstMaterialFile = "" then
+            stats.firstMaterialFile := pathLower;
+          end if;
+          inspectMaterialContent(stats, getFile(zipFs, path));
+        end if;
+      end for;
+      close(zipFs);
+    end if;
+  end func;
+
+const func array string: findPk4Archives (in string: basePath) is func
+  result
+    var array string: pk4Files is 0 times "";
+  local
+    var array string: names is 0 times "";
+    var string: name is "";
+  begin
+    if fileType(basePath) = FILE_DIR then
+      names := readDir(basePath);
+      for name range names do
+        if isPk4Name(name) and fileType(joinPath(basePath, name)) = FILE_REGULAR then
+          pk4Files &:= joinPath(basePath, name);
+        end if;
+      end for;
+    end if;
+  end func;
+
+const proc: parseArgs (inout materialConfig: config) is func
+  local
+    var array string: args is 0 times "";
+    var integer: argIdx is 1;
+  begin
+    args := argv(PROGRAM);
+    while argIdx <= length(args) do
+      if args[argIdx] = "--help" or args[argIdx] = "-h" then
+        config.showHelp := TRUE;
+      elsif args[argIdx] = "--doom3_data_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.dataPath := convDosPath(args[argIdx]);
+      elsif args[argIdx] = "--doom3_base_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.basePath := convDosPath(args[argIdx]);
+      elsif args[argIdx] = "+set" and argIdx + 2 <= length(args) then
+        if args[argIdx + 1] = "fs_basepath" then
+          config.dataPath := convDosPath(args[argIdx + 2]);
+        elsif args[argIdx + 1] = "fs_game" then
+          config.basePath := convDosPath(args[argIdx + 2]);
+        end if;
+        argIdx +:= 2;
+      end if;
+      incr(argIdx);
+    end while;
+    if config.basePath = "" then
+      config.basePath := joinPath(config.dataPath, DEFAULT_BASE_DIR);
+    end if;
+  end func;
+
+const proc: showUsage is func
+  begin
+    writeln("Usage:");
+    writeln("  s7 doom3_seed7_material.s7 --doom3_data_path <doom3-root>");
+    writeln("  s7 doom3_seed7_material.s7 +set fs_basepath <doom3-root>");
+    writeln("");
+    writeln("Scans user-owned Doom 3 pk4 files for material compatibility readiness.");
+  end func;
+
+const proc: printStats (in materialStats: stats) is func
+  begin
+    logInfo("pk4_archives=" <& stats.pk4Archives);
+    logInfo("material_files=" <& stats.materialFiles);
+    logInfo("material_decls raw=" <& stats.materialDecls <&
+        " unique=" <& stats.uniqueMaterialDecls <& " overrides=" <&
+        stats.overrideMaterialDecls <& " renderer_ready=" <&
+        stats.rendererReadyMaterials <& " fallback=" <&
+        stats.fallbackMaterials);
+    logInfo("material_stages blocks=" <& stats.stageBlocks <&
+        " blend=" <& stats.blendStages <& " add=" <&
+        stats.additiveStages <& " filter=" <& stats.filterStages <&
+        " fallback_blend=" <& stats.blendFallbackStages);
+    logInfo("material_images map=" <& stats.mapStages <&
+        " diffuse=" <& stats.diffuseMaps <& " bump=" <&
+        stats.bumpMaps <& " specular=" <& stats.specularMaps <&
+        " editor=" <& stats.editorImages);
+    logInfo("material_transforms scroll=" <& stats.scrollTransforms <&
+        " rotate=" <& stats.rotateTransforms <& " scale=" <&
+        stats.scaleTransforms <& " animated=" <& stats.animatedMaterials <&
+        " time_expr=" <& stats.timeExpressions);
+    logInfo("material_flags noshadows=" <& stats.noShadows <&
+        " twosided=" <& stats.twoSided <& " translucent=" <&
+        stats.translucent <& " nonsolid=" <& stats.nonSolid <&
+        " sort=" <& stats.sortDirectives);
+    logInfo("material_surface_hints guisurf=" <& stats.guiSurfDirectives <&
+        " spectrum=" <& stats.spectrumDirectives);
+    logInfo("unsupported_material_features programs=" <&
+        stats.unsupportedPrograms <& " conditionals=" <&
+        stats.unsupportedConditionals <& " cubemaps=" <&
+        stats.unsupportedCubeMaps <& " deforms=" <& stats.unsupportedDeforms);
+    if stats.firstMaterialFile <> "" then logInfo("first_material_file=" <& stats.firstMaterialFile); end if;
+    if stats.firstMaterial <> "" then logInfo("first_material=" <& stats.firstMaterial); end if;
+    if stats.firstStageTexture <> "" then logInfo("first_stage_texture=" <& stats.firstStageTexture); end if;
+    if stats.firstAnimatedMaterial <> "" then logInfo("first_animated_material=" <& stats.firstAnimatedMaterial); end if;
+    if stats.firstFallbackMaterial <> "" then logInfo("first_fallback_material=" <& stats.firstFallbackMaterial); end if;
+    if stats.firstUnsupportedFeature <> "" then logInfo("first_unsupported_feature=" <& stats.firstUnsupportedFeature); end if;
+    if stats.firstCompatibilityPath <> "" then logInfo("first_compatibility_path=" <& stats.firstCompatibilityPath); end if;
+    logInfo("material_probe_ready=" <& (stats.pk4Archives <> 0 and
+        stats.materialFiles <> 0 and stats.materialDecls <> 0 and
+        stats.rendererReadyMaterials <> 0));
+  end func;
+
+const proc: main is func
+  local
+    var materialConfig: config is materialConfig.value;
+    var materialStats: stats is materialStats.value;
+    var array string: pk4Files is 0 times "";
+    var string: pk4File is "";
+  begin
+    parseArgs(config);
+    if config.showHelp then
+      showUsage;
+    else
+      if fileType(config.basePath) <> FILE_DIR then
+        logError("Doom 3 base directory not found: " <& config.basePath);
+      else
+        pk4Files := sort(findPk4Archives(config.basePath));
+        stats.pk4Archives := length(pk4Files);
+        if length(pk4Files) = 0 then
+          logError("No .pk4 archives found in: " <& config.basePath);
+        else
+          for pk4File range pk4Files do
+            scanArchiveMaterials(stats, pk4File);
+          end for;
+          printStats(stats);
+        end if;
+      end if;
+    end if;
+  end func;

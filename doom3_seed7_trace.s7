@@ -1,0 +1,1407 @@
+(********************************************************************)
+(*  doom3_seed7_trace.s7                                            *)
+(*                                                                  *)
+(*  Focused Doom 3 / id Tech 4 world-trace probe for Seed7.         *)
+(*  It reads user-owned pk4 archives, extracts coarse selected-map   *)
+(*  brush bounds and runtime entity blockers/triggers, then runs     *)
+(*  deterministic movement/hitscan-style traces. No commercial data  *)
+(*  is bundled.                                                      *)
+(********************************************************************)
+
+$ include "seed7_05.s7i";
+$ include "osfiles.s7i";
+$ include "zip.s7i";
+$ include "math.s7i";
+
+const string: DEFAULT_DATA_PATH is ".";
+const string: DEFAULT_BASE_DIR is "base";
+const string: DEFAULT_START_MAP is "game/mars_city1";
+const float: PLAYER_TRACE_RADIUS is 16.0;
+const float: ENTITY_RADIUS is 24.0;
+const float: TRIGGER_RADIUS is 32.0;
+const integer: TRACE_STEPS is 32;
+const integer: ENTITY_DEF_INHERIT_LIMIT is 8;
+
+const type: traceConfig is new struct
+    var string: dataPath is DEFAULT_DATA_PATH;
+    var string: basePath is "";
+    var string: startMap is DEFAULT_START_MAP;
+    var boolean: showHelp is FALSE;
+  end struct;
+
+const type: brushBox is new struct
+    var float: minX is 0.0;
+    var float: minY is 0.0;
+    var float: maxX is 0.0;
+    var float: maxY is 0.0;
+    var string: materialName is "";
+    var boolean: complete is FALSE;
+    var boolean: solid is TRUE;
+  end struct;
+
+const type: traceEntity is new struct
+    var string: className is "";
+    var string: entityName is "";
+    var string: target is "";
+    var float: x is 0.0;
+    var float: y is 0.0;
+    var boolean: hasOrigin is FALSE;
+    var boolean: solid is FALSE;
+    var boolean: trigger is FALSE;
+    var boolean: hostile is FALSE;
+    var boolean: hasBounds is FALSE;
+    var float: minX is 0.0;
+    var float: minY is 0.0;
+    var float: maxX is 0.0;
+    var float: maxY is 0.0;
+  end struct;
+
+const type: traceStats is new struct
+    var integer: pk4Archives is 0;
+    var boolean: requestedMapFound is FALSE;
+    var boolean: requestedCollisionFound is FALSE;
+    var string: requestedMapPath is "";
+    var string: requestedCollisionPath is "";
+    var integer: mapEntities is 0;
+    var integer: playerStarts is 0;
+    var boolean: playerParsed is FALSE;
+    var float: playerX is 0.0;
+    var float: playerY is 0.0;
+    var float: playerYaw is 0.0;
+    var array brushBox: brushBoxes is 0 times brushBox.value;
+    var array traceEntity: entities is 0 times traceEntity.value;
+    var integer: materialDecls is 0;
+    var integer: materialNonsolidDecls is 0;
+    var integer: traceBrushMaterialRefs is 0;
+    var integer: traceBrushMaterialDeclared is 0;
+    var integer: traceBrushMaterialSolid is 0;
+    var integer: traceBrushMaterialNonsolid is 0;
+    var integer: entityDefs is 0;
+    var integer: entityDefInherits is 0;
+    var integer: entityDefBounds is 0;
+    var integer: runtimeEntityBounds is 0;
+    var integer: solidEntities is 0;
+    var integer: triggerEntities is 0;
+    var integer: hostileEntities is 0;
+    var integer: collisionModels is 0;
+    var integer: collisionVertexDecls is 0;
+    var integer: collisionEdgeDecls is 0;
+    var integer: collisionPolygonDecls is 0;
+    var integer: collisionBrushDecls is 0;
+    var integer: collisionVertexTotal is 0;
+    var integer: collisionEdgeTotal is 0;
+    var integer: collisionPolygonTotal is 0;
+    var integer: collisionBrushTotal is 0;
+    var integer: collisionPolygonsClassified is 0;
+    var integer: collisionPolygonsBlocking is 0;
+    var integer: collisionPolygonsNonblocking is 0;
+    var integer: collisionPolygonPlanes is 0;
+    var integer: compiledPlaneTests is 0;
+    var integer: compiledSegmentTracePlanes is 0;
+    var integer: compiledSegmentTraceBlockingHits is 0;
+    var integer: compiledSegmentTraceNonblockingSkipped is 0;
+    var integer: compiledSegmentTraceNearestFractionPercent is -1;
+    var integer: movementTraces is 0;
+    var integer: clearMovementTraces is 0;
+    var integer: blockedMovementTraces is 0;
+    var integer: wallTraces is 0;
+    var integer: wallTraceHits is 0;
+    var integer: hitscanTraces is 0;
+    var integer: hitscanEntityHits is 0;
+    var integer: hitscanBoundsTests is 0;
+    var integer: movementHullTests is 0;
+    var integer: touchedTriggers is 0;
+    var integer: resolvedTriggerTargets is 0;
+    var string: firstBlockedTraceReason is "";
+    var string: firstHitscanEntity is "";
+    var string: firstTouchedTrigger is "";
+    var string: firstTouchedTriggerTarget is "";
+    var string: firstEntityDefBoundsClass is "";
+    var string: firstRuntimeBoundsEntity is "";
+    var string: firstTraceMode is "";
+    var string: firstTraceBrushMaterial is "";
+    var string: firstCollisionVersion is "";
+    var string: firstCollisionModelName is "";
+    var string: firstCollisionModelSummary is "";
+    var string: firstCollisionPolygonRecord is "";
+    var string: firstCollisionPolygonPlaneRecord is "";
+    var string: firstCompiledPlaneTraceRecord is "";
+    var string: firstCompiledPlaneSegmentRecord is "";
+    var string: firstCompiledSegmentHitRecord is "";
+    var integer: firstCompiledPlaneFractionPercent is 0;
+    var boolean: firstCollisionPolygonMaterialDeclared is FALSE;
+    var boolean: firstCompiledPlaneTraceHit is FALSE;
+    var boolean: firstCompiledPlaneSegmentHit is FALSE;
+    var boolean: firstCollisionPolygonBlocking is FALSE;
+    var array string: materialNames is 0 times "";
+    var array boolean: materialNonsolidByIndex is 0 times FALSE;
+    var array string: entityDefNames is 0 times "";
+    var array string: entityDefParents is 0 times "";
+    var array string: entityDefBoundsByIndex is 0 times "";
+  end struct;
+
+const proc: logInfo (in string: msg) is func
+  begin
+    writeln("[trace] " <& msg);
+  end func;
+
+const proc: logError (in string: msg) is func
+  begin
+    writeln("[trace-error] " <& msg);
+  end func;
+
+const func string: joinPath (in string: leftPath, in string: rightPath) is func
+  result
+    var string: joined is "";
+  begin
+    if leftPath = "" then
+      joined := rightPath;
+    elsif endsWith(leftPath, "/") or endsWith(leftPath, "\\") then
+      joined := leftPath <& rightPath;
+    else
+      joined := leftPath <& "/" <& rightPath;
+    end if;
+  end func;
+
+const func boolean: isPk4Name (in string: fileName) is
+    return endsWith(lower(fileName), ".pk4");
+
+const func string: normalizedAssetPath (in string: filePath) is
+    return replace(lower(filePath), "\\", "/");
+
+const func string: mapNameToAssetPath (in string: mapName) is func
+  result
+    var string: assetPath is "";
+  begin
+    assetPath := normalizedAssetPath(mapName);
+    if not startsWith(assetPath, "maps/") then
+      assetPath := "maps/" <& assetPath;
+    end if;
+    if not endsWith(assetPath, ".map") then
+      assetPath &:= ".map";
+    end if;
+  end func;
+
+const func string: compiledSiblingPath (in string: mapPath,
+    in string: suffix) is func
+  result
+    var string: sibling is "";
+  begin
+    if endsWith(mapPath, ".map") then
+      sibling := mapPath[.. length(mapPath) - 4] <& suffix;
+    else
+      sibling := mapPath <& suffix;
+    end if;
+  end func;
+
+const func string: cleanedToken (in string: token) is func
+  result
+    var string: clean is "";
+  local
+    var integer: idx is 1;
+    var char: ch is ' ';
+  begin
+    clean := token;
+    while idx <= length(clean) do
+      ch := clean[idx];
+      if ch = '"' or ch = '(' or ch = ')' or ch = '{' or ch = '}' or
+          ch = ',' or ch = ';' then
+        clean := clean[.. pred(idx)] & clean[succ(idx) ..];
+      else
+        incr(idx);
+      end if;
+    end while;
+  end func;
+
+const func integer: countOccurrences (in string: content,
+    in string: token) is func
+  result
+    var integer: count is 0;
+  local
+    var integer: searchPos is 1;
+    var integer: foundPos is 0;
+  begin
+    foundPos := pos(content, token, searchPos);
+    while foundPos <> 0 do
+      count +:= 1;
+      searchPos := foundPos + length(token);
+      foundPos := pos(content, token, searchPos);
+    end while;
+  end func;
+
+const func integer: sumIntegersAfterWord (in string: content,
+    in string: keyName) is func
+  result
+    var integer: total is 0;
+  local
+    var array string: tokens is 0 times "";
+    var integer: tokenIndex is 1;
+    var integer: valueIndex is 0;
+    var integer: value is 0;
+    var boolean: foundValue is FALSE;
+  begin
+    tokens := noEmptyStrings(split(replace(replace(replace(content, "\n", " "),
+        "\r", " "), "\t", " "), ' '));
+    while tokenIndex < length(tokens) do
+      if lower(cleanedToken(tokens[tokenIndex])) = lower(keyName) then
+        foundValue := FALSE;
+        valueIndex := succ(tokenIndex);
+        while valueIndex <= length(tokens) and valueIndex <= tokenIndex + 4 and
+            not foundValue do
+          block
+            value := integer(cleanedToken(tokens[valueIndex]));
+            total +:= value;
+            foundValue := TRUE;
+          exception
+            catch RANGE_ERROR:
+              noop;
+          end block;
+          incr(valueIndex);
+        end while;
+      end if;
+      incr(tokenIndex);
+    end while;
+  end func;
+
+const func string: versionAfterHeader (in string: content,
+    in string: headerName) is func
+  result
+    var string: versionText is "";
+  local
+    var array string: tokens is 0 times "";
+    var integer: tokenIndex is 1;
+  begin
+    tokens := noEmptyStrings(split(replace(replace(replace(content, "\n", " "),
+        "\r", " "), "\t", " "), ' '));
+    while tokenIndex < length(tokens) and versionText = "" do
+      if lower(cleanedToken(tokens[tokenIndex])) = lower(headerName) then
+        versionText := cleanedToken(tokens[succ(tokenIndex)]);
+      end if;
+      incr(tokenIndex);
+    end while;
+  end func;
+
+const proc: addFirstCollisionModelName (inout traceStats: stats,
+    in string: content) is func
+  local
+    var array string: tokens is 0 times "";
+    var integer: tokenIndex is 1;
+    var string: modelName is "";
+  begin
+    tokens := noEmptyStrings(split(replace(replace(replace(content, "\n", " "),
+        "\r", " "), "\t", " "), ' '));
+    while tokenIndex < length(tokens) and stats.firstCollisionModelName = "" do
+      if lower(cleanedToken(tokens[tokenIndex])) = "collisionmodel" then
+        modelName := cleanedToken(tokens[succ(tokenIndex)]);
+        if modelName <> "" then
+          stats.firstCollisionModelName := modelName;
+        end if;
+      end if;
+      incr(tokenIndex);
+    end while;
+  end func;
+
+const func string: declNameAfter (in string: content, in integer: startPos) is func
+  result
+    var string: name is "";
+  local
+    var integer: idx is 0;
+    var integer: nameStart is 0;
+    var integer: nameEnd is 0;
+  begin
+    idx := startPos;
+    while idx <= length(content) and
+        (content[idx] = ' ' or content[idx] = '\t' or
+        content[idx] = '\n' or content[idx] = '\r') do
+      incr(idx);
+    end while;
+    nameStart := idx;
+    while idx <= length(content) and content[idx] <> ' ' and
+        content[idx] <> '\t' and content[idx] <> '\n' and
+        content[idx] <> '\r' and content[idx] <> '{' do
+      incr(idx);
+    end while;
+    nameEnd := pred(idx);
+    if nameEnd >= nameStart then
+      name := cleanedToken(content[nameStart .. nameEnd]);
+    end if;
+  end func;
+
+const func string: quotedValueAfter (in string: content, in string: keyName) is func
+  result
+    var string: value is "";
+  local
+    var string: keyText is "";
+    var integer: keyPos is 0;
+    var integer: keyEnd is 0;
+    var integer: valueStart is 0;
+    var integer: valueEnd is 0;
+  begin
+    keyText := "\"" <& keyName <& "\"";
+    keyPos := pos(lower(content), lower(keyText), 1);
+    if keyPos <> 0 then
+      keyEnd := pos(content, "\"", succ(keyPos));
+      if keyEnd <> 0 then
+        valueStart := pos(content, "\"", succ(keyEnd));
+        if valueStart <> 0 then
+          valueEnd := pos(content, "\"", succ(valueStart));
+          if valueEnd <> 0 then
+            value := content[succ(valueStart) .. pred(valueEnd)];
+          end if;
+        end if;
+      end if;
+    end if;
+  end func;
+
+const func integer: previousCharPos (in string: content, in char: needle,
+    in integer: startPos) is func
+  result
+    var integer: foundPos is 0;
+  local
+    var integer: idx is 0;
+  begin
+    idx := startPos;
+    while idx >= 1 and foundPos = 0 do
+      if content[idx] = needle then
+        foundPos := idx;
+      end if;
+      decr(idx);
+    end while;
+  end func;
+
+const func integer: matchingBlockEnd (in string: content,
+    in integer: blockStart) is func
+  result
+    var integer: blockEnd is 0;
+  local
+    var integer: idx is 0;
+    var integer: depth is 0;
+  begin
+    if blockStart <> 0 then
+      idx := blockStart;
+      while idx <= length(content) and blockEnd = 0 do
+        if content[idx] = '{' then
+          incr(depth);
+        elsif content[idx] = '}' then
+          decr(depth);
+          if depth = 0 then
+            blockEnd := idx;
+          end if;
+        end if;
+        incr(idx);
+      end while;
+    end if;
+  end func;
+
+const func float: vectorComponentOrDefault (in string: text,
+    in integer: component, in float: defaultValue) is func
+  result
+    var float: value is 0.0;
+  local
+    var array string: parts is 0 times "";
+  begin
+    value := defaultValue;
+    parts := noEmptyStrings(split(trim(text), ' '));
+    if component <= length(parts) then
+      block
+        value := float(parts[component]);
+      exception
+        catch RANGE_ERROR:
+          value := defaultValue;
+      end block;
+    end if;
+  end func;
+
+const func float: degreesToRadians (in float: degrees) is
+    return degrees * 3.14159265358979323846 / 180.0;
+
+const func boolean: pointInBrush (in brushBox: box,
+    in float: x, in float: y) is func
+  result
+    var boolean: inside is FALSE;
+  begin
+    inside := box.complete and box.solid and x >= box.minX and
+        x <= box.maxX and y >= box.minY and y <= box.maxY;
+  end func;
+
+const func boolean: stringInArray (in array string: values,
+    in string: value) is func
+  result
+    var boolean: found is FALSE;
+  local
+    var string: current is "";
+  begin
+    for current range values do
+      if current = value then
+        found := TRUE;
+      end if;
+    end for;
+  end func;
+
+const func boolean: tokenLooksMaterial (in string: token) is func
+  result
+    var boolean: looksMaterial is FALSE;
+  begin
+    looksMaterial := startsWith(token, "textures/") or
+        startsWith(token, "materials/") or pos(token, "/", 1) <> 0;
+  end func;
+
+const func boolean: materialIsNonsolid (in traceStats: stats,
+    in string: materialName) is func
+  result
+    var boolean: nonsolid is FALSE;
+  local
+    var integer: idx is 1;
+  begin
+    while idx <= length(stats.materialNames) and not nonsolid do
+      if stats.materialNames[idx] = materialName and
+          stats.materialNonsolidByIndex[idx] then
+        nonsolid := TRUE;
+      end if;
+      incr(idx);
+    end while;
+  end func;
+
+const func boolean: pointTouchesEntity (in traceEntity: entity,
+    in float: x, in float: y, in float: radius) is func
+  result
+    var boolean: touches is FALSE;
+  local
+    var float: dx is 0.0;
+    var float: dy is 0.0;
+  begin
+    if entity.hasOrigin then
+      if entity.hasBounds then
+        touches := x >= entity.x + entity.minX - radius and
+            x <= entity.x + entity.maxX + radius and
+            y >= entity.y + entity.minY - radius and
+            y <= entity.y + entity.maxY + radius;
+      else
+        dx := entity.x - x;
+        dy := entity.y - y;
+        touches := dx * dx + dy * dy <= radius * radius;
+      end if;
+    end if;
+  end func;
+
+const func boolean: namedEntityExists (in array traceEntity: entities,
+    in string: entityName) is func
+  result
+    var boolean: found is FALSE;
+  local
+    var traceEntity: entity is traceEntity.value;
+  begin
+    for entity range entities do
+      if entity.entityName = entityName then
+        found := TRUE;
+      end if;
+    end for;
+  end func;
+
+const proc: addBrushFromBlock (inout traceStats: stats,
+    in string: blockText) is func
+  local
+    var array string: lines is 0 times "";
+    var string: line is "";
+    var string: cleanLine is "";
+    var array string: tokens is 0 times "";
+    var float: nx is 0.0;
+    var float: ny is 0.0;
+    var float: dist is 0.0;
+    var float: planeValue is 0.0;
+    var string: token is "";
+    var brushBox: box is brushBox.value;
+    var boolean: hasMinX is FALSE;
+    var boolean: hasMaxX is FALSE;
+    var boolean: hasMinY is FALSE;
+    var boolean: hasMaxY is FALSE;
+  begin
+    lines := split(blockText, '\n');
+    for line range lines do
+      if startsWith(trim(line), "(") then
+        cleanLine := replace(trim(line), "(", " ");
+        cleanLine := replace(cleanLine, ")", " ");
+        tokens := noEmptyStrings(split(cleanLine, ' '));
+        if box.materialName = "" then
+          for token range tokens do
+            token := lower(cleanedToken(token));
+            if box.materialName = "" and tokenLooksMaterial(token) then
+              box.materialName := token;
+            end if;
+          end for;
+        end if;
+        if length(tokens) >= 4 then
+          block
+            nx := float(cleanedToken(tokens[1]));
+            ny := float(cleanedToken(tokens[2]));
+            dist := float(cleanedToken(tokens[4]));
+            planeValue := -dist;
+            if nx = 1.0 and ny = 0.0 then
+              box.maxX := planeValue;
+              hasMaxX := TRUE;
+            elsif nx = -1.0 and ny = 0.0 then
+              box.minX := -planeValue;
+              hasMinX := TRUE;
+            elsif nx = 0.0 and ny = 1.0 then
+              box.maxY := planeValue;
+              hasMaxY := TRUE;
+            elsif nx = 0.0 and ny = -1.0 then
+              box.minY := -planeValue;
+              hasMinY := TRUE;
+            end if;
+          exception
+            catch RANGE_ERROR:
+              noop;
+          end block;
+        end if;
+      end if;
+    end for;
+    box.complete := hasMinX and hasMaxX and hasMinY and hasMaxY;
+    if box.complete then
+      if box.materialName <> "" then
+        stats.traceBrushMaterialRefs +:= 1;
+        if stringInArray(stats.materialNames, box.materialName) then
+          stats.traceBrushMaterialDeclared +:= 1;
+        end if;
+        box.solid := not materialIsNonsolid(stats, box.materialName);
+        if box.solid then
+          stats.traceBrushMaterialSolid +:= 1;
+        else
+          stats.traceBrushMaterialNonsolid +:= 1;
+        end if;
+        if stats.firstTraceBrushMaterial = "" then
+          stats.firstTraceBrushMaterial := box.materialName;
+        end if;
+      end if;
+      stats.brushBoxes &:= box;
+    end if;
+  end func;
+
+const proc: inspectMaterialContent (inout traceStats: stats,
+    in string: content) is func
+  local
+    var string: contentLower is "";
+    var integer: searchPos is 1;
+    var integer: materialPos is 0;
+    var integer: blockStart is 0;
+    var integer: blockEnd is 0;
+    var string: materialName is "";
+    var string: materialBlock is "";
+    var boolean: nonsolid is FALSE;
+  begin
+    contentLower := lower(content);
+    materialPos := pos(contentLower, "textures/", searchPos);
+    while materialPos <> 0 do
+      materialName := lower(cleanedToken(declNameAfter(content,
+          materialPos)));
+      blockStart := pos(content, "{", materialPos);
+      blockEnd := matchingBlockEnd(content, blockStart);
+      if materialName <> "" and blockStart <> 0 and blockEnd <> 0 and
+          not stringInArray(stats.materialNames, materialName) then
+        materialBlock := lower(content[blockStart .. blockEnd]);
+        nonsolid := pos(materialBlock, "nonsolid", 1) <> 0;
+        stats.materialNames &:= materialName;
+        stats.materialNonsolidByIndex &:= nonsolid;
+        stats.materialDecls +:= 1;
+        if nonsolid then
+          stats.materialNonsolidDecls +:= 1;
+        end if;
+      end if;
+      if blockEnd <> 0 then
+        searchPos := succ(blockEnd);
+      else
+        searchPos := materialPos + length("textures/");
+      end if;
+      materialPos := pos(contentLower, "textures/", searchPos);
+    end while;
+  end func;
+
+const proc: addEntityDefInfo (inout traceStats: stats,
+    in string: className, in string: entityBlock) is func
+  local
+    var string: parentName is "";
+    var string: minsText is "";
+    var string: maxsText is "";
+    var string: boundsText is "";
+  begin
+    stats.entityDefs +:= 1;
+    stats.entityDefNames &:= lower(className);
+    parentName := lower(quotedValueAfter(entityBlock, "inherit"));
+    if parentName <> "" then
+      stats.entityDefInherits +:= 1;
+    end if;
+    minsText := quotedValueAfter(entityBlock, "mins");
+    maxsText := quotedValueAfter(entityBlock, "maxs");
+    if minsText <> "" and maxsText <> "" then
+      boundsText := minsText <& " " <& maxsText;
+      stats.entityDefBounds +:= 1;
+      if stats.firstEntityDefBoundsClass = "" then
+        stats.firstEntityDefBoundsClass := lower(className);
+      end if;
+    end if;
+    stats.entityDefParents &:= parentName;
+    stats.entityDefBoundsByIndex &:= boundsText;
+  end func;
+
+const proc: inspectDefContent (inout traceStats: stats,
+    in string: content) is func
+  local
+    var string: contentLower is "";
+    var integer: searchPos is 1;
+    var integer: defPos is 0;
+    var string: className is "";
+    var integer: blockStart is 0;
+    var integer: blockEnd is 0;
+  begin
+    contentLower := lower(content);
+    defPos := pos(contentLower, "entitydef ", searchPos);
+    while defPos <> 0 do
+      className := lower(declNameAfter(content, defPos + length("entitydef ")));
+      blockStart := pos(content, "{", defPos);
+      blockEnd := matchingBlockEnd(content, blockStart);
+      if className <> "" and blockStart <> 0 and blockEnd <> 0 then
+        addEntityDefInfo(stats, className, content[blockStart .. blockEnd]);
+      end if;
+      searchPos := defPos + length("entitydef ");
+      defPos := pos(contentLower, "entitydef ", searchPos);
+    end while;
+  end func;
+
+const func string: entityDefBoundsForClass (
+    in traceStats: stats, in string: className) is func
+  result
+    var string: boundsText is "";
+  local
+    var string: currentClass is "";
+    var integer: inheritDepth is 0;
+    var integer: defIndex is 1;
+    var boolean: found is FALSE;
+  begin
+    currentClass := lower(className);
+    while currentClass <> "" and inheritDepth < ENTITY_DEF_INHERIT_LIMIT and
+        not found do
+      defIndex := 1;
+      while defIndex <= length(stats.entityDefNames) and not found do
+        if stats.entityDefNames[defIndex] = currentClass then
+          if stats.entityDefBoundsByIndex[defIndex] <> "" then
+            boundsText := stats.entityDefBoundsByIndex[defIndex];
+            found := TRUE;
+          else
+            currentClass := stats.entityDefParents[defIndex];
+          end if;
+        end if;
+        incr(defIndex);
+      end while;
+      incr(inheritDepth);
+    end while;
+  end func;
+
+const proc: bindEntityBounds (inout traceStats: stats,
+    inout traceEntity: entity) is func
+  local
+    var string: boundsText is "";
+  begin
+    boundsText := entityDefBoundsForClass(stats, entity.className);
+    if boundsText <> "" then
+      entity.minX := vectorComponentOrDefault(boundsText, 1, 0.0);
+      entity.minY := vectorComponentOrDefault(boundsText, 2, 0.0);
+      entity.maxX := vectorComponentOrDefault(boundsText, 4, 0.0);
+      entity.maxY := vectorComponentOrDefault(boundsText, 5, 0.0);
+      entity.hasBounds := TRUE;
+      stats.runtimeEntityBounds +:= 1;
+      if stats.firstRuntimeBoundsEntity = "" then
+        stats.firstRuntimeBoundsEntity := entity.entityName <& "=" <&
+            boundsText;
+      end if;
+    end if;
+  end func;
+
+const proc: inspectBrushes (inout traceStats: stats,
+    in string: content) is func
+  local
+    var string: contentLower is "";
+    var integer: searchPos is 1;
+    var integer: brushPos is 0;
+    var integer: blockStart is 0;
+    var integer: blockEnd is 0;
+  begin
+    contentLower := lower(content);
+    brushPos := pos(contentLower, "brushdef3", searchPos);
+    while brushPos <> 0 do
+      blockStart := pos(content, "{", brushPos);
+      blockEnd := matchingBlockEnd(content, blockStart);
+      if blockStart <> 0 and blockEnd <> 0 then
+        addBrushFromBlock(stats, content[blockStart .. blockEnd]);
+      end if;
+      searchPos := brushPos + length("brushdef3");
+      brushPos := pos(contentLower, "brushdef3", searchPos);
+    end while;
+  end func;
+
+const proc: inspectMapEntity (inout traceStats: stats,
+    in string: entityBlock) is func
+  local
+    var traceEntity: entity is traceEntity.value;
+    var string: originText is "";
+    var string: angleText is "";
+  begin
+    entity.className := lower(quotedValueAfter(entityBlock, "classname"));
+    entity.entityName := quotedValueAfter(entityBlock, "name");
+    entity.target := quotedValueAfter(entityBlock, "target");
+    originText := quotedValueAfter(entityBlock, "origin");
+    if originText <> "" then
+      entity.x := vectorComponentOrDefault(originText, 1, 0.0);
+      entity.y := vectorComponentOrDefault(originText, 2, 0.0);
+      entity.hasOrigin := TRUE;
+    end if;
+    if entity.className <> "" then
+      stats.mapEntities +:= 1;
+      if entity.className = "info_player_start" then
+        stats.playerStarts +:= 1;
+        if entity.hasOrigin then
+          stats.playerParsed := TRUE;
+          stats.playerX := entity.x;
+          stats.playerY := entity.y;
+        end if;
+        angleText := quotedValueAfter(entityBlock, "angle");
+        if angleText <> "" then
+          block
+            stats.playerYaw := float(angleText);
+          exception
+            catch RANGE_ERROR:
+              stats.playerYaw := 0.0;
+          end block;
+        end if;
+      else
+        entity.solid := entity.className = "func_static" or
+            entity.className = "func_door" or
+            entity.className = "mover_door" or
+            startsWith(entity.className, "monster_");
+        entity.trigger := startsWith(entity.className, "trigger_");
+        entity.hostile := startsWith(entity.className, "monster_");
+        bindEntityBounds(stats, entity);
+        if entity.solid then
+          stats.solidEntities +:= 1;
+        end if;
+        if entity.trigger then
+          stats.triggerEntities +:= 1;
+        end if;
+        if entity.hostile then
+          stats.hostileEntities +:= 1;
+        end if;
+        stats.entities &:= entity;
+      end if;
+    end if;
+  end func;
+
+const proc: inspectMapContent (inout traceStats: stats,
+    in string: content) is func
+  local
+    var string: contentLower is "";
+    var integer: searchPos is 1;
+    var integer: classPos is 0;
+    var integer: blockStart is 0;
+    var integer: blockEnd is 0;
+  begin
+    inspectBrushes(stats, content);
+    contentLower := lower(content);
+    classPos := pos(contentLower, "\"classname\"", searchPos);
+    while classPos <> 0 do
+      blockStart := previousCharPos(content, '{', classPos);
+      blockEnd := matchingBlockEnd(content, blockStart);
+      if blockStart <> 0 and blockEnd <> 0 then
+        inspectMapEntity(stats, content[blockStart .. blockEnd]);
+      end if;
+      searchPos := classPos + length("\"classname\"");
+      classPos := pos(contentLower, "\"classname\"", searchPos);
+    end while;
+  end func;
+
+const func string: traceSegment (in traceStats: stats,
+    in float: startX, in float: startY, in float: endX, in float: endY,
+    in boolean: collideBrushes, in boolean: collideEntities,
+    in boolean: hitscanHostilesOnly) is func
+  result
+    var string: hit is "";
+  local
+    var integer: traceStep is 0;
+    var float: t is 0.0;
+    var float: x is 0.0;
+    var float: y is 0.0;
+    var float: entityRadius is 0.0;
+    var brushBox: box is brushBox.value;
+    var traceEntity: entity is traceEntity.value;
+  begin
+    if hitscanHostilesOnly then
+      entityRadius := 0.0;
+    else
+      entityRadius := PLAYER_TRACE_RADIUS;
+    end if;
+    for traceStep range 1 to TRACE_STEPS do
+      t := float(traceStep) / float(TRACE_STEPS);
+      x := startX + (endX - startX) * t;
+      y := startY + (endY - startY) * t;
+      if collideBrushes and hit = "" then
+        for box range stats.brushBoxes do
+          if pointInBrush(box, x, y) then
+            hit := "brush";
+          end if;
+        end for;
+      end if;
+      if collideEntities and hit = "" then
+        for entity range stats.entities do
+          if entity.solid and entity.hasOrigin and
+              (not hitscanHostilesOnly or entity.hostile) and
+              pointTouchesEntity(entity, x, y, entityRadius) then
+            hit := "entity:" <& entity.entityName;
+          end if;
+        end for;
+      end if;
+    end for;
+  end func;
+
+const proc: runTraceProbes (inout traceStats: stats) is func
+  local
+    var float: yawRadians is 0.0;
+    var string: hit is "";
+    var traceEntity: entity is traceEntity.value;
+    var boolean: touched is FALSE;
+  begin
+    if stats.playerParsed then
+      yawRadians := degreesToRadians(stats.playerYaw);
+
+      stats.movementTraces +:= 1;
+      stats.movementHullTests +:= 1;
+      if stats.firstTraceMode = "" then
+        stats.firstTraceMode := "movement_hull";
+      end if;
+      hit := traceSegment(stats, stats.playerX, stats.playerY,
+          stats.playerX + cos(yawRadians) * 32.0,
+          stats.playerY + sin(yawRadians) * 32.0, TRUE, TRUE, FALSE);
+      if hit = "" then
+        stats.clearMovementTraces +:= 1;
+      else
+        stats.blockedMovementTraces +:= 1;
+        if stats.firstBlockedTraceReason = "" then
+          stats.firstBlockedTraceReason := hit;
+        end if;
+      end if;
+
+      stats.wallTraces +:= 1;
+      hit := traceSegment(stats, stats.playerX, stats.playerY,
+          stats.playerX + cos(yawRadians) * 96.0,
+          stats.playerY + sin(yawRadians) * 96.0, TRUE, FALSE, FALSE);
+      if hit = "brush" then
+        stats.wallTraceHits +:= 1;
+        if stats.firstBlockedTraceReason = "" then
+          stats.firstBlockedTraceReason := hit;
+        end if;
+      end if;
+
+      stats.hitscanTraces +:= 1;
+      stats.hitscanBoundsTests +:= 1;
+      hit := traceSegment(stats, stats.playerX, stats.playerY,
+          stats.playerX - cos(yawRadians) * 96.0,
+          stats.playerY - sin(yawRadians) * 96.0, TRUE, TRUE, TRUE);
+      if startsWith(hit, "entity:") then
+        stats.hitscanEntityHits +:= 1;
+        stats.firstHitscanEntity := hit[8 ..];
+      end if;
+
+      for entity range stats.entities do
+        if entity.trigger and entity.hasOrigin and not touched and
+            pointTouchesEntity(entity, stats.playerX + cos(yawRadians) * 48.0,
+            stats.playerY + sin(yawRadians) * 48.0, TRIGGER_RADIUS) then
+          stats.touchedTriggers +:= 1;
+          stats.firstTouchedTrigger := entity.entityName;
+          stats.firstTouchedTriggerTarget := entity.target;
+          if namedEntityExists(stats.entities, entity.target) then
+            stats.resolvedTriggerTargets +:= 1;
+          end if;
+          touched := TRUE;
+        end if;
+      end for;
+    end if;
+  end func;
+
+const func array string: findPk4Archives (in string: basePath) is func
+  result
+    var array string: pk4Files is 0 times "";
+  local
+    var array string: names is 0 times "";
+    var string: name is "";
+  begin
+    if fileType(basePath) = FILE_DIR then
+      names := readDir(basePath);
+      for name range names do
+        if isPk4Name(name) and fileType(joinPath(basePath, name)) = FILE_REGULAR then
+          pk4Files &:= joinPath(basePath, name);
+        end if;
+      end for;
+    end if;
+  end func;
+
+const proc: inspectCollisionContent (inout traceStats: stats,
+    in string: content) is func
+  local
+    var string: contentLower is "";
+    var array string: tokens is 0 times "";
+    var integer: tokenIndex is 1;
+    var boolean: inPolygonPayload is FALSE;
+    var string: materialName is "";
+    var string: contentsName is "";
+    var string: currentMaterialName is "";
+    var string: currentContentsName is "";
+    var boolean: polygonBlocking is FALSE;
+    var string: currentPlaneMaterialName is "";
+    var string: currentPlaneContentsName is "";
+    var boolean: currentPlaneBlocking is FALSE;
+    var integer: planeNx is 0;
+    var integer: planeNy is 0;
+    var integer: planeNz is 0;
+    var integer: planeDist is 0;
+    var integer: testDistance is 0;
+    var integer: segmentStartDistance is 0;
+    var integer: segmentEndDistance is 0;
+    var integer: segmentFractionPercent is 0;
+    var boolean: segmentCrossesPlane is FALSE;
+  begin
+    contentLower := lower(content);
+    stats.firstCollisionVersion := versionAfterHeader(content, "CM");
+    addFirstCollisionModelName(stats, content);
+    stats.collisionModels := countOccurrences(contentLower, "collisionmodel");
+    stats.collisionVertexDecls := countOccurrences(contentLower, "vertices");
+    stats.collisionEdgeDecls := countOccurrences(contentLower, "edges");
+    stats.collisionPolygonDecls := countOccurrences(contentLower, "polygons");
+    stats.collisionBrushDecls := countOccurrences(contentLower, "brushes");
+    stats.collisionVertexTotal := sumIntegersAfterWord(contentLower,
+        "vertices");
+    stats.collisionEdgeTotal := sumIntegersAfterWord(contentLower, "edges");
+    stats.collisionPolygonTotal := sumIntegersAfterWord(contentLower,
+        "polygons");
+    stats.collisionBrushTotal := sumIntegersAfterWord(contentLower, "brushes");
+    if stats.collisionModels <> 0 then
+      stats.firstCollisionModelSummary := "models=" <& stats.collisionModels <&
+          ";vertices=" <& stats.collisionVertexTotal <& ";edges=" <&
+          stats.collisionEdgeTotal <& ";polygons=" <&
+          stats.collisionPolygonTotal <& ";brushes=" <&
+          stats.collisionBrushTotal;
+    end if;
+    tokens := noEmptyStrings(split(replace(replace(replace(contentLower,
+        "\n", " "), "\r", " "), "\t", " "), ' '));
+    while tokenIndex < length(tokens) do
+      if cleanedToken(tokens[tokenIndex]) = "polygons" then
+        inPolygonPayload := TRUE;
+      elsif inPolygonPayload and cleanedToken(tokens[tokenIndex]) = "brushes" then
+        inPolygonPayload := FALSE;
+      elsif inPolygonPayload and cleanedToken(tokens[tokenIndex]) = "material" and
+          tokenIndex < length(tokens) then
+        currentMaterialName := cleanedToken(tokens[succ(tokenIndex)]);
+        if materialName = "" then
+          materialName := currentMaterialName;
+        end if;
+      elsif inPolygonPayload and cleanedToken(tokens[tokenIndex]) = "contents" and
+          tokenIndex < length(tokens) then
+        currentContentsName := cleanedToken(tokens[succ(tokenIndex)]);
+        if contentsName = "" then
+          contentsName := currentContentsName;
+        end if;
+        if currentMaterialName <> "" and currentContentsName <> "" then
+          stats.collisionPolygonsClassified +:= 1;
+          polygonBlocking := currentContentsName = "solid" and
+              not materialIsNonsolid(stats, currentMaterialName);
+          if polygonBlocking then
+            stats.collisionPolygonsBlocking +:= 1;
+          else
+            stats.collisionPolygonsNonblocking +:= 1;
+          end if;
+          currentPlaneMaterialName := currentMaterialName;
+          currentPlaneContentsName := currentContentsName;
+          currentPlaneBlocking := polygonBlocking;
+          currentMaterialName := "";
+          currentContentsName := "";
+        end if;
+      elsif inPolygonPayload and cleanedToken(tokens[tokenIndex]) = "plane" and
+          tokenIndex + 4 <= length(tokens) then
+        stats.collisionPolygonPlanes +:= 1;
+        if stats.firstCollisionPolygonPlaneRecord = "" then
+          stats.firstCollisionPolygonPlaneRecord := "normal=" <&
+              cleanedToken(tokens[tokenIndex + 1]) <& " " <&
+              cleanedToken(tokens[tokenIndex + 2]) <& " " <&
+              cleanedToken(tokens[tokenIndex + 3]) <& ";dist=" <&
+              cleanedToken(tokens[tokenIndex + 4]);
+          block
+            planeNx := integer(cleanedToken(tokens[tokenIndex + 1]));
+            planeNy := integer(cleanedToken(tokens[tokenIndex + 2]));
+            planeNz := integer(cleanedToken(tokens[tokenIndex + 3]));
+            planeDist := integer(cleanedToken(tokens[tokenIndex + 4]));
+            testDistance := planeNx * 64 + planeNy * 0 + planeNz * 0 +
+                planeDist;
+            stats.compiledPlaneTests +:= 1;
+            stats.firstCompiledPlaneTraceHit := testDistance = 0;
+            stats.firstCompiledPlaneTraceRecord := "point=64 0 0;distance=" <&
+                testDistance <& ";hit=" <& stats.firstCompiledPlaneTraceHit;
+            segmentStartDistance := planeNx * 32 + planeNy * 0 +
+                planeNz * 0 + planeDist;
+            segmentEndDistance := planeNx * 96 + planeNy * 0 +
+                planeNz * 0 + planeDist;
+            stats.compiledSegmentTracePlanes +:= 1;
+            if currentPlaneBlocking then
+              segmentCrossesPlane :=
+                  (segmentStartDistance <= 0 and segmentEndDistance >= 0) or
+                  (segmentStartDistance >= 0 and segmentEndDistance <= 0);
+              if segmentCrossesPlane and
+                  segmentEndDistance <> segmentStartDistance then
+                segmentFractionPercent := segmentStartDistance * 100 div
+                    (segmentStartDistance - segmentEndDistance);
+                stats.compiledSegmentTraceBlockingHits +:= 1;
+                if stats.compiledSegmentTraceNearestFractionPercent < 0 or
+                    segmentFractionPercent <
+                    stats.compiledSegmentTraceNearestFractionPercent then
+                  stats.compiledSegmentTraceNearestFractionPercent :=
+                      segmentFractionPercent;
+                end if;
+                if stats.firstCompiledSegmentHitRecord = "" then
+                  stats.firstCompiledSegmentHitRecord := "material=" <&
+                      currentPlaneMaterialName <& ";contents=" <&
+                      currentPlaneContentsName <& ";fraction_pct=" <&
+                      segmentFractionPercent;
+                end if;
+              end if;
+            else
+              stats.compiledSegmentTraceNonblockingSkipped +:= 1;
+            end if;
+            stats.firstCompiledPlaneSegmentHit :=
+                segmentStartDistance <= 0 and segmentEndDistance >= 0;
+            if stats.firstCompiledPlaneSegmentHit and
+                segmentEndDistance <> segmentStartDistance then
+              stats.firstCompiledPlaneFractionPercent :=
+                  -segmentStartDistance * 100 div
+                  (segmentEndDistance - segmentStartDistance);
+            end if;
+            stats.firstCompiledPlaneSegmentRecord := "start=32 0 0;end=96 0 0" <&
+                ";start_dist=" <& segmentStartDistance <& ";end_dist=" <&
+                segmentEndDistance <& ";hit=" <&
+                stats.firstCompiledPlaneSegmentHit <& ";fraction_pct=" <&
+                stats.firstCompiledPlaneFractionPercent;
+          exception
+            catch RANGE_ERROR:
+              noop;
+          end block;
+        else
+          block
+            planeNx := integer(cleanedToken(tokens[tokenIndex + 1]));
+            planeNy := integer(cleanedToken(tokens[tokenIndex + 2]));
+            planeNz := integer(cleanedToken(tokens[tokenIndex + 3]));
+            planeDist := integer(cleanedToken(tokens[tokenIndex + 4]));
+            segmentStartDistance := planeNx * 32 + planeNy * 0 +
+                planeNz * 0 + planeDist;
+            segmentEndDistance := planeNx * 96 + planeNy * 0 +
+                planeNz * 0 + planeDist;
+            stats.compiledSegmentTracePlanes +:= 1;
+            if currentPlaneBlocking then
+              segmentCrossesPlane :=
+                  (segmentStartDistance <= 0 and segmentEndDistance >= 0) or
+                  (segmentStartDistance >= 0 and segmentEndDistance <= 0);
+              if segmentCrossesPlane and
+                  segmentEndDistance <> segmentStartDistance then
+                segmentFractionPercent := segmentStartDistance * 100 div
+                    (segmentStartDistance - segmentEndDistance);
+                stats.compiledSegmentTraceBlockingHits +:= 1;
+                if stats.compiledSegmentTraceNearestFractionPercent < 0 or
+                    segmentFractionPercent <
+                    stats.compiledSegmentTraceNearestFractionPercent then
+                  stats.compiledSegmentTraceNearestFractionPercent :=
+                      segmentFractionPercent;
+                end if;
+                if stats.firstCompiledSegmentHitRecord = "" then
+                  stats.firstCompiledSegmentHitRecord := "material=" <&
+                      currentPlaneMaterialName <& ";contents=" <&
+                      currentPlaneContentsName <& ";fraction_pct=" <&
+                      segmentFractionPercent;
+                end if;
+              end if;
+            else
+              stats.compiledSegmentTraceNonblockingSkipped +:= 1;
+            end if;
+          exception
+            catch RANGE_ERROR:
+              noop;
+          end block;
+        end if;
+      end if;
+      incr(tokenIndex);
+    end while;
+    if materialName <> "" and contentsName <> "" then
+      stats.firstCollisionPolygonRecord := "material=" <& materialName <&
+          ";contents=" <& contentsName;
+      stats.firstCollisionPolygonMaterialDeclared :=
+          stringInArray(stats.materialNames, materialName);
+      stats.firstCollisionPolygonBlocking := contentsName = "solid" and
+          not materialIsNonsolid(stats, materialName);
+    end if;
+  end func;
+
+const proc: scanArchive (inout traceStats: stats,
+    in string: pk4File, in string: targetMapPath) is func
+  local
+    var fileSys: zipFs is fileSys.value;
+    var array string: paths is 0 times "";
+    var string: path is "";
+  begin
+    zipFs := openZip(pk4File);
+    if zipFs = fileSys.value then
+      logError("could not open pk4 archive: " <& pk4File);
+    else
+      paths := sort(readDir(zipFs, RECURSIVE));
+      for path range paths do
+        if endsWith(normalizedAssetPath(path), ".mtr") then
+          inspectMaterialContent(stats, getFile(zipFs, path));
+        end if;
+      end for;
+      for path range paths do
+        if endsWith(normalizedAssetPath(path), ".def") then
+          inspectDefContent(stats, getFile(zipFs, path));
+        end if;
+      end for;
+      for path range paths do
+        if not stats.requestedMapFound and
+            normalizedAssetPath(path) = targetMapPath then
+          stats.requestedMapFound := TRUE;
+          inspectMapContent(stats, getFile(zipFs, path));
+        elsif not stats.requestedCollisionFound and
+            normalizedAssetPath(path) = stats.requestedCollisionPath then
+          stats.requestedCollisionFound := TRUE;
+          inspectCollisionContent(stats, getFile(zipFs, path));
+        end if;
+      end for;
+      close(zipFs);
+    end if;
+  end func;
+
+const proc: parseArgs (inout traceConfig: config) is func
+  local
+    var array string: args is 0 times "";
+    var integer: argIdx is 1;
+  begin
+    args := argv(PROGRAM);
+    while argIdx <= length(args) do
+      if args[argIdx] = "--help" or args[argIdx] = "-h" then
+        config.showHelp := TRUE;
+      elsif args[argIdx] = "--doom3_data_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.dataPath := convDosPath(args[argIdx]);
+      elsif args[argIdx] = "--doom3_base_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.basePath := convDosPath(args[argIdx]);
+      elsif args[argIdx] = "--doom3_start_map" and argIdx < length(args) then
+        incr(argIdx);
+        config.startMap := args[argIdx];
+      elsif args[argIdx] = "+map" and argIdx < length(args) then
+        incr(argIdx);
+        config.startMap := args[argIdx];
+      elsif args[argIdx] = "+set" and argIdx + 2 <= length(args) then
+        if args[argIdx + 1] = "fs_basepath" then
+          config.dataPath := convDosPath(args[argIdx + 2]);
+        elsif args[argIdx + 1] = "fs_game" then
+          config.basePath := convDosPath(args[argIdx + 2]);
+        end if;
+        argIdx +:= 2;
+      end if;
+      incr(argIdx);
+    end while;
+    if config.basePath = "" then
+      config.basePath := joinPath(config.dataPath, DEFAULT_BASE_DIR);
+    end if;
+  end func;
+
+const proc: showUsage is func
+  begin
+    writeln("Usage:");
+    writeln("  s7 doom3_seed7_trace.s7 --doom3_data_path <doom3-root>");
+    writeln("  s7 doom3_seed7_trace.s7 +set fs_basepath <doom3-root> +map <map>");
+    writeln("");
+    writeln("Scans user-owned Doom 3 pk4 files for world trace readiness.");
+  end func;
+
+const proc: printStats (in traceStats: stats) is func
+  begin
+    logInfo("pk4_archives=" <& stats.pk4Archives);
+    logInfo("requested_map=" <& stats.requestedMapPath);
+    logInfo("requested_map_found=" <& stats.requestedMapFound);
+    logInfo("map_entities=" <& stats.mapEntities <&
+        " player_start=" <& stats.playerStarts);
+    logInfo("trace_materials decls=" <& stats.materialDecls <&
+        " nonsolid=" <& stats.materialNonsolidDecls);
+    logInfo("entity_defs=" <& stats.entityDefs <&
+        " inherits=" <& stats.entityDefInherits <&
+        " bounds=" <& stats.entityDefBounds);
+    logInfo("brush_bounds=" <& length(stats.brushBoxes) <&
+        " complete=" <& length(stats.brushBoxes));
+    logInfo("compiled_collision_map cm_found=" <&
+        stats.requestedCollisionFound <& " collision_models=" <&
+        stats.collisionModels <& " vertex_decls=" <&
+        stats.collisionVertexDecls <& " edge_decls=" <&
+        stats.collisionEdgeDecls <& " polygon_decls=" <&
+        stats.collisionPolygonDecls <& " brush_decls=" <&
+        stats.collisionBrushDecls);
+    logInfo("compiled_collision_geometry vertices=" <&
+        stats.collisionVertexTotal <& " edges=" <&
+        stats.collisionEdgeTotal <& " polygons=" <&
+        stats.collisionPolygonTotal <& " brushes=" <&
+        stats.collisionBrushTotal);
+    logInfo("compiled_collision_polygons classified=" <&
+        stats.collisionPolygonsClassified <& " blocking=" <&
+        stats.collisionPolygonsBlocking <& " nonblocking=" <&
+        stats.collisionPolygonsNonblocking <& " planes=" <&
+        stats.collisionPolygonPlanes);
+    if stats.firstCollisionVersion <> "" then
+      logInfo("compiled_collision_version=" <& stats.firstCollisionVersion);
+    end if;
+    if stats.firstCollisionModelName <> "" then
+      logInfo("compiled_collision_model_name=" <&
+          stats.firstCollisionModelName);
+    end if;
+    logInfo("trace_brush_materials refs=" <&
+        stats.traceBrushMaterialRefs <& " declared=" <&
+        stats.traceBrushMaterialDeclared <& " solid=" <&
+        stats.traceBrushMaterialSolid <& " nonsolid=" <&
+        stats.traceBrushMaterialNonsolid);
+    logInfo("runtime_trace_entities solid=" <& stats.solidEntities <&
+        " trigger=" <& stats.triggerEntities <&
+        " hostile=" <& stats.hostileEntities <&
+        " bounds=" <& stats.runtimeEntityBounds);
+    logInfo("player_start_parsed=" <& stats.playerParsed);
+    logInfo("movement_traces=" <& stats.movementTraces <&
+        " clear=" <& stats.clearMovementTraces <&
+        " blocked=" <& stats.blockedMovementTraces <&
+        " hull_tests=" <& stats.movementHullTests);
+    logInfo("wall_traces=" <& stats.wallTraces <&
+        " brush_hits=" <& stats.wallTraceHits);
+    logInfo("hitscan_traces=" <& stats.hitscanTraces <&
+        " entity_hits=" <& stats.hitscanEntityHits <&
+        " bounds_tests=" <& stats.hitscanBoundsTests);
+    logInfo("trigger_touches=" <& stats.touchedTriggers <&
+        " resolved_targets=" <& stats.resolvedTriggerTargets);
+    if stats.firstBlockedTraceReason <> "" then
+      logInfo("first_blocked_trace_reason=" <& stats.firstBlockedTraceReason);
+    end if;
+    if stats.firstHitscanEntity <> "" then
+      logInfo("first_hitscan_entity=" <& stats.firstHitscanEntity);
+    end if;
+    if stats.firstTouchedTrigger <> "" then
+      logInfo("first_touched_trigger=" <& stats.firstTouchedTrigger);
+      logInfo("first_touched_trigger_target=" <&
+          stats.firstTouchedTriggerTarget);
+    end if;
+    if stats.firstEntityDefBoundsClass <> "" then
+      logInfo("first_trace_entitydef_bounds=" <&
+          stats.firstEntityDefBoundsClass);
+    end if;
+    if stats.firstRuntimeBoundsEntity <> "" then
+      logInfo("first_trace_runtime_bounds=" <&
+          stats.firstRuntimeBoundsEntity);
+    end if;
+    if stats.firstTraceBrushMaterial <> "" then
+      logInfo("first_trace_brush_material=" <&
+          stats.firstTraceBrushMaterial);
+    end if;
+    if stats.firstCollisionModelSummary <> "" then
+      logInfo("first_compiled_collision_model=" <&
+          stats.firstCollisionModelSummary);
+    end if;
+    if stats.firstCollisionPolygonRecord <> "" then
+      logInfo("first_compiled_collision_polygon=" <&
+          stats.firstCollisionPolygonRecord);
+      logInfo("compiled_collision_polygon_material_declared=" <&
+          stats.firstCollisionPolygonMaterialDeclared);
+      logInfo("compiled_collision_polygon_blocking=" <&
+          stats.firstCollisionPolygonBlocking);
+    end if;
+    if stats.firstCollisionPolygonPlaneRecord <> "" then
+      logInfo("first_compiled_collision_plane=" <&
+          stats.firstCollisionPolygonPlaneRecord);
+    end if;
+    logInfo("compiled_plane_tests=" <& stats.compiledPlaneTests);
+    if stats.firstCompiledPlaneTraceRecord <> "" then
+      logInfo("first_compiled_plane_trace=" <&
+          stats.firstCompiledPlaneTraceRecord);
+    end if;
+    if stats.firstCompiledPlaneSegmentRecord <> "" then
+      logInfo("first_compiled_plane_segment=" <&
+          stats.firstCompiledPlaneSegmentRecord);
+    end if;
+    logInfo("compiled_segment_trace planes=" <&
+        stats.compiledSegmentTracePlanes <& " blocking_hits=" <&
+        stats.compiledSegmentTraceBlockingHits <& " nonblocking_skipped=" <&
+        stats.compiledSegmentTraceNonblockingSkipped <&
+        " nearest_fraction_pct=" <&
+        stats.compiledSegmentTraceNearestFractionPercent);
+    if stats.firstCompiledSegmentHitRecord <> "" then
+      logInfo("first_compiled_segment_hit=" <&
+          stats.firstCompiledSegmentHitRecord);
+    end if;
+    if stats.firstTraceMode <> "" then
+      logInfo("first_trace_mode=" <& stats.firstTraceMode);
+    end if;
+    logInfo("trace_probe_ready=" <& (stats.playerParsed and
+        length(stats.brushBoxes) <> 0 and stats.clearMovementTraces <> 0 and
+        stats.wallTraceHits <> 0 and stats.hitscanEntityHits <> 0 and
+        stats.entityDefBounds <> 0 and stats.runtimeEntityBounds <> 0 and
+        stats.requestedCollisionFound and stats.collisionModels <> 0 and
+        stats.firstCollisionVersion <> "" and
+        stats.firstCollisionModelName <> "" and
+        stats.collisionPolygonTotal <> 0 and stats.collisionBrushTotal <> 0 and
+        stats.firstCollisionPolygonRecord <> "" and
+        stats.firstCollisionPolygonMaterialDeclared and
+        stats.firstCollisionPolygonBlocking and
+        stats.collisionPolygonsClassified = stats.collisionPolygonTotal and
+        stats.collisionPolygonsBlocking <> 0 and
+        stats.collisionPolygonsNonblocking <> 0 and
+        stats.collisionPolygonPlanes = stats.collisionPolygonTotal and
+        stats.firstCollisionPolygonPlaneRecord <> "" and
+        stats.compiledPlaneTests <> 0 and
+        stats.firstCompiledPlaneTraceHit and
+        stats.firstCompiledPlaneSegmentHit and
+        stats.firstCompiledPlaneFractionPercent = 50 and
+        stats.compiledSegmentTracePlanes = stats.collisionPolygonPlanes and
+        stats.compiledSegmentTraceBlockingHits <> 0 and
+        stats.compiledSegmentTraceNonblockingSkipped <> 0 and
+        stats.compiledSegmentTraceNearestFractionPercent = 50 and
+        stats.firstCompiledSegmentHitRecord <> "" and
+        stats.traceBrushMaterialDeclared <> 0 and
+        stats.traceBrushMaterialSolid <> 0 and
+        stats.movementHullTests <> 0 and stats.hitscanBoundsTests <> 0));
+  end func;
+
+const proc: main is func
+  local
+    var traceConfig: config is traceConfig.value;
+    var traceStats: stats is traceStats.value;
+    var array string: pk4Files is 0 times "";
+    var string: pk4File is "";
+  begin
+    parseArgs(config);
+    if config.showHelp then
+      showUsage;
+    else
+      stats.requestedMapPath := mapNameToAssetPath(config.startMap);
+      stats.requestedCollisionPath := compiledSiblingPath(stats.requestedMapPath,
+          ".cm");
+      if fileType(config.basePath) <> FILE_DIR then
+        logError("Doom 3 base directory not found: " <& config.basePath);
+      else
+        pk4Files := sort(findPk4Archives(config.basePath));
+        stats.pk4Archives := length(pk4Files);
+        if length(pk4Files) = 0 then
+          logError("No .pk4 archives found in: " <& config.basePath);
+        else
+          for pk4File range pk4Files do
+            scanArchive(stats, pk4File, stats.requestedMapPath);
+          end for;
+          runTraceProbes(stats);
+          printStats(stats);
+        end if;
+      end if;
+    end if;
+  end func;

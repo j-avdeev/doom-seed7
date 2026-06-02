@@ -1,0 +1,719 @@
+(********************************************************************)
+(*  doom3_seed7_submit.s7                                           *)
+(*                                                                  *)
+(*  Focused Doom 3 / id Tech 4 frame-to-render submission probe.    *)
+(*  It binds a selected-map monster through inherited entityDef      *)
+(*  model/anim/skin/spawnclass data and emits a first animated       *)
+(*  renderer submission. No commercial data is bundled.              *)
+(********************************************************************)
+
+$ include "seed7_05.s7i";
+$ include "osfiles.s7i";
+$ include "zip.s7i";
+
+const string: DEFAULT_DATA_PATH is ".";
+const string: DEFAULT_BASE_DIR is "base";
+const string: DEFAULT_START_MAP is "game/mars_city1";
+const integer: SAMPLE_MSEC is 75;
+const integer: INHERIT_LIMIT is 8;
+
+const type: submitConfig is new struct
+    var string: dataPath is DEFAULT_DATA_PATH;
+    var string: basePath is "";
+    var string: startMap is DEFAULT_START_MAP;
+    var string: requestedMapPath is "";
+    var boolean: showHelp is FALSE;
+  end struct;
+
+const type: submitStats is new struct
+    var integer: pk4Archives is 0;
+    var string: requestedMapPath is "";
+    var boolean: requestedMapFound is FALSE;
+    var integer: md5MeshAssets is 0;
+    var integer: md5AnimAssets is 0;
+    var integer: parsedMd5Meshes is 0;
+    var integer: parsedMd5Anims is 0;
+    var integer: meshVerts is 0;
+    var integer: meshTris is 0;
+    var integer: meshWeights is 0;
+    var integer: animFrames is 0;
+    var integer: animFrameRate is 0;
+    var integer: sampleFrame is 0;
+    var integer: nextFrame is 0;
+    var integer: blendPercent is 0;
+    var integer: entityDefs is 0;
+    var integer: monsterCandidates is 0;
+    var integer: modelBound is 0;
+    var integer: animBound is 0;
+    var integer: skinBound is 0;
+    var integer: spawnclassBound is 0;
+    var integer: viewWeaponCandidates is 0;
+    var integer: viewModelBound is 0;
+    var integer: health is 0;
+    var integer: submissions is 0;
+    var integer: viewSubmissions is 0;
+    var string: firstMesh is "";
+    var string: firstAnim is "";
+    var string: firstShader is "";
+    var string: firstMonster is "";
+    var string: firstMonsterClass is "";
+    var string: firstMonsterModel is "";
+    var string: firstMonsterAnim is "";
+    var string: firstMonsterSkin is "";
+    var string: firstMonsterSpawnclass is "";
+    var string: firstWeaponEntity is "";
+    var string: firstWeaponClass is "";
+    var string: firstWeaponViewModel is "";
+    var string: firstSubmission is "";
+    var string: firstSubmissionState is "";
+    var string: firstViewSubmission is "";
+    var array string: meshStems is 0 times "";
+    var array string: animStems is 0 times "";
+    var array string: entityDefNames is 0 times "";
+    var array string: entityDefParents is 0 times "";
+    var array string: entityDefModels is 0 times "";
+    var array string: entityDefViewModels is 0 times "";
+    var array string: entityDefAnims is 0 times "";
+    var array string: entityDefSkins is 0 times "";
+    var array string: entityDefSpawnclasses is 0 times "";
+    var array integer: entityDefHealth is 0 times 0;
+  end struct;
+
+const proc: logInfo (in string: msg) is func
+  begin
+    writeln("[submit] " <& msg);
+  end func;
+
+const proc: logError (in string: msg) is func
+  begin
+    writeln("[submit-error] " <& msg);
+  end func;
+
+const func string: joinPath (in string: leftPath, in string: rightPath) is func
+  result
+    var string: joined is "";
+  begin
+    if leftPath = "" then
+      joined := rightPath;
+    elsif endsWith(leftPath, "/") or endsWith(leftPath, "\\") then
+      joined := leftPath <& rightPath;
+    else
+      joined := leftPath <& "/" <& rightPath;
+    end if;
+  end func;
+
+const func string: normalizedAssetPath (in string: path) is
+    return replace(lower(path), "\\", "/");
+
+const func string: assetStem (in string: path) is func
+  result
+    var string: stem is "";
+  local
+    var integer: dotPos is 0;
+  begin
+    stem := normalizedAssetPath(path);
+    dotPos := rpos(stem, ".");
+    if dotPos <> 0 then
+      stem := stem[.. pred(dotPos)];
+    end if;
+  end func;
+
+const func boolean: isPk4Name (in string: fileName) is
+    return endsWith(lower(fileName), ".pk4");
+
+const func boolean: containsString (in array string: values,
+    in string: needle) is func
+  result
+    var boolean: found is FALSE;
+  local
+    var string: value is "";
+  begin
+    for value range values do
+      if value = needle then
+        found := TRUE;
+      end if;
+    end for;
+  end func;
+
+const proc: appendUniqueString (inout array string: values,
+    in string: value) is func
+  begin
+    if value <> "" and not containsString(values, value) then
+      values &:= value;
+    end if;
+  end func;
+
+const func string: cleanedToken (in string: token) is func
+  result
+    var string: clean is "";
+  local
+    var integer: idx is 1;
+    var char: ch is ' ';
+  begin
+    clean := token;
+    while idx <= length(clean) do
+      ch := clean[idx];
+      if ch = '"' or ch = '(' or ch = ')' or ch = '{' or ch = '}' or
+          ch = ',' or ch = ';' then
+        clean := clean[.. pred(idx)] & clean[succ(idx) ..];
+      else
+        incr(idx);
+      end if;
+    end while;
+  end func;
+
+const func string: valueAfterWord (in string: content,
+    in string: keyName) is func
+  result
+    var string: value is "";
+  local
+    var string: normalizedContent is "";
+    var array string: tokens is 0 times "";
+    var integer: tokenIndex is 1;
+  begin
+    normalizedContent := replace(replace(replace(content, "\n", " "),
+        "\r", " "), "\t", " ");
+    tokens := noEmptyStrings(split(normalizedContent, ' '));
+    while tokenIndex < length(tokens) and value = "" do
+      if lower(cleanedToken(tokens[tokenIndex])) = lower(keyName) then
+        value := cleanedToken(tokens[succ(tokenIndex)]);
+      end if;
+      incr(tokenIndex);
+    end while;
+  end func;
+
+const func integer: integerAfterWord (in string: content,
+    in string: keyName) is func
+  result
+    var integer: value is 0;
+  local
+    var string: token is "";
+  begin
+    token := valueAfterWord(content, keyName);
+    if token <> "" then
+      block
+        value := integer(token);
+      exception
+        catch RANGE_ERROR:
+          value := 0;
+      end block;
+    end if;
+  end func;
+
+const func string: quotedValueAfter (in string: content,
+    in string: keyName) is func
+  result
+    var string: value is "";
+  local
+    var string: keyText is "";
+    var integer: keyPos is 0;
+    var integer: keyEnd is 0;
+    var integer: valueStart is 0;
+    var integer: valueEnd is 0;
+  begin
+    keyText := "\"" <& keyName <& "\"";
+    keyPos := pos(lower(content), lower(keyText), 1);
+    if keyPos <> 0 then
+      keyEnd := pos(content, "\"", succ(keyPos));
+      if keyEnd <> 0 then
+        valueStart := pos(content, "\"", succ(keyEnd));
+        if valueStart <> 0 then
+          valueEnd := pos(content, "\"", succ(valueStart));
+          if valueEnd <> 0 then
+            value := content[succ(valueStart) .. pred(valueEnd)];
+          end if;
+        end if;
+      end if;
+    end if;
+  end func;
+
+const func string: declNameAfter (in string: content,
+    in integer: startPos) is func
+  result
+    var string: declName is "";
+  local
+    var integer: idx is 0;
+  begin
+    idx := startPos;
+    while idx <= length(content) and declName = "" do
+      if content[idx] <> ' ' and content[idx] <> '\t' and
+          content[idx] <> '\n' and content[idx] <> '\r' then
+        while idx <= length(content) and content[idx] <> ' ' and
+            content[idx] <> '\t' and content[idx] <> '\n' and
+            content[idx] <> '\r' and content[idx] <> '{' do
+          declName &:= content[idx];
+          incr(idx);
+        end while;
+      end if;
+      incr(idx);
+    end while;
+  end func;
+
+const func integer: matchingBlockEnd (in string: content,
+    in integer: blockStart) is func
+  result
+    var integer: blockEnd is 0;
+  local
+    var integer: idx is 0;
+    var integer: depth is 0;
+  begin
+    if blockStart <> 0 then
+      idx := blockStart;
+      while idx <= length(content) and blockEnd = 0 do
+        if content[idx] = '{' then
+          incr(depth);
+        elsif content[idx] = '}' then
+          decr(depth);
+          if depth = 0 then
+            blockEnd := idx;
+          end if;
+        end if;
+        incr(idx);
+      end while;
+    end if;
+  end func;
+
+const func string: inheritedValue (in submitStats: stats,
+    in string: className, in string: valueKind) is func
+  result
+    var string: value is "";
+  local
+    var string: searchClass is "";
+    var integer: idx is 1;
+    var integer: depth is 0;
+    var boolean: found is FALSE;
+  begin
+    searchClass := lower(className);
+    while searchClass <> "" and value = "" and depth < INHERIT_LIMIT do
+      idx := 1;
+      found := FALSE;
+      while idx <= length(stats.entityDefNames) and not found do
+        if stats.entityDefNames[idx] = searchClass then
+          found := TRUE;
+          if valueKind = "model" then
+            value := stats.entityDefModels[idx];
+          elsif valueKind = "viewmodel" then
+            value := stats.entityDefViewModels[idx];
+          elsif valueKind = "anim" then
+            value := stats.entityDefAnims[idx];
+          elsif valueKind = "skin" then
+            value := stats.entityDefSkins[idx];
+          elsif valueKind = "spawnclass" then
+            value := stats.entityDefSpawnclasses[idx];
+          end if;
+          if value = "" then
+            searchClass := stats.entityDefParents[idx];
+          else
+            searchClass := "";
+          end if;
+        end if;
+        incr(idx);
+      end while;
+      if not found then
+        searchClass := "";
+      end if;
+      incr(depth);
+    end while;
+  end func;
+
+const func integer: inheritedHealth (in submitStats: stats,
+    in string: className) is func
+  result
+    var integer: health is 0;
+  local
+    var string: searchClass is "";
+    var integer: idx is 1;
+    var integer: depth is 0;
+    var boolean: found is FALSE;
+  begin
+    searchClass := lower(className);
+    while searchClass <> "" and health = 0 and depth < INHERIT_LIMIT do
+      idx := 1;
+      found := FALSE;
+      while idx <= length(stats.entityDefNames) and not found do
+        if stats.entityDefNames[idx] = searchClass then
+          found := TRUE;
+          health := stats.entityDefHealth[idx];
+          if health = 0 then
+            searchClass := stats.entityDefParents[idx];
+          else
+            searchClass := "";
+          end if;
+        end if;
+        incr(idx);
+      end while;
+      if not found then
+        searchClass := "";
+      end if;
+      incr(depth);
+    end while;
+  end func;
+
+const proc: inspectMd5Mesh (inout submitStats: stats,
+    in string: path, in string: content) is func
+  begin
+    stats.md5MeshAssets +:= 1;
+    appendUniqueString(stats.meshStems, assetStem(path));
+    if stats.parsedMd5Meshes = 0 and pos(lower(content), "md5version", 1) <> 0 then
+      stats.parsedMd5Meshes := 1;
+      stats.firstMesh := normalizedAssetPath(path);
+      stats.firstShader := valueAfterWord(content, "shader");
+      stats.meshVerts := integerAfterWord(content, "numverts");
+      stats.meshTris := integerAfterWord(content, "numtris");
+      stats.meshWeights := integerAfterWord(content, "numweights");
+    end if;
+  end func;
+
+const proc: inspectMd5Anim (inout submitStats: stats,
+    in string: path, in string: content) is func
+  local
+    var integer: frameMillis is 0;
+    var integer: sampleMillis is 0;
+  begin
+    stats.md5AnimAssets +:= 1;
+    appendUniqueString(stats.animStems, assetStem(path));
+    if stats.parsedMd5Anims = 0 and pos(lower(content), "md5version", 1) <> 0 then
+      stats.parsedMd5Anims := 1;
+      stats.firstAnim := normalizedAssetPath(path);
+      stats.animFrames := integerAfterWord(content, "numframes");
+      stats.animFrameRate := integerAfterWord(content, "framerate");
+      if stats.animFrames <> 0 and stats.animFrameRate <> 0 then
+        stats.sampleFrame := (stats.animFrameRate * SAMPLE_MSEC div 1000)
+            rem stats.animFrames;
+        stats.nextFrame := (stats.sampleFrame + 1) rem stats.animFrames;
+        frameMillis := 1000 div stats.animFrameRate;
+        if frameMillis <> 0 then
+          sampleMillis := SAMPLE_MSEC rem frameMillis;
+          stats.blendPercent := sampleMillis * 100 div frameMillis;
+        end if;
+      end if;
+    end if;
+  end func;
+
+const proc: inspectDefs (inout submitStats: stats, in string: content) is func
+  local
+    var string: lowerContent is "";
+    var integer: searchPos is 1;
+    var integer: defPos is 0;
+    var integer: blockStart is 0;
+    var integer: blockEnd is 0;
+    var string: blockText is "";
+  begin
+    lowerContent := lower(content);
+    defPos := pos(lowerContent, "entitydef ", searchPos);
+    while defPos <> 0 do
+      blockStart := pos(content, "{", defPos);
+      blockEnd := matchingBlockEnd(content, blockStart);
+      if blockStart <> 0 and blockEnd <> 0 then
+        blockText := content[blockStart .. blockEnd];
+        stats.entityDefs +:= 1;
+        stats.entityDefNames &:= lower(cleanedToken(declNameAfter(content,
+            defPos + length("entitydef "))));
+        stats.entityDefParents &:= lower(quotedValueAfter(blockText, "inherit"));
+        stats.entityDefModels &:= quotedValueAfter(blockText, "model");
+        stats.entityDefViewModels &:= quotedValueAfter(blockText, "model_view");
+        stats.entityDefAnims &:= quotedValueAfter(blockText, "anim");
+        stats.entityDefSkins &:= quotedValueAfter(blockText, "skin");
+        stats.entityDefSpawnclasses &:= quotedValueAfter(blockText, "spawnclass");
+        stats.entityDefHealth &:= integerAfterWord(blockText, "health");
+      end if;
+      searchPos := defPos + length("entitydef ");
+      defPos := pos(lowerContent, "entitydef ", searchPos);
+    end while;
+  end func;
+
+const proc: inspectMap (inout submitStats: stats, in string: content) is func
+  local
+    var string: lowerContent is "";
+    var integer: searchPos is 1;
+    var integer: classPos is 0;
+    var integer: blockStart is 0;
+    var integer: blockEnd is 0;
+    var string: blockText is "";
+    var string: className is "";
+    var string: modelRef is "";
+    var string: animRef is "";
+    var string: skinRef is "";
+    var string: spawnclass is "";
+    var string: viewModelRef is "";
+  begin
+    lowerContent := lower(content);
+    classPos := pos(lowerContent, "\"classname\"", searchPos);
+    while classPos <> 0 do
+      blockStart := rpos(content[.. classPos], "{");
+      blockEnd := matchingBlockEnd(content, blockStart);
+      if blockStart <> 0 and blockEnd <> 0 then
+        blockText := content[blockStart .. blockEnd];
+        className := lower(quotedValueAfter(blockText, "classname"));
+        if startsWith(className, "monster_") and stats.firstMonster = "" then
+          stats.monsterCandidates +:= 1;
+          stats.firstMonster := quotedValueAfter(blockText, "name");
+          stats.firstMonsterClass := className;
+          modelRef := quotedValueAfter(blockText, "model");
+          if modelRef = "" then
+            modelRef := inheritedValue(stats, className, "model");
+          end if;
+          animRef := quotedValueAfter(blockText, "anim");
+          if animRef = "" then
+            animRef := inheritedValue(stats, className, "anim");
+          end if;
+          skinRef := quotedValueAfter(blockText, "skin");
+          if skinRef = "" then
+            skinRef := inheritedValue(stats, className, "skin");
+          end if;
+          spawnclass := quotedValueAfter(blockText, "spawnclass");
+          if spawnclass = "" then
+            spawnclass := inheritedValue(stats, className, "spawnclass");
+          end if;
+          stats.firstMonsterModel := assetStem(modelRef);
+          stats.firstMonsterAnim := assetStem(animRef);
+          stats.firstMonsterSkin := lower(skinRef);
+          stats.firstMonsterSpawnclass := spawnclass;
+          stats.health := inheritedHealth(stats, className);
+          if containsString(stats.meshStems, stats.firstMonsterModel) then
+            stats.modelBound := 1;
+          end if;
+          if containsString(stats.animStems, stats.firstMonsterAnim) then
+            stats.animBound := 1;
+          end if;
+          if stats.firstMonsterSkin <> "" then
+            stats.skinBound := 1;
+          end if;
+          if stats.firstMonsterSpawnclass <> "" then
+            stats.spawnclassBound := 1;
+          end if;
+        elsif startsWith(className, "weapon_") and stats.firstWeaponEntity = "" then
+          stats.viewWeaponCandidates +:= 1;
+          stats.firstWeaponEntity := quotedValueAfter(blockText, "name");
+          stats.firstWeaponClass := className;
+          viewModelRef := quotedValueAfter(blockText, "model_view");
+          if viewModelRef = "" then
+            viewModelRef := inheritedValue(stats, className, "viewmodel");
+          end if;
+          stats.firstWeaponViewModel := assetStem(viewModelRef);
+          if containsString(stats.meshStems, stats.firstWeaponViewModel) then
+            stats.viewModelBound := 1;
+          end if;
+        end if;
+      end if;
+      searchPos := classPos + length("\"classname\"");
+      classPos := pos(lowerContent, "\"classname\"", searchPos);
+    end while;
+  end func;
+
+const proc: buildSubmission (inout submitStats: stats) is func
+  begin
+    if stats.modelBound <> 0 and stats.animBound <> 0 and
+        stats.parsedMd5Meshes <> 0 and stats.parsedMd5Anims <> 0 then
+      stats.submissions := 1;
+      stats.firstSubmission := "entity=" <& stats.firstMonster <&
+          ";mesh=" <& stats.firstMonsterModel <& ";anim=" <&
+          stats.firstMonsterAnim <& ";shader=" <& stats.firstShader <&
+          ";frame=" <& stats.sampleFrame <& ";next=" <& stats.nextFrame <&
+          ";blend=" <& stats.blendPercent <& ";verts=" <&
+          stats.meshVerts <& ";tris=" <& stats.meshTris;
+      stats.firstSubmissionState := "entity=" <& stats.firstMonster <&
+          ";spawnclass=" <& stats.firstMonsterSpawnclass <& ";skin=" <&
+          stats.firstMonsterSkin <& ";health=" <& stats.health <&
+          ";alive=TRUE";
+    end if;
+    if stats.viewModelBound <> 0 and stats.firstWeaponEntity <> "" then
+      stats.viewSubmissions := 1;
+      stats.firstViewSubmission := "entity=" <& stats.firstWeaponEntity <&
+          ";class=" <& stats.firstWeaponClass <& ";mesh=" <&
+          stats.firstWeaponViewModel <& ";view_relative=TRUE;depth_hack=weapon";
+    end if;
+  end func;
+
+const func array string: findPk4Archives (in string: basePath) is func
+  result
+    var array string: pk4Files is 0 times "";
+  local
+    var array string: names is 0 times "";
+    var string: name is "";
+  begin
+    if fileType(basePath) = FILE_DIR then
+      names := readDir(basePath);
+      for name range names do
+        if isPk4Name(name) and fileType(joinPath(basePath, name)) = FILE_REGULAR then
+          pk4Files &:= joinPath(basePath, name);
+        end if;
+      end for;
+    end if;
+  end func;
+
+const proc: scanArchive (inout submitStats: stats,
+    in string: pk4File, in string: requestedMapPath) is func
+  local
+    var fileSys: zipFs is fileSys.value;
+    var array string: paths is 0 times "";
+    var string: path is "";
+    var string: pathLower is "";
+  begin
+    zipFs := openZip(pk4File);
+    if zipFs = fileSys.value then
+      logError("could not open pk4 archive: " <& pk4File);
+    else
+      paths := readDir(zipFs, RECURSIVE);
+      for path range paths do
+        pathLower := normalizedAssetPath(path);
+        if endsWith(pathLower, ".md5mesh") then
+          inspectMd5Mesh(stats, pathLower, getFile(zipFs, path));
+        elsif endsWith(pathLower, ".md5anim") then
+          inspectMd5Anim(stats, pathLower, getFile(zipFs, path));
+        elsif endsWith(pathLower, ".def") or endsWith(pathLower, ".decl") then
+          inspectDefs(stats, getFile(zipFs, path));
+        end if;
+      end for;
+      for path range paths do
+        pathLower := normalizedAssetPath(path);
+        if pathLower = requestedMapPath then
+          stats.requestedMapFound := TRUE;
+          inspectMap(stats, getFile(zipFs, path));
+        end if;
+      end for;
+      close(zipFs);
+    end if;
+  end func;
+
+const func string: mapNameToAssetPath (in string: mapName) is func
+  result
+    var string: assetPath is "";
+  begin
+    assetPath := normalizedAssetPath(mapName);
+    if not startsWith(assetPath, "maps/") then
+      assetPath := "maps/" <& assetPath;
+    end if;
+    if not endsWith(assetPath, ".map") then
+      assetPath &:= ".map";
+    end if;
+  end func;
+
+const proc: parseArgs (inout submitConfig: config) is func
+  local
+    var array string: args is 0 times "";
+    var integer: argIdx is 1;
+  begin
+    args := argv(PROGRAM);
+    while argIdx <= length(args) do
+      if args[argIdx] = "--help" or args[argIdx] = "-h" then
+        config.showHelp := TRUE;
+      elsif args[argIdx] = "--doom3_data_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.dataPath := convDosPath(args[argIdx]);
+      elsif args[argIdx] = "--doom3_base_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.basePath := convDosPath(args[argIdx]);
+      elsif args[argIdx] = "--doom3_start_map" and argIdx < length(args) then
+        incr(argIdx);
+        config.startMap := args[argIdx];
+      elsif args[argIdx] = "+map" and argIdx < length(args) then
+        incr(argIdx);
+        config.startMap := args[argIdx];
+      elsif args[argIdx] = "+set" and argIdx + 2 <= length(args) then
+        if args[argIdx + 1] = "fs_basepath" then
+          config.dataPath := convDosPath(args[argIdx + 2]);
+        elsif args[argIdx + 1] = "fs_game" then
+          config.basePath := convDosPath(args[argIdx + 2]);
+        end if;
+        argIdx +:= 2;
+      end if;
+      incr(argIdx);
+    end while;
+    if config.basePath = "" then
+      config.basePath := joinPath(config.dataPath, DEFAULT_BASE_DIR);
+    end if;
+    config.requestedMapPath := mapNameToAssetPath(config.startMap);
+  end func;
+
+const proc: showUsage is func
+  begin
+    writeln("Usage:");
+    writeln("  s7 doom3_seed7_submit.s7 --doom3_data_path <doom3-root>");
+    writeln("  s7 doom3_seed7_submit.s7 +set fs_basepath <doom3-root> +map <map>");
+    writeln("");
+    writeln("Scans user-owned Doom 3 pk4 files for frame-to-render submission readiness.");
+  end func;
+
+const proc: printStats (in submitStats: stats) is func
+  begin
+    logInfo("pk4_archives=" <& stats.pk4Archives);
+    logInfo("requested_map=" <& stats.requestedMapPath);
+    logInfo("requested_map_found=" <& stats.requestedMapFound);
+    logInfo("submit_assets mesh=" <& stats.md5MeshAssets <&
+        " anim=" <& stats.md5AnimAssets <&
+        " parsed_mesh=" <& stats.parsedMd5Meshes <&
+        " parsed_anim=" <& stats.parsedMd5Anims);
+    logInfo("submit_geometry verts=" <& stats.meshVerts <&
+        " tris=" <& stats.meshTris <& " weights=" <& stats.meshWeights <&
+        " anim_frames=" <& stats.animFrames <&
+        " anim_frame_rate=" <& stats.animFrameRate);
+    logInfo("submit_entity_defs=" <& stats.entityDefs);
+    logInfo("submit_entity candidates=" <& stats.monsterCandidates <&
+        " model_bound=" <& stats.modelBound <& " anim_bound=" <&
+        stats.animBound <& " skin_bound=" <& stats.skinBound <&
+        " spawnclass_bound=" <& stats.spawnclassBound);
+    logInfo("submit_view_weapon candidates=" <& stats.viewWeaponCandidates <&
+        " model_view_bound=" <& stats.viewModelBound);
+    logInfo("submit_frame sample_ms=" <& SAMPLE_MSEC <&
+        " frame=" <& stats.sampleFrame <& " next=" <& stats.nextFrame <&
+        " blend_percent=" <& stats.blendPercent <&
+        " health=" <& stats.health);
+    if stats.firstMesh <> "" then
+      logInfo("first_submit_mesh=" <& stats.firstMesh);
+      logInfo("first_submit_anim=" <& stats.firstAnim);
+      logInfo("first_submit_shader=" <& stats.firstShader);
+    end if;
+    if stats.firstMonster <> "" then
+      logInfo("first_submit_entity=" <& stats.firstMonster);
+      logInfo("first_submit_class=" <& stats.firstMonsterClass);
+      logInfo("first_submit_model=" <& stats.firstMonsterModel);
+      logInfo("first_submit_anim_ref=" <& stats.firstMonsterAnim);
+      logInfo("first_submit_skin=" <& stats.firstMonsterSkin);
+      logInfo("first_submit_spawnclass=" <& stats.firstMonsterSpawnclass);
+    end if;
+    if stats.firstWeaponEntity <> "" then
+      logInfo("first_submit_view_weapon=" <& stats.firstWeaponEntity);
+      logInfo("first_submit_view_weapon_class=" <& stats.firstWeaponClass);
+      logInfo("first_submit_view_model=" <& stats.firstWeaponViewModel);
+    end if;
+    logInfo("submit_drawcalls=" <& stats.submissions);
+    if stats.firstSubmission <> "" then
+      logInfo("first_submit_drawcall=" <& stats.firstSubmission);
+      logInfo("first_submit_state=" <& stats.firstSubmissionState);
+    end if;
+    logInfo("submit_view_drawcalls=" <& stats.viewSubmissions);
+    if stats.firstViewSubmission <> "" then
+      logInfo("first_submit_view_drawcall=" <& stats.firstViewSubmission);
+    end if;
+    logInfo("submit_probe_ready=" <& (stats.pk4Archives <> 0 and
+        stats.requestedMapFound and stats.submissions <> 0 and
+        stats.viewSubmissions <> 0 and stats.skinBound <> 0 and
+        stats.spawnclassBound <> 0 and stats.health <> 0));
+  end func;
+
+const proc: main is func
+  local
+    var submitConfig: config is submitConfig.value;
+    var submitStats: stats is submitStats.value;
+    var array string: archives is 0 times "";
+    var string: archive is "";
+  begin
+    parseArgs(config);
+    if config.showHelp then
+      showUsage;
+    else
+      stats.requestedMapPath := config.requestedMapPath;
+      if fileType(config.basePath) <> FILE_DIR then
+        logError("Doom 3 base directory not found: " <& config.basePath);
+      else
+        archives := sort(findPk4Archives(config.basePath));
+        stats.pk4Archives := length(archives);
+        for archive range archives do
+          scanArchive(stats, archive, config.requestedMapPath);
+        end for;
+        buildSubmission(stats);
+        printStats(stats);
+      end if;
+    end if;
+  end func;

@@ -1,0 +1,575 @@
+(********************************************************************)
+(*  doom3_seed7_pda.s7                                             *)
+(*                                                                  *)
+(*  Focused Doom 3 / id Tech 4 PDA subsystem probe for Seed7. It   *)
+(*  reads user-owned pk4 archives, catalogs pda/*.pda assets,      *)
+(*  resolves PDA sound/video/GUI/localized string references, and   *)
+(*  reports readiness for future email/audio-log/PDA runtime flow.  *)
+(*  No commercial data is bundled.                                  *)
+(********************************************************************)
+
+$ include "seed7_05.s7i";
+$ include "osfiles.s7i";
+$ include "zip.s7i";
+
+const string: DEFAULT_DATA_PATH is ".";
+const string: DEFAULT_BASE_DIR is "base";
+const string: DEFAULT_LANGUAGE is "english";
+
+const type: pdaConfig is new struct
+    var string: dataPath is DEFAULT_DATA_PATH;
+    var string: basePath is "";
+    var string: language is DEFAULT_LANGUAGE;
+    var boolean: showHelp is FALSE;
+  end struct;
+
+const type: langEntry is new struct
+    var string: idName is "";
+    var string: value is "";
+  end struct;
+
+const type: pdaStats is new struct
+    var integer: pk4Archives is 0;
+    var integer: pdaAssets is 0;
+    var integer: pdaDefs is 0;
+    var integer: emailEntries is 0;
+    var integer: audioEntries is 0;
+    var integer: videoEntries is 0;
+    var integer: soundRefs is 0;
+    var integer: resolvedSoundRefs is 0;
+    var integer: missingSoundRefs is 0;
+    var integer: videoRefs is 0;
+    var integer: resolvedVideoRefs is 0;
+    var integer: missingVideoRefs is 0;
+    var integer: guiRefs is 0;
+    var integer: resolvedGuiRefs is 0;
+    var integer: missingGuiRefs is 0;
+    var integer: langRefs is 0;
+    var integer: resolvedLangRefs is 0;
+    var integer: missingLangRefs is 0;
+    var integer: pdaRuntimeEntries is 0;
+    var integer: placeholderEntries is 0;
+    var string: firstPdaAsset is "";
+    var string: firstPdaDef is "";
+    var string: firstEmail is "";
+    var string: firstAudio is "";
+    var string: firstVideo is "";
+    var string: firstSoundRef is "";
+    var string: firstVideoRef is "";
+    var string: firstGuiRef is "";
+    var string: firstLangRef is "";
+    var string: firstLangText is "";
+    var string: firstMissingRef is "";
+    var array string: soundAssets is 0 times "";
+    var array string: videoAssets is 0 times "";
+    var array string: guiAssets is 0 times "";
+    var array langEntry: langEntries is 0 times langEntry.value;
+  end struct;
+
+const proc: logInfo (in string: msg) is func
+  begin
+    writeln("[pda] " <& msg);
+  end func;
+
+const proc: logError (in string: msg) is func
+  begin
+    writeln("[pda-error] " <& msg);
+  end func;
+
+const func string: joinPath (in string: leftPath, in string: rightPath) is func
+  result
+    var string: joined is "";
+  begin
+    if leftPath = "" then
+      joined := rightPath;
+    elsif endsWith(leftPath, "/") or endsWith(leftPath, "\\") then
+      joined := leftPath <& rightPath;
+    else
+      joined := leftPath <& "/" <& rightPath;
+    end if;
+  end func;
+
+const func boolean: isPk4Name (in string: fileName) is
+    return endsWith(lower(fileName), ".pk4");
+
+const func string: normalizedAssetPath (in string: filePath) is
+    return replace(lower(filePath), "\\", "/");
+
+const func boolean: containsString (in array string: values,
+    in string: value) is func
+  result
+    var boolean: found is FALSE;
+  local
+    var string: current is "";
+  begin
+    for current range values do
+      if current = value then
+        found := TRUE;
+      end if;
+    end for;
+  end func;
+
+const proc: appendUnique (inout array string: values, in string: value) is func
+  begin
+    if value <> "" and not containsString(values, value) then
+      values &:= value;
+    end if;
+  end func;
+
+const func string: cleanedToken (in string: token) is func
+  result
+    var string: clean is "";
+  local
+    var integer: idx is 1;
+    var char: ch is ' ';
+  begin
+    clean := trim(token);
+    while idx <= length(clean) do
+      ch := clean[idx];
+      if ch = '"' or ch = '(' or ch = ')' or ch = '{' or ch = '}' or
+          ch = ',' or ch = ';' then
+        clean := clean[.. pred(idx)] & clean[succ(idx) ..];
+      else
+        incr(idx);
+      end if;
+    end while;
+  end func;
+
+const func array string: quotedTokens (in string: content) is func
+  result
+    var array string: tokens is 0 times "";
+  local
+    var integer: idx is 1;
+    var integer: startIdx is 1;
+  begin
+    while idx <= length(content) do
+      if content[idx] = '"' then
+        incr(idx);
+        startIdx := idx;
+        while idx <= length(content) and content[idx] <> '"' do
+          incr(idx);
+        end while;
+        if idx > startIdx then
+          tokens &:= content[startIdx .. pred(idx)];
+        end if;
+      end if;
+      incr(idx);
+    end while;
+  end func;
+
+const func integer: countWord (in string: content, in string: word) is func
+  result
+    var integer: count is 0;
+  local
+    var integer: searchPos is 1;
+    var integer: foundPos is 0;
+    var string: lowerContent is "";
+    var string: lowerWord is "";
+  begin
+    lowerContent := lower(content);
+    lowerWord := lower(word);
+    foundPos := pos(lowerContent, lowerWord, searchPos);
+    while foundPos <> 0 do
+      incr(count);
+      searchPos := foundPos + length(lowerWord);
+      foundPos := pos(lowerContent, lowerWord, searchPos);
+    end while;
+  end func;
+
+const func string: tokenAfterWord (in string: content, in string: word) is func
+  result
+    var string: value is "";
+  local
+    var integer: keyPos is 0;
+    var integer: idx is 0;
+    var integer: startIdx is 0;
+  begin
+    keyPos := pos(lower(content), lower(word), 1);
+    if keyPos <> 0 then
+      idx := keyPos + length(word);
+      while idx <= length(content) and content[idx] <= ' ' do
+        incr(idx);
+      end while;
+      startIdx := idx;
+      while idx <= length(content) and content[idx] > ' ' and
+          content[idx] <> '{' and content[idx] <> '"' do
+        incr(idx);
+      end while;
+      if idx > startIdx then
+        value := cleanedToken(content[startIdx .. pred(idx)]);
+      end if;
+    end if;
+  end func;
+
+const func string: langValueForKey (in array langEntry: entries,
+    in string: idName) is func
+  result
+    var string: value is "";
+  local
+    var langEntry: entry is langEntry.value;
+  begin
+    for entry range entries do
+      if entry.idName = idName then
+        value := entry.value;
+      end if;
+    end for;
+  end func;
+
+const proc: putLangEntry (inout pdaStats: stats,
+    in string: idName, in string: value) is func
+  local
+    var integer: idx is 1;
+    var langEntry: entry is langEntry.value;
+  begin
+    if startsWith(idName, "#str_") then
+      while idx <= length(stats.langEntries) and
+          stats.langEntries[idx].idName <> idName do
+        incr(idx);
+      end while;
+      if idx <= length(stats.langEntries) then
+        stats.langEntries[idx].value := value;
+      else
+        entry.idName := idName;
+        entry.value := value;
+        stats.langEntries &:= entry;
+      end if;
+    end if;
+  end func;
+
+const proc: inspectLangFile (inout pdaStats: stats,
+    in string: content) is func
+  local
+    var array string: tokens is 0 times "";
+    var integer: idx is 1;
+  begin
+    tokens := quotedTokens(content);
+    while idx < length(tokens) do
+      if startsWith(tokens[idx], "#str_") then
+        putLangEntry(stats, tokens[idx], tokens[succ(idx)]);
+        incr(idx);
+      end if;
+      incr(idx);
+    end while;
+  end func;
+
+const proc: noteLangRef (inout pdaStats: stats, in string: refValue) is func
+  local
+    var string: resolvedText is "";
+  begin
+    stats.langRefs +:= 1;
+    if stats.firstLangRef = "" then
+      stats.firstLangRef := refValue;
+    end if;
+    resolvedText := langValueForKey(stats.langEntries, refValue);
+    if resolvedText <> "" then
+      stats.resolvedLangRefs +:= 1;
+      if stats.firstLangText = "" then
+        stats.firstLangText := resolvedText;
+      end if;
+    else
+      stats.missingLangRefs +:= 1;
+      stats.placeholderEntries +:= 1;
+      if stats.firstMissingRef = "" then
+        stats.firstMissingRef := refValue;
+      end if;
+    end if;
+  end func;
+
+const proc: noteResolvedAssetRef (inout integer: refs,
+    inout integer: resolvedRefs, inout integer: missingRefs,
+    inout string: firstRef, inout string: firstMissingRef,
+    in array string: assets, in string: refValue) is func
+  begin
+    refs +:= 1;
+    if firstRef = "" then
+      firstRef := refValue;
+    end if;
+    if containsString(assets, refValue) then
+      resolvedRefs +:= 1;
+    else
+      missingRefs +:= 1;
+      if firstMissingRef = "" then
+        firstMissingRef := refValue;
+      end if;
+    end if;
+  end func;
+
+const proc: inspectPdaContent (inout pdaStats: stats,
+    in string: path, in string: content) is func
+  local
+    var array string: tokens is 0 times "";
+    var string: token is "";
+    var string: clean is "";
+  begin
+    stats.pdaAssets +:= 1;
+    if stats.firstPdaAsset = "" then
+      stats.firstPdaAsset := normalizedAssetPath(path);
+    end if;
+    stats.pdaDefs +:= countWord(content, "pda ");
+    stats.emailEntries +:= countWord(content, "email ");
+    stats.audioEntries +:= countWord(content, "audio ");
+    stats.videoEntries +:= countWord(content, "video ");
+    if stats.firstPdaDef = "" then
+      stats.firstPdaDef := tokenAfterWord(content, "pda ");
+    end if;
+    if stats.firstEmail = "" then
+      stats.firstEmail := tokenAfterWord(content, "email ");
+    end if;
+    if stats.firstAudio = "" then
+      stats.firstAudio := tokenAfterWord(content, "audio ");
+    end if;
+    if stats.firstVideo = "" then
+      stats.firstVideo := tokenAfterWord(content, "video ");
+    end if;
+    tokens := quotedTokens(content);
+    for token range tokens do
+      clean := normalizedAssetPath(cleanedToken(token));
+      if startsWith(clean, "sound/") then
+        noteResolvedAssetRef(stats.soundRefs, stats.resolvedSoundRefs,
+            stats.missingSoundRefs, stats.firstSoundRef,
+            stats.firstMissingRef, stats.soundAssets, clean);
+      elsif startsWith(clean, "video/") then
+        noteResolvedAssetRef(stats.videoRefs, stats.resolvedVideoRefs,
+            stats.missingVideoRefs, stats.firstVideoRef,
+            stats.firstMissingRef, stats.videoAssets, clean);
+      elsif startsWith(clean, "guis/") then
+        noteResolvedAssetRef(stats.guiRefs, stats.resolvedGuiRefs,
+            stats.missingGuiRefs, stats.firstGuiRef,
+            stats.firstMissingRef, stats.guiAssets, clean);
+      elsif startsWith(clean, "#str_") then
+        noteLangRef(stats, clean);
+      end if;
+    end for;
+    stats.pdaRuntimeEntries :=
+        stats.emailEntries + stats.audioEntries + stats.videoEntries;
+  end func;
+
+const func boolean: isSoundAsset (in string: path) is func
+  result
+    var boolean: isSound is FALSE;
+  local
+    var string: lowerPath is "";
+  begin
+    lowerPath := normalizedAssetPath(path);
+    isSound := endsWith(lowerPath, ".wav") or endsWith(lowerPath, ".ogg");
+  end func;
+
+const func boolean: isVideoAsset (in string: path) is func
+  result
+    var boolean: isVideo is FALSE;
+  local
+    var string: lowerPath is "";
+  begin
+    lowerPath := normalizedAssetPath(path);
+    isVideo := endsWith(lowerPath, ".roq") or endsWith(lowerPath, ".cin") or
+        endsWith(lowerPath, ".ivf");
+  end func;
+
+const func array string: findPk4Archives (in string: basePath) is func
+  result
+    var array string: pk4Files is 0 times "";
+  local
+    var array string: names is 0 times "";
+    var string: name is "";
+  begin
+    if fileType(basePath) = FILE_DIR then
+      names := readDir(basePath);
+      for name range names do
+        if isPk4Name(name) and fileType(joinPath(basePath, name)) = FILE_REGULAR then
+          pk4Files &:= joinPath(basePath, name);
+        end if;
+      end for;
+    end if;
+  end func;
+
+const proc: scanArchiveCatalog (inout pdaStats: stats,
+    in pdaConfig: config, in string: pk4File) is func
+  local
+    var fileSys: zipFs is fileSys.value;
+    var array string: paths is 0 times "";
+    var string: path is "";
+    var string: pathLower is "";
+  begin
+    zipFs := openZip(pk4File);
+    if zipFs = fileSys.value then
+      logError("could not open pk4 archive: " <& pk4File);
+    else
+      paths := sort(readDir(zipFs, RECURSIVE));
+      for path range paths do
+        pathLower := normalizedAssetPath(path);
+        if isSoundAsset(pathLower) then
+          appendUnique(stats.soundAssets, pathLower);
+        elsif isVideoAsset(pathLower) then
+          appendUnique(stats.videoAssets, pathLower);
+        elsif endsWith(pathLower, ".gui") then
+          appendUnique(stats.guiAssets, pathLower);
+        elsif startsWith(pathLower, "strings/") and
+            endsWith(pathLower, ".lang") and
+            (config.language = "" or
+            pos(pathLower, lower(config.language), 1) <> 0) then
+          inspectLangFile(stats, getFile(zipFs, path));
+        end if;
+      end for;
+      close(zipFs);
+    end if;
+  end func;
+
+const proc: scanArchivePdas (inout pdaStats: stats,
+    in string: pk4File) is func
+  local
+    var fileSys: zipFs is fileSys.value;
+    var array string: paths is 0 times "";
+    var string: path is "";
+    var string: pathLower is "";
+  begin
+    zipFs := openZip(pk4File);
+    if zipFs = fileSys.value then
+      logError("could not open pk4 archive: " <& pk4File);
+    else
+      paths := sort(readDir(zipFs, RECURSIVE));
+      for path range paths do
+        pathLower := normalizedAssetPath(path);
+        if endsWith(pathLower, ".pda") then
+          inspectPdaContent(stats, path, getFile(zipFs, path));
+        end if;
+      end for;
+      close(zipFs);
+    end if;
+  end func;
+
+const proc: parseArgs (inout pdaConfig: config) is func
+  local
+    var array string: args is 0 times "";
+    var integer: argIdx is 1;
+  begin
+    args := argv(PROGRAM);
+    while argIdx <= length(args) do
+      if args[argIdx] = "--help" or args[argIdx] = "-h" then
+        config.showHelp := TRUE;
+      elsif args[argIdx] = "--doom3_data_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.dataPath := convDosPath(args[argIdx]);
+      elsif args[argIdx] = "--doom3_base_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.basePath := convDosPath(args[argIdx]);
+      elsif args[argIdx] = "--doom3_language" and argIdx < length(args) then
+        incr(argIdx);
+        config.language := args[argIdx];
+      elsif args[argIdx] = "+set" and argIdx + 2 <= length(args) then
+        if args[argIdx + 1] = "fs_basepath" then
+          config.dataPath := convDosPath(args[argIdx + 2]);
+        elsif args[argIdx + 1] = "fs_game" then
+          config.basePath := convDosPath(args[argIdx + 2]);
+        elsif args[argIdx + 1] = "sys_lang" then
+          config.language := args[argIdx + 2];
+        end if;
+        argIdx +:= 2;
+      end if;
+      incr(argIdx);
+    end while;
+    if config.basePath = "" then
+      config.basePath := joinPath(config.dataPath, DEFAULT_BASE_DIR);
+    end if;
+  end func;
+
+const proc: showUsage is func
+  begin
+    writeln("Usage:");
+    writeln("  s7 doom3_seed7_pda.s7 --doom3_data_path <doom3-root>");
+    writeln("  s7 doom3_seed7_pda.s7 +set fs_basepath <doom3-root> +set sys_lang english");
+    writeln("");
+    writeln("Scans user-owned Doom 3 pk4 files for PDA/email/audio-log readiness.");
+  end func;
+
+const proc: printStats (in pdaConfig: config, in pdaStats: stats) is func
+  begin
+    logInfo("pk4_archives=" <& stats.pk4Archives);
+    logInfo("language=" <& config.language);
+    logInfo("pda_assets=" <& stats.pdaAssets);
+    logInfo("pda_defs=" <& stats.pdaDefs <&
+        " email=" <& stats.emailEntries <&
+        " audio=" <& stats.audioEntries <&
+        " video=" <& stats.videoEntries);
+    logInfo("pda_refs sound=" <& stats.soundRefs <&
+        " resolved=" <& stats.resolvedSoundRefs <&
+        " missing=" <& stats.missingSoundRefs);
+    logInfo("pda_refs video=" <& stats.videoRefs <&
+        " resolved=" <& stats.resolvedVideoRefs <&
+        " missing=" <& stats.missingVideoRefs);
+    logInfo("pda_refs gui=" <& stats.guiRefs <&
+        " resolved=" <& stats.resolvedGuiRefs <&
+        " missing=" <& stats.missingGuiRefs);
+    logInfo("pda_refs lang=" <& stats.langRefs <&
+        " resolved=" <& stats.resolvedLangRefs <&
+        " missing=" <& stats.missingLangRefs);
+    logInfo("pda_runtime entries=" <& stats.pdaRuntimeEntries <&
+        " placeholders=" <& stats.placeholderEntries);
+    if stats.firstPdaAsset <> "" then
+      logInfo("first_pda_asset=" <& stats.firstPdaAsset);
+    end if;
+    if stats.firstPdaDef <> "" then
+      logInfo("first_pda_def=" <& stats.firstPdaDef);
+    end if;
+    if stats.firstEmail <> "" then
+      logInfo("first_pda_email=" <& stats.firstEmail);
+    end if;
+    if stats.firstAudio <> "" then
+      logInfo("first_pda_audio=" <& stats.firstAudio);
+    end if;
+    if stats.firstVideo <> "" then
+      logInfo("first_pda_video=" <& stats.firstVideo);
+    end if;
+    if stats.firstSoundRef <> "" then
+      logInfo("first_pda_sound_ref=" <& stats.firstSoundRef);
+    end if;
+    if stats.firstVideoRef <> "" then
+      logInfo("first_pda_video_ref=" <& stats.firstVideoRef);
+    end if;
+    if stats.firstGuiRef <> "" then
+      logInfo("first_pda_gui_ref=" <& stats.firstGuiRef);
+    end if;
+    if stats.firstLangRef <> "" then
+      logInfo("first_pda_lang_ref=" <& stats.firstLangRef);
+      logInfo("first_pda_lang_text=" <& stats.firstLangText);
+    end if;
+    if stats.firstMissingRef <> "" then
+      logInfo("first_pda_missing_ref=" <& stats.firstMissingRef);
+    end if;
+    logInfo("pda_probe_ready=" <& (stats.pk4Archives <> 0 and
+        stats.pdaAssets <> 0 and stats.pdaDefs <> 0 and
+        stats.emailEntries <> 0 and stats.audioEntries <> 0 and
+        stats.videoEntries <> 0 and stats.resolvedSoundRefs <> 0 and
+        stats.resolvedVideoRefs <> 0 and stats.resolvedGuiRefs <> 0 and
+        stats.resolvedLangRefs <> 0 and stats.placeholderEntries = 0));
+  end func;
+
+const proc: main is func
+  local
+    var pdaConfig: config is pdaConfig.value;
+    var pdaStats: stats is pdaStats.value;
+    var array string: pk4Files is 0 times "";
+    var string: pk4File is "";
+  begin
+    parseArgs(config);
+    if config.showHelp then
+      showUsage;
+    else
+      if fileType(config.basePath) <> FILE_DIR then
+        logError("Doom 3 base directory not found: " <& config.basePath);
+      else
+        pk4Files := sort(findPk4Archives(config.basePath));
+        stats.pk4Archives := length(pk4Files);
+        if length(pk4Files) = 0 then
+          logError("No .pk4 archives found in: " <& config.basePath);
+        else
+          for pk4File range pk4Files do
+            scanArchiveCatalog(stats, config, pk4File);
+          end for;
+          for pk4File range pk4Files do
+            scanArchivePdas(stats, pk4File);
+          end for;
+          printStats(config, stats);
+        end if;
+      end if;
+    end if;
+  end func;

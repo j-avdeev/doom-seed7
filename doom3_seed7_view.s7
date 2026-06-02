@@ -1,0 +1,563 @@
+(********************************************************************)
+(*  doom3_seed7_view.s7                                            *)
+(*                                                                  *)
+(*  Focused Doom 3 / id Tech 4 renderView/camera subsystem probe   *)
+(*  for Seed7. It reads user-owned pk4 archives, extracts selected *)
+(*  map spawn camera state plus .proc portal metadata, and emits a *)
+(*  deterministic view/projection handoff contract. No commercial  *)
+(*  data is bundled.                                                *)
+(********************************************************************)
+
+$ include "seed7_05.s7i";
+$ include "osfiles.s7i";
+$ include "zip.s7i";
+
+const string: DEFAULT_DATA_PATH is ".";
+const string: DEFAULT_BASE_DIR is "base";
+const string: DEFAULT_START_MAP is "game/mars_city1";
+const float: DEFAULT_FOV_X is 90.0;
+const integer: DEFAULT_VIEW_WIDTH is 1280;
+const integer: DEFAULT_VIEW_HEIGHT is 720;
+const float: DEFAULT_NEAR_Z is 4.0;
+const float: DEFAULT_FAR_Z is 4096.0;
+const float: DEFAULT_WEAPON_FOV is 70.0;
+
+const type: viewConfig is new struct
+    var string: dataPath is DEFAULT_DATA_PATH;
+    var string: basePath is "";
+    var string: startMap is DEFAULT_START_MAP;
+    var float: fovX is DEFAULT_FOV_X;
+    var integer: viewWidth is DEFAULT_VIEW_WIDTH;
+    var integer: viewHeight is DEFAULT_VIEW_HEIGHT;
+    var boolean: showHelp is FALSE;
+  end struct;
+
+const type: viewStats is new struct
+    var integer: pk4Archives is 0;
+    var string: requestedMapPath is "";
+    var string: requestedProcPath is "";
+    var boolean: requestedMapFound is FALSE;
+    var boolean: requestedProcFound is FALSE;
+    var integer: mapEntities is 0;
+    var integer: playerStarts is 0;
+    var boolean: playerParsed is FALSE;
+    var float: playerX is 0.0;
+    var float: playerY is 0.0;
+    var float: playerZ is 0.0;
+    var float: playerYaw is 0.0;
+    var float: forwardX is 0.0;
+    var float: forwardY is 0.0;
+    var float: rightX is 0.0;
+    var float: rightY is 0.0;
+    var float: aspect is 0.0;
+    var float: fovY is 0.0;
+    var integer: frustumPlanes is 0;
+    var integer: viewportX is 0;
+    var integer: viewportY is 0;
+    var integer: viewportWidth is 0;
+    var integer: viewportHeight is 0;
+    var integer: scissorX is 0;
+    var integer: scissorY is 0;
+    var integer: scissorWidth is 0;
+    var integer: scissorHeight is 0;
+    var integer: procModels is 0;
+    var integer: procAreas is 0;
+    var integer: procPortals is 0;
+    var integer: cameraArea is 0;
+    var integer: visibleAreas is 0;
+    var integer: modelViewRefs is 0;
+    var integer: weaponViewModelsResolved is 0;
+    var integer: weaponDepthHackViews is 0;
+    var string: firstPlayerStart is "";
+    var string: firstPlayerOrigin is "";
+    var string: firstViewAxis is "";
+    var string: firstProjection is "";
+    var string: firstViewport is "";
+    var string: firstPortalScope is "";
+    var string: firstWeaponViewModel is "";
+    var string: firstWeaponViewPlan is "";
+  end struct;
+
+const proc: logInfo (in string: msg) is func
+  begin
+    writeln("[view] " <& msg);
+  end func;
+
+const proc: logError (in string: msg) is func
+  begin
+    writeln("[view-error] " <& msg);
+  end func;
+
+const func string: joinPath (in string: leftPath, in string: rightPath) is func
+  result
+    var string: joined is "";
+  begin
+    if leftPath = "" then
+      joined := rightPath;
+    elsif endsWith(leftPath, "/") or endsWith(leftPath, "\\") then
+      joined := leftPath <& rightPath;
+    else
+      joined := leftPath <& "/" <& rightPath;
+    end if;
+  end func;
+
+const func boolean: isPk4Name (in string: fileName) is
+    return endsWith(lower(fileName), ".pk4");
+
+const func string: normalizedAssetPath (in string: filePath) is
+    return replace(lower(filePath), "\\", "/");
+
+const func string: mapNameToAssetPath (in string: mapName) is func
+  result
+    var string: assetPath is "";
+  begin
+    assetPath := normalizedAssetPath(mapName);
+    if not startsWith(assetPath, "maps/") then
+      assetPath := "maps/" <& assetPath;
+    end if;
+    if not endsWith(assetPath, ".map") then
+      assetPath &:= ".map";
+    end if;
+  end func;
+
+const func string: compiledSiblingPath (in string: mapPath,
+    in string: suffix) is func
+  result
+    var string: sibling is "";
+  begin
+    if endsWith(mapPath, ".map") then
+      sibling := mapPath[.. length(mapPath) - 4] <& suffix;
+    else
+      sibling := mapPath <& suffix;
+    end if;
+  end func;
+
+const func string: cleanedToken (in string: token) is func
+  result
+    var string: clean is "";
+  local
+    var integer: idx is 1;
+    var char: ch is ' ';
+  begin
+    clean := trim(token);
+    while idx <= length(clean) do
+      ch := clean[idx];
+      if ch = '"' or ch = '(' or ch = ')' or ch = '{' or ch = '}' or
+          ch = ',' or ch = ';' then
+        clean := clean[.. pred(idx)] & clean[succ(idx) ..];
+      else
+        incr(idx);
+      end if;
+    end while;
+  end func;
+
+const func string: quotedValueAfter (in string: content,
+    in string: keyName) is func
+  result
+    var string: value is "";
+  local
+    var string: keyText is "";
+    var integer: keyPos is 0;
+    var integer: keyEnd is 0;
+    var integer: valueStart is 0;
+    var integer: valueEnd is 0;
+  begin
+    keyText := "\"" <& keyName <& "\"";
+    keyPos := pos(lower(content), lower(keyText), 1);
+    if keyPos <> 0 then
+      keyEnd := pos(content, "\"", succ(keyPos));
+      if keyEnd <> 0 then
+        valueStart := pos(content, "\"", succ(keyEnd));
+        if valueStart <> 0 then
+          valueEnd := pos(content, "\"", succ(valueStart));
+          if valueEnd <> 0 then
+            value := content[succ(valueStart) .. pred(valueEnd)];
+          end if;
+        end if;
+      end if;
+    end if;
+  end func;
+
+const func float: vectorComponentOrDefault (
+    in string: vectorText, in integer: componentIndex,
+    in float: defaultValue) is func
+  result
+    var float: component is 0.0;
+  local
+    var array string: parts is 0 times "";
+  begin
+    component := defaultValue;
+    parts := noEmptyStrings(split(vectorText, ' '));
+    if length(parts) >= componentIndex then
+      block
+        component := float(parts[componentIndex]);
+      exception
+        catch RANGE_ERROR:
+          component := defaultValue;
+      end block;
+    end if;
+  end func;
+
+const func float: degreesToRadians (in float: degrees) is
+    return degrees * 3.14159265358979323846 / 180.0;
+
+const func string: yawBucket (in float: yawDegrees) is func
+  result
+    var string: bucket is "east";
+  begin
+    if yawDegrees >= 135.0 and yawDegrees <= 225.0 then
+      bucket := "west";
+    elsif yawDegrees >= 45.0 and yawDegrees < 135.0 then
+      bucket := "north";
+    elsif yawDegrees > 225.0 and yawDegrees < 315.0 then
+      bucket := "south";
+    end if;
+  end func;
+
+const func string: projectionBucket (in viewStats: stats) is func
+  result
+    var string: bucket is "standard";
+  begin
+    if stats.aspect > 1.7 then
+      bucket := "wide-16x9";
+    elsif stats.aspect > 1.25 then
+      bucket := "standard-4x3";
+    else
+      bucket := "tall";
+    end if;
+  end func;
+
+const proc: inspectMapEntity (inout viewStats: stats,
+    in string: entityBlock) is func
+  local
+    var string: className is "";
+    var string: originText is "";
+    var string: angleText is "";
+  begin
+    className := lower(quotedValueAfter(entityBlock, "classname"));
+    if className <> "" then
+      stats.mapEntities +:= 1;
+      if className = "info_player_start" and not stats.playerParsed then
+        stats.playerStarts +:= 1;
+        stats.firstPlayerStart := quotedValueAfter(entityBlock, "name");
+        originText := quotedValueAfter(entityBlock, "origin");
+        if originText <> "" then
+          stats.playerParsed := TRUE;
+          stats.firstPlayerOrigin := originText;
+          stats.playerX := vectorComponentOrDefault(originText, 1, 0.0);
+          stats.playerY := vectorComponentOrDefault(originText, 2, 0.0);
+          stats.playerZ := vectorComponentOrDefault(originText, 3, 0.0);
+        end if;
+        angleText := quotedValueAfter(entityBlock, "angle");
+        if angleText <> "" then
+          block
+            stats.playerYaw := float(angleText);
+          exception
+            catch RANGE_ERROR:
+              stats.playerYaw := 0.0;
+          end block;
+        end if;
+      elsif className = "info_player_start" then
+        stats.playerStarts +:= 1;
+      end if;
+    end if;
+  end func;
+
+const proc: inspectMapContent (inout viewStats: stats,
+    in string: content) is func
+  local
+    var integer: idx is 1;
+    var integer: blockStart is 0;
+    var integer: depth is 0;
+  begin
+    stats.requestedMapFound := TRUE;
+    while idx <= length(content) do
+      if content[idx] = '{' then
+        if depth = 0 then
+          blockStart := idx;
+        end if;
+        incr(depth);
+      elsif content[idx] = '}' then
+        decr(depth);
+        if depth = 0 and blockStart <> 0 then
+          inspectMapEntity(stats, content[blockStart .. idx]);
+          blockStart := 0;
+        end if;
+      end if;
+      incr(idx);
+    end while;
+  end func;
+
+const proc: inspectProcContent (inout viewStats: stats,
+    in string: content) is func
+  local
+    var integer: portalPos is 0;
+    var integer: bracePos is 0;
+    var string: portalText is "";
+    var string: normalizedPortalText is "";
+    var array string: tokens is 0 times "";
+  begin
+    stats.requestedProcFound := TRUE;
+    if pos(content, "model", 1) <> 0 then
+      stats.procModels := 1;
+    end if;
+    portalPos := pos(content, "interAreaPortals", 1);
+    if portalPos <> 0 then
+      bracePos := pos(content, "{", portalPos);
+      if bracePos <> 0 then
+        portalText := content[succ(bracePos) ..];
+        normalizedPortalText := replace(portalText, "\n", " ");
+        normalizedPortalText := replace(normalizedPortalText, "\r", " ");
+        normalizedPortalText := replace(normalizedPortalText, "\t", " ");
+        tokens := noEmptyStrings(split(normalizedPortalText, ' '));
+        if length(tokens) >= 2 then
+          block
+            stats.procAreas := integer(cleanedToken(tokens[1]));
+            stats.procPortals := integer(cleanedToken(tokens[2]));
+          exception
+            catch RANGE_ERROR:
+              stats.procAreas := 0;
+              stats.procPortals := 0;
+          end block;
+        end if;
+      end if;
+    end if;
+  end func;
+
+const proc: inspectDefContent (inout viewStats: stats,
+    in string: content) is func
+  local
+    var integer: searchPos is 1;
+    var integer: modelViewPos is 0;
+    var string: modelView is "";
+  begin
+    modelViewPos := pos(lower(content), "\"model_view\"", searchPos);
+    while modelViewPos <> 0 do
+      stats.modelViewRefs +:= 1;
+      modelView := normalizedAssetPath(quotedValueAfter(content[modelViewPos ..],
+          "model_view"));
+      if modelView <> "" then
+        stats.weaponViewModelsResolved +:= 1;
+        stats.weaponDepthHackViews +:= 1;
+        if stats.firstWeaponViewModel = "" then
+          stats.firstWeaponViewModel := modelView;
+        end if;
+      end if;
+      searchPos := modelViewPos + length("\"model_view\"");
+      modelViewPos := pos(lower(content), "\"model_view\"", searchPos);
+    end while;
+  end func;
+
+const proc: deriveView (inout viewStats: stats, in viewConfig: config) is func
+  local
+    var float: yawRadians is 0.0;
+  begin
+    stats.viewportWidth := config.viewWidth;
+    stats.viewportHeight := config.viewHeight;
+    stats.scissorWidth := config.viewWidth;
+    stats.scissorHeight := config.viewHeight;
+    stats.aspect := float(config.viewWidth) / float(config.viewHeight);
+    stats.fovY := 2.0 * atan(tan(degreesToRadians(config.fovX) / 2.0) /
+        stats.aspect) * 180.0 / 3.14159265358979323846;
+    stats.frustumPlanes := 4;
+    yawRadians := degreesToRadians(stats.playerYaw);
+    stats.forwardX := cos(yawRadians);
+    stats.forwardY := sin(yawRadians);
+    stats.rightX := -sin(yawRadians);
+    stats.rightY := cos(yawRadians);
+    stats.firstViewAxis := "yaw=" <& str(stats.playerYaw) <&
+        ";bucket=" <& yawBucket(stats.playerYaw);
+    stats.firstProjection := "fov_x=" <& str(config.fovX) <&
+        ";fov_y=" <& str(stats.fovY) <& ";bucket=" <&
+        projectionBucket(stats);
+    stats.firstViewport := str(stats.viewportX) <& " " <&
+        str(stats.viewportY) <& " " <& str(stats.viewportWidth) <&
+        " " <& str(stats.viewportHeight);
+    if stats.procAreas <> 0 then
+      stats.cameraArea := 0;
+      stats.visibleAreas := stats.procAreas;
+      stats.firstPortalScope := "camera_area=0;visible_areas=" <&
+          str(stats.visibleAreas) <& ";portal_links=" <&
+          str(stats.procPortals);
+    end if;
+    if stats.firstWeaponViewModel <> "" then
+      stats.firstWeaponViewPlan := "model_view=" <&
+          stats.firstWeaponViewModel <& ";fov=" <&
+          str(DEFAULT_WEAPON_FOV) <& ";depth_hack=weapon";
+    end if;
+  end func;
+
+const func array string: findPk4Archives (in string: basePath) is func
+  result
+    var array string: pk4Files is 0 times "";
+  local
+    var array string: names is 0 times "";
+    var string: name is "";
+  begin
+    if fileType(basePath) = FILE_DIR then
+      names := readDir(basePath);
+      for name range names do
+        if isPk4Name(name) and fileType(joinPath(basePath, name)) = FILE_REGULAR then
+          pk4Files &:= joinPath(basePath, name);
+        end if;
+      end for;
+    end if;
+  end func;
+
+const proc: scanArchive (inout viewStats: stats,
+    in string: pk4File) is func
+  local
+    var fileSys: zipFs is fileSys.value;
+    var array string: paths is 0 times "";
+    var string: path is "";
+    var string: normalizedPath is "";
+  begin
+    zipFs := openZip(pk4File);
+    if zipFs = fileSys.value then
+      logError("Could not open pk4 archive: " <& pk4File);
+    else
+      paths := sort(readDir(zipFs, RECURSIVE));
+      for path range paths do
+        normalizedPath := normalizedAssetPath(path);
+        if normalizedPath = stats.requestedMapPath then
+          inspectMapContent(stats, getFile(zipFs, path));
+        elsif normalizedPath = stats.requestedProcPath then
+          inspectProcContent(stats, getFile(zipFs, path));
+        elsif endsWith(normalizedPath, ".def") then
+          inspectDefContent(stats, getFile(zipFs, path));
+        end if;
+      end for;
+      close(zipFs);
+    end if;
+  end func;
+
+const proc: parseArgs (inout viewConfig: config) is func
+  local
+    var array string: args is 0 times "";
+    var integer: argIdx is 1;
+  begin
+    args := argv(PROGRAM);
+    while argIdx <= length(args) do
+      if args[argIdx] = "--help" or args[argIdx] = "-h" then
+        config.showHelp := TRUE;
+      elsif args[argIdx] = "--doom3_data_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.dataPath := convDosPath(args[argIdx]);
+      elsif args[argIdx] = "--doom3_base_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.basePath := convDosPath(args[argIdx]);
+      elsif args[argIdx] = "--doom3_start_map" and argIdx < length(args) then
+        incr(argIdx);
+        config.startMap := args[argIdx];
+      elsif args[argIdx] = "--doom3_view_fov" and argIdx < length(args) then
+        incr(argIdx);
+        config.fovX := float(args[argIdx]);
+      elsif args[argIdx] = "+map" and argIdx < length(args) then
+        incr(argIdx);
+        config.startMap := args[argIdx];
+      elsif args[argIdx] = "+set" and argIdx + 2 <= length(args) then
+        if args[argIdx + 1] = "fs_basepath" then
+          config.dataPath := convDosPath(args[argIdx + 2]);
+        elsif args[argIdx + 1] = "fs_game" then
+          config.basePath := convDosPath(args[argIdx + 2]);
+        elsif args[argIdx + 1] = "r_fov" then
+          config.fovX := float(args[argIdx + 2]);
+        end if;
+        argIdx +:= 2;
+      end if;
+      incr(argIdx);
+    end while;
+    if config.basePath = "" then
+      config.basePath := joinPath(config.dataPath, DEFAULT_BASE_DIR);
+    end if;
+  end func;
+
+const proc: showUsage is func
+  begin
+    writeln("Usage:");
+    writeln("  s7 doom3_seed7_view.s7 --doom3_data_path <doom3-root>");
+    writeln("  s7 doom3_seed7_view.s7 +set fs_basepath <doom3-root> +map <map>");
+    writeln("");
+    writeln("Scans user-owned Doom 3 pk4 files for renderView/camera readiness.");
+  end func;
+
+const proc: printStats (in viewStats: stats, in viewConfig: config) is func
+  begin
+    logInfo("pk4_archives=" <& stats.pk4Archives);
+    logInfo("requested_map=" <& stats.requestedMapPath);
+    logInfo("requested_map_found=" <& stats.requestedMapFound);
+    logInfo("requested_proc=" <& stats.requestedProcPath);
+    logInfo("requested_proc_found=" <& stats.requestedProcFound);
+    logInfo("view_config fov_x=" <& config.fovX <&
+        " width=" <& config.viewWidth <& " height=" <&
+        config.viewHeight <& " aspect=" <& stats.aspect);
+    logInfo("render_view player_start=" <& stats.playerParsed <&
+        " entities=" <& stats.mapEntities <& " player_starts=" <&
+        stats.playerStarts <& " origin=" <& stats.firstPlayerOrigin <&
+        " yaw=" <& stats.playerYaw);
+    logInfo("view_axes forward=" <& stats.forwardX <& " " <&
+        stats.forwardY <& " 0.0 right=" <& stats.rightX <& " " <&
+        stats.rightY <& " 0.0 bucket=" <& yawBucket(stats.playerYaw));
+    logInfo("view_projection fov_y=" <& stats.fovY <&
+        " near=" <& DEFAULT_NEAR_Z <& " far=" <& DEFAULT_FAR_Z <&
+        " planes=" <& stats.frustumPlanes <& " bucket=" <&
+        projectionBucket(stats));
+    logInfo("view_viewport viewport=" <& stats.firstViewport <&
+        " scissor=" <& stats.scissorX <& " " <& stats.scissorY <&
+        " " <& stats.scissorWidth <& " " <& stats.scissorHeight);
+    logInfo("portal_view proc_models=" <& stats.procModels <&
+        " areas=" <& stats.procAreas <& " portals=" <&
+        stats.procPortals <& " camera_area=" <& stats.cameraArea <&
+        " visible_areas=" <& stats.visibleAreas);
+    logInfo("weapon_view model_view_refs=" <& stats.modelViewRefs <&
+        " resolved=" <& stats.weaponViewModelsResolved <&
+        " depth_hack=" <& stats.weaponDepthHackViews);
+    if stats.firstPlayerStart <> "" then
+      logInfo("first_view_player_start=" <& stats.firstPlayerStart);
+    end if;
+    logInfo("first_view_axis=" <& stats.firstViewAxis);
+    logInfo("first_view_projection=" <& stats.firstProjection);
+    if stats.firstPortalScope <> "" then
+      logInfo("first_portal_scope=" <& stats.firstPortalScope);
+    end if;
+    if stats.firstWeaponViewPlan <> "" then
+      logInfo("first_weapon_view_plan=" <& stats.firstWeaponViewPlan);
+    end if;
+    logInfo("view_probe_ready=" <& (stats.pk4Archives <> 0 and
+        stats.requestedMapFound and stats.requestedProcFound and
+        stats.playerParsed and stats.frustumPlanes = 4 and
+        stats.procAreas <> 0 and stats.visibleAreas <> 0 and
+        stats.weaponViewModelsResolved <> 0));
+  end func;
+
+const proc: main is func
+  local
+    var viewConfig: config is viewConfig.value;
+    var viewStats: stats is viewStats.value;
+    var array string: pk4Files is 0 times "";
+    var string: pk4File is "";
+  begin
+    parseArgs(config);
+    if config.showHelp then
+      showUsage;
+    else
+      stats.requestedMapPath := mapNameToAssetPath(config.startMap);
+      stats.requestedProcPath := compiledSiblingPath(stats.requestedMapPath,
+          ".proc");
+      if fileType(config.basePath) <> FILE_DIR then
+        logError("Doom 3 base directory not found: " <& config.basePath);
+      else
+        pk4Files := sort(findPk4Archives(config.basePath));
+        stats.pk4Archives := length(pk4Files);
+        if length(pk4Files) = 0 then
+          logError("No .pk4 archives found in: " <& config.basePath);
+        else
+          for pk4File range pk4Files do
+            scanArchive(stats, pk4File);
+          end for;
+          deriveView(stats, config);
+          printStats(stats, config);
+        end if;
+      end if;
+    end if;
+  end func;

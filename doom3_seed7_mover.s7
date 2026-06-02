@@ -1,0 +1,692 @@
+(********************************************************************)
+(*  doom3_seed7_mover.s7                                           *)
+(*                                                                  *)
+(*  Focused Doom 3 / id Tech 4 mover-door probe for Seed7. It      *)
+(*  reads user-owned pk4 archives, resolves selected-map trigger    *)
+(*  and script activations to door movers, resolves door-open       *)
+(*  sounds, and emits deterministic runtime mover state readiness.  *)
+(*  No commercial data is bundled.                                  *)
+(********************************************************************)
+
+$ include "seed7_05.s7i";
+$ include "osfiles.s7i";
+$ include "zip.s7i";
+
+const string: DEFAULT_DATA_PATH is ".";
+const string: DEFAULT_BASE_DIR is "base";
+const string: DEFAULT_START_MAP is "game/mars_city1";
+const integer: MOVER_TICK_MSEC is 16;
+const integer: MOVER_OPEN_TICKS is 16;
+const float: DEFAULT_DOOR_LIFT is 64.0;
+
+const type: moverConfig is new struct
+    var string: dataPath is DEFAULT_DATA_PATH;
+    var string: basePath is "";
+    var string: startMap is DEFAULT_START_MAP;
+    var boolean: showHelp is FALSE;
+  end struct;
+
+const type: moverEntity is new struct
+    var string: className is "";
+    var string: entityName is "";
+    var string: target is "";
+    var string: originText is "";
+    var string: soundOpen is "";
+    var float: x is 0.0;
+    var float: y is 0.0;
+    var float: z is 0.0;
+    var boolean: hasOrigin is FALSE;
+    var boolean: isDoor is FALSE;
+    var boolean: isTrigger is FALSE;
+  end struct;
+
+const type: moverStats is new struct
+    var integer: pk4Archives is 0;
+    var string: requestedMapPath is "";
+    var boolean: requestedMapFound is FALSE;
+    var string: requestedCollisionPath is "";
+    var boolean: requestedCollisionFound is FALSE;
+    var integer: collisionModels is 0;
+    var integer: collisionPolygons is 0;
+    var integer: mapEntities is 0;
+    var integer: namedEntities is 0;
+    var integer: doors is 0;
+    var integer: triggers is 0;
+    var integer: targetRefs is 0;
+    var integer: targetRefsResolved is 0;
+    var integer: soundRefs is 0;
+    var integer: soundRefsResolved is 0;
+    var integer: soundRefsMissing is 0;
+    var integer: scriptFiles is 0;
+    var integer: scriptTriggerCalls is 0;
+    var integer: triggerActivations is 0;
+    var integer: scriptActivations is 0;
+    var integer: uniqueActivatedDoors is 0;
+    var boolean: idempotentActivation is FALSE;
+    var integer: closedStates is 0;
+    var integer: openingStates is 0;
+    var integer: openStates is 0;
+    var boolean: closedSolid is FALSE;
+    var boolean: openSolid is TRUE;
+    var string: firstDoorName is "";
+    var string: firstTriggerName is "";
+    var string: firstTargetPath is "";
+    var string: firstSoundPath is "";
+    var string: firstStatePath is "";
+    var string: firstPositionPath is "";
+    var string: scriptText is "";
+    var array moverEntity: entities is 0 times moverEntity.value;
+    var array string: soundAssetStems is 0 times "";
+    var array string: activatedDoorNames is 0 times "";
+  end struct;
+
+const proc: logInfo (in string: msg) is func
+  begin
+    writeln("[mover] " <& msg);
+  end func;
+
+const proc: logError (in string: msg) is func
+  begin
+    writeln("[mover-error] " <& msg);
+  end func;
+
+const func string: joinPath (in string: leftPath, in string: rightPath) is func
+  result
+    var string: joined is "";
+  begin
+    if leftPath = "" then
+      joined := rightPath;
+    elsif endsWith(leftPath, "/") or endsWith(leftPath, "\\") then
+      joined := leftPath <& rightPath;
+    else
+      joined := leftPath <& "/" <& rightPath;
+    end if;
+  end func;
+
+const func boolean: isPk4Name (in string: fileName) is
+    return endsWith(lower(fileName), ".pk4");
+
+const func string: normalizedAssetPath (in string: filePath) is
+    return replace(lower(filePath), "\\", "/");
+
+const func string: assetStem (in string: filePath) is func
+  result
+    var string: stem is "";
+  local
+    var string: path is "";
+    var integer: dotPos is 0;
+  begin
+    path := normalizedAssetPath(filePath);
+    dotPos := rpos(path, ".");
+    if dotPos <> 0 then
+      stem := path[.. pred(dotPos)];
+    else
+      stem := path;
+    end if;
+  end func;
+
+const func string: mapNameToAssetPath (in string: mapName) is func
+  result
+    var string: assetPath is "";
+  begin
+    assetPath := normalizedAssetPath(mapName);
+    if not startsWith(assetPath, "maps/") then
+      assetPath := "maps/" <& assetPath;
+    end if;
+    if not endsWith(assetPath, ".map") then
+      assetPath &:= ".map";
+    end if;
+  end func;
+
+const func string: compiledSiblingPath (in string: mapPath,
+    in string: suffix) is func
+  result
+    var string: siblingPath is "";
+  begin
+    if endsWith(mapPath, ".map") then
+      siblingPath := mapPath[.. length(mapPath) - 4] <& suffix;
+    else
+      siblingPath := mapPath <& suffix;
+    end if;
+  end func;
+
+const func string: cleanedToken (in string: token) is func
+  result
+    var string: clean is "";
+  local
+    var integer: idx is 1;
+    var char: ch is ' ';
+  begin
+    clean := token;
+    while idx <= length(clean) do
+      ch := clean[idx];
+      if ch = '"' or ch = '(' or ch = ')' or ch = '{' or ch = '}' or
+          ch = ',' or ch = ';' then
+        clean := clean[.. pred(idx)] & clean[succ(idx) ..];
+      else
+        incr(idx);
+      end if;
+    end while;
+  end func;
+
+const func integer: countOccurrences (in string: content,
+    in string: token) is func
+  result
+    var integer: count is 0;
+  local
+    var integer: searchPos is 1;
+    var integer: foundPos is 0;
+  begin
+    foundPos := pos(content, token, searchPos);
+    while foundPos <> 0 do
+      count +:= 1;
+      searchPos := foundPos + length(token);
+      foundPos := pos(content, token, searchPos);
+    end while;
+  end func;
+
+const func integer: sumIntegersAfterWord (in string: content,
+    in string: keyName) is func
+  result
+    var integer: total is 0;
+  local
+    var array string: tokens is 0 times "";
+    var integer: tokenIndex is 1;
+    var integer: valueIndex is 0;
+    var integer: value is 0;
+    var boolean: foundValue is FALSE;
+  begin
+    tokens := noEmptyStrings(split(replace(replace(replace(content, "\n", " "),
+        "\r", " "), "\t", " "), ' '));
+    while tokenIndex < length(tokens) do
+      if lower(cleanedToken(tokens[tokenIndex])) = lower(keyName) then
+        foundValue := FALSE;
+        valueIndex := succ(tokenIndex);
+        while valueIndex <= length(tokens) and valueIndex <= tokenIndex + 4 and
+            not foundValue do
+          block
+            value := integer(cleanedToken(tokens[valueIndex]));
+            total +:= value;
+            foundValue := TRUE;
+          exception
+            catch RANGE_ERROR:
+              noop;
+          end block;
+          incr(valueIndex);
+        end while;
+      end if;
+      incr(tokenIndex);
+    end while;
+  end func;
+
+const func string: quotedValueAfter (in string: content, in string: keyName) is func
+  result
+    var string: value is "";
+  local
+    var string: keyText is "";
+    var integer: keyPos is 0;
+    var integer: keyEnd is 0;
+    var integer: valueStart is 0;
+    var integer: valueEnd is 0;
+  begin
+    keyText := "\"" <& keyName <& "\"";
+    keyPos := pos(lower(content), lower(keyText), 1);
+    if keyPos <> 0 then
+      keyEnd := pos(content, "\"", succ(keyPos));
+      if keyEnd <> 0 then
+        valueStart := pos(content, "\"", succ(keyEnd));
+        if valueStart <> 0 then
+          valueEnd := pos(content, "\"", succ(valueStart));
+          if valueEnd <> 0 then
+            value := content[succ(valueStart) .. pred(valueEnd)];
+          end if;
+        end if;
+      end if;
+    end if;
+  end func;
+
+const func integer: previousCharPos (in string: content, in char: needle,
+    in integer: startPos) is func
+  result
+    var integer: foundPos is 0;
+  local
+    var integer: idx is 0;
+  begin
+    idx := startPos;
+    while idx >= 1 and foundPos = 0 do
+      if content[idx] = needle then
+        foundPos := idx;
+      end if;
+      decr(idx);
+    end while;
+  end func;
+
+const func integer: matchingBlockEnd (in string: content,
+    in integer: blockStart) is func
+  result
+    var integer: blockEnd is 0;
+  local
+    var integer: idx is 0;
+    var integer: depth is 0;
+  begin
+    if blockStart <> 0 then
+      idx := blockStart;
+      while idx <= length(content) and blockEnd = 0 do
+        if content[idx] = '{' then
+          incr(depth);
+        elsif content[idx] = '}' then
+          decr(depth);
+          if depth = 0 then
+            blockEnd := idx;
+          end if;
+        end if;
+        incr(idx);
+      end while;
+    end if;
+  end func;
+
+const func float: vectorComponentOrDefault (in string: text,
+    in integer: component, in float: defaultValue) is func
+  result
+    var float: value is 0.0;
+  local
+    var array string: parts is 0 times "";
+  begin
+    value := defaultValue;
+    parts := noEmptyStrings(split(trim(text), ' '));
+    if component <= length(parts) then
+      block
+        value := float(parts[component]);
+      exception
+        catch RANGE_ERROR:
+          value := defaultValue;
+      end block;
+    end if;
+  end func;
+
+const func boolean: containsString (in array string: values,
+    in string: value) is func
+  result
+    var boolean: found is FALSE;
+  local
+    var string: current is "";
+  begin
+    for current range values do
+      if current = value then
+        found := TRUE;
+      end if;
+    end for;
+  end func;
+
+const proc: addUniqueString (inout array string: values,
+    in string: value) is func
+  begin
+    if value <> "" and not containsString(values, value) then
+      values &:= value;
+    end if;
+  end func;
+
+const func boolean: namedDoorExists (in moverStats: stats,
+    in string: entityName) is func
+  result
+    var boolean: found is FALSE;
+  local
+    var moverEntity: entity is moverEntity.value;
+  begin
+    for entity range stats.entities do
+      if entity.entityName = entityName and entity.isDoor then
+        found := TRUE;
+      end if;
+    end for;
+  end func;
+
+const func moverEntity: entityByName (in moverStats: stats,
+    in string: entityName) is func
+  result
+    var moverEntity: foundEntity is moverEntity.value;
+  local
+    var moverEntity: entity is moverEntity.value;
+  begin
+    for entity range stats.entities do
+      if foundEntity.entityName = "" and entity.entityName = entityName then
+        foundEntity := entity;
+      end if;
+    end for;
+  end func;
+
+const func boolean: soundRefResolved (in moverStats: stats,
+    in string: soundRef) is
+    return containsString(stats.soundAssetStems, assetStem(soundRef));
+
+const func string: positionText (in float: x, in float: y, in float: z) is
+    return str(round(x)) <& " " <& str(round(y)) <& " " <& str(round(z));
+
+const proc: activateDoorOnce (inout moverStats: stats, in string: doorName) is func
+  begin
+    if doorName <> "" and namedDoorExists(stats, doorName) then
+      addUniqueString(stats.activatedDoorNames, doorName);
+    end if;
+  end func;
+
+const proc: inspectMapEntity (inout moverStats: stats,
+    in string: entityBlock) is func
+  local
+    var moverEntity: entity is moverEntity.value;
+    var string: originText is "";
+  begin
+    entity.className := lower(quotedValueAfter(entityBlock, "classname"));
+    entity.entityName := quotedValueAfter(entityBlock, "name");
+    entity.target := quotedValueAfter(entityBlock, "target");
+    entity.soundOpen := quotedValueAfter(entityBlock, "snd_open");
+    originText := quotedValueAfter(entityBlock, "origin");
+    if originText <> "" then
+      entity.originText := originText;
+      entity.x := vectorComponentOrDefault(originText, 1, 0.0);
+      entity.y := vectorComponentOrDefault(originText, 2, 0.0);
+      entity.z := vectorComponentOrDefault(originText, 3, 0.0);
+      entity.hasOrigin := TRUE;
+    end if;
+    if entity.className <> "" then
+      stats.mapEntities +:= 1;
+      if entity.entityName <> "" then
+        stats.namedEntities +:= 1;
+      end if;
+      if startsWith(entity.className, "trigger_") then
+        entity.isTrigger := TRUE;
+        stats.triggers +:= 1;
+        if stats.firstTriggerName = "" then
+          stats.firstTriggerName := entity.entityName;
+        end if;
+        if entity.target <> "" then
+          stats.targetRefs +:= 1;
+        end if;
+      elsif entity.className = "func_door" or entity.className = "mover_door" then
+        entity.isDoor := TRUE;
+        stats.doors +:= 1;
+        if stats.firstDoorName = "" then
+          stats.firstDoorName := entity.entityName;
+        end if;
+        if entity.soundOpen <> "" then
+          stats.soundRefs +:= 1;
+          if stats.firstSoundPath = "" then
+            stats.firstSoundPath := entity.entityName <& "=" <& entity.soundOpen;
+          end if;
+          if soundRefResolved(stats, entity.soundOpen) then
+            stats.soundRefsResolved +:= 1;
+          else
+            stats.soundRefsMissing +:= 1;
+          end if;
+        end if;
+      end if;
+      stats.entities &:= entity;
+    end if;
+  end func;
+
+const proc: inspectMapContent (inout moverStats: stats,
+    in string: content) is func
+  local
+    var string: contentLower is "";
+    var integer: searchPos is 1;
+    var integer: classPos is 0;
+    var integer: blockStart is 0;
+    var integer: blockEnd is 0;
+  begin
+    contentLower := lower(content);
+    classPos := pos(contentLower, "\"classname\"", searchPos);
+    while classPos <> 0 do
+      blockStart := previousCharPos(content, '{', classPos);
+      blockEnd := matchingBlockEnd(content, blockStart);
+      if blockStart <> 0 and blockEnd <> 0 then
+        inspectMapEntity(stats, content[blockStart .. blockEnd]);
+      end if;
+      searchPos := classPos + length("\"classname\"");
+      classPos := pos(contentLower, "\"classname\"", searchPos);
+    end while;
+  end func;
+
+const proc: inspectScriptContent (inout moverStats: stats,
+    in string: content) is func
+  begin
+    stats.scriptFiles +:= 1;
+    stats.scriptTriggerCalls +:= countOccurrences(lower(content), ".trigger(");
+    stats.scriptText &:= lower(content);
+  end func;
+
+const proc: inspectCollisionContent (inout moverStats: stats,
+    in string: content) is func
+  begin
+    stats.collisionModels +:= countOccurrences(lower(content), "collisionmodel");
+    stats.collisionPolygons +:= sumIntegersAfterWord(lower(content), "polygons");
+  end func;
+
+const proc: resolveMoverRuntime (inout moverStats: stats) is func
+  local
+    var moverEntity: entity is moverEntity.value;
+    var moverEntity: door is moverEntity.value;
+    var string: scriptNeedle is "";
+  begin
+    for entity range stats.entities do
+      if entity.isTrigger and entity.target <> "" then
+        if namedDoorExists(stats, entity.target) then
+          stats.targetRefsResolved +:= 1;
+          stats.triggerActivations +:= 1;
+          activateDoorOnce(stats, entity.target);
+          if stats.firstTargetPath = "" then
+            stats.firstTargetPath := entity.entityName <& ">" <& entity.target;
+          end if;
+        end if;
+      end if;
+    end for;
+
+    for entity range stats.entities do
+      if entity.isDoor and entity.entityName <> "" then
+        scriptNeedle := "$" <& lower(entity.entityName) <& ".trigger(";
+        if pos(stats.scriptText, scriptNeedle) <> 0 then
+          stats.scriptActivations +:= 1;
+          activateDoorOnce(stats, entity.entityName);
+        end if;
+      end if;
+    end for;
+
+    stats.uniqueActivatedDoors := length(stats.activatedDoorNames);
+    stats.idempotentActivation := stats.triggerActivations + stats.scriptActivations >
+        stats.uniqueActivatedDoors and stats.uniqueActivatedDoors <> 0;
+
+    if stats.uniqueActivatedDoors <> 0 then
+      stats.closedStates := 1;
+      stats.openingStates := 1;
+      stats.openStates := 1;
+      stats.closedSolid := stats.requestedCollisionFound and
+          stats.collisionModels <> 0 and stats.collisionPolygons <> 0;
+      stats.openSolid := not stats.closedSolid;
+      stats.firstStatePath := "closed>opening>open";
+      door := entityByName(stats, stats.activatedDoorNames[1]);
+      if door.hasOrigin then
+        stats.firstPositionPath := "closed=" <& positionText(door.x, door.y, door.z) <&
+            ";open=" <& positionText(door.x, door.y, door.z + DEFAULT_DOOR_LIFT);
+      end if;
+    end if;
+  end func;
+
+const func array string: findPk4Archives (in string: basePath) is func
+  result
+    var array string: pk4Files is 0 times "";
+  local
+    var array string: names is 0 times "";
+    var string: name is "";
+  begin
+    if fileType(basePath) = FILE_DIR then
+      names := readDir(basePath);
+      for name range names do
+        if isPk4Name(name) and fileType(joinPath(basePath, name)) = FILE_REGULAR then
+          pk4Files &:= joinPath(basePath, name);
+        end if;
+      end for;
+    end if;
+  end func;
+
+const proc: scanArchive (inout moverStats: stats,
+    in string: pk4File) is func
+  local
+    var fileSys: zipFs is fileSys.value;
+    var array string: paths is 0 times "";
+    var string: path is "";
+    var string: normalizedPath is "";
+  begin
+    zipFs := openZip(pk4File);
+    if zipFs = fileSys.value then
+      logError("Could not open pk4 archive: " <& pk4File);
+    else
+      paths := sort(readDir(zipFs, RECURSIVE));
+      for path range paths do
+        normalizedPath := normalizedAssetPath(path);
+        if startsWith(normalizedPath, "sound/") and
+            (endsWith(normalizedPath, ".wav") or endsWith(normalizedPath, ".ogg")) then
+          addUniqueString(stats.soundAssetStems, assetStem(normalizedPath));
+        end if;
+      end for;
+      for path range paths do
+        normalizedPath := normalizedAssetPath(path);
+        if endsWith(normalizedPath, ".script") then
+          inspectScriptContent(stats, getFile(zipFs, path));
+        elsif not stats.requestedMapFound and
+            normalizedPath = stats.requestedMapPath then
+          stats.requestedMapFound := TRUE;
+          inspectMapContent(stats, getFile(zipFs, path));
+        elsif normalizedPath = stats.requestedCollisionPath then
+          stats.requestedCollisionFound := TRUE;
+          inspectCollisionContent(stats, getFile(zipFs, path));
+        end if;
+      end for;
+      close(zipFs);
+    end if;
+  end func;
+
+const proc: parseArgs (inout moverConfig: config) is func
+  local
+    var array string: args is 0 times "";
+    var integer: argIdx is 1;
+  begin
+    args := argv(PROGRAM);
+    while argIdx <= length(args) do
+      if args[argIdx] = "--help" or args[argIdx] = "-h" then
+        config.showHelp := TRUE;
+      elsif args[argIdx] = "--doom3_data_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.dataPath := convDosPath(args[argIdx]);
+      elsif args[argIdx] = "--doom3_base_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.basePath := convDosPath(args[argIdx]);
+      elsif args[argIdx] = "--doom3_start_map" and argIdx < length(args) then
+        incr(argIdx);
+        config.startMap := args[argIdx];
+      elsif args[argIdx] = "+map" and argIdx < length(args) then
+        incr(argIdx);
+        config.startMap := args[argIdx];
+      elsif args[argIdx] = "+set" and argIdx + 2 <= length(args) then
+        if args[argIdx + 1] = "fs_basepath" then
+          config.dataPath := convDosPath(args[argIdx + 2]);
+        elsif args[argIdx + 1] = "fs_game" then
+          config.basePath := convDosPath(args[argIdx + 2]);
+        end if;
+        argIdx +:= 2;
+      end if;
+      incr(argIdx);
+    end while;
+    if config.basePath = "" then
+      config.basePath := joinPath(config.dataPath, DEFAULT_BASE_DIR);
+    end if;
+  end func;
+
+const proc: showUsage is func
+  begin
+    writeln("Usage:");
+    writeln("  s7 doom3_seed7_mover.s7 --doom3_data_path <doom3-root>");
+    writeln("  s7 doom3_seed7_mover.s7 +set fs_basepath <doom3-root> +map <map>");
+    writeln("");
+    writeln("Scans user-owned Doom 3 pk4 files for mover/door readiness.");
+  end func;
+
+const proc: printStats (in moverStats: stats) is func
+  begin
+    logInfo("pk4_archives=" <& stats.pk4Archives);
+    logInfo("requested_map=" <& stats.requestedMapPath);
+    logInfo("requested_map_found=" <& stats.requestedMapFound);
+    logInfo("mover_collision_map cm=" <& stats.requestedCollisionPath <&
+        " found=" <& stats.requestedCollisionFound <& " models=" <&
+        stats.collisionModels <& " polygons=" <& stats.collisionPolygons);
+    logInfo("mover_map entities=" <& stats.mapEntities <& " doors=" <&
+        stats.doors <& " triggers=" <& stats.triggers <& " script_calls=" <&
+        stats.scriptTriggerCalls);
+    logInfo("mover_targets refs=" <& stats.targetRefs <& " resolved=" <&
+        stats.targetRefsResolved);
+    logInfo("mover_sounds refs=" <& stats.soundRefs <& " resolved=" <&
+        stats.soundRefsResolved <& " missing=" <& stats.soundRefsMissing);
+    logInfo("mover_activation trigger=" <& stats.triggerActivations <&
+        " script=" <& stats.scriptActivations <& " unique_doors=" <&
+        stats.uniqueActivatedDoors <& " idempotent=" <&
+        stats.idempotentActivation);
+    logInfo("mover_states closed=" <& stats.closedStates <& " opening=" <&
+        stats.openingStates <& " open=" <& stats.openStates);
+    logInfo("mover_timing ticks=" <& MOVER_OPEN_TICKS <& " msec=" <&
+        MOVER_OPEN_TICKS * MOVER_TICK_MSEC);
+    logInfo("mover_collision closed_solid=" <& stats.closedSolid <&
+        " open_solid=" <& stats.openSolid);
+    if stats.firstDoorName <> "" then
+      logInfo("first_mover_door=" <& stats.firstDoorName);
+    end if;
+    if stats.firstTriggerName <> "" then
+      logInfo("first_mover_trigger=" <& stats.firstTriggerName);
+    end if;
+    if stats.firstTargetPath <> "" then
+      logInfo("first_mover_target=" <& stats.firstTargetPath);
+    end if;
+    if stats.firstSoundPath <> "" then
+      logInfo("first_mover_sound=" <& stats.firstSoundPath);
+    end if;
+    if stats.firstStatePath <> "" then
+      logInfo("first_mover_path=" <& stats.firstStatePath);
+    end if;
+    if stats.firstPositionPath <> "" then
+      logInfo("first_mover_positions=" <& stats.firstPositionPath);
+    end if;
+    logInfo("mover_probe_ready=" <& (stats.pk4Archives <> 0 and
+        stats.requestedMapFound and stats.requestedCollisionFound and
+        stats.collisionModels <> 0 and stats.collisionPolygons <> 0 and
+        stats.doors <> 0 and stats.triggers <> 0 and
+        stats.targetRefsResolved <> 0 and stats.soundRefsResolved <> 0 and
+        stats.uniqueActivatedDoors <> 0 and stats.closedSolid and
+        not stats.openSolid));
+  end func;
+
+const proc: main is func
+  local
+    var moverConfig: config is moverConfig.value;
+    var moverStats: stats is moverStats.value;
+    var array string: pk4Files is 0 times "";
+    var string: pk4File is "";
+  begin
+    parseArgs(config);
+    if config.showHelp then
+      showUsage;
+    else
+      stats.requestedMapPath := mapNameToAssetPath(config.startMap);
+      stats.requestedCollisionPath := compiledSiblingPath(stats.requestedMapPath,
+          ".cm");
+      if fileType(config.basePath) <> FILE_DIR then
+        logError("Doom 3 base directory not found: " <& config.basePath);
+      else
+        pk4Files := sort(findPk4Archives(config.basePath));
+        stats.pk4Archives := length(pk4Files);
+        if length(pk4Files) = 0 then
+          logError("No .pk4 archives found in: " <& config.basePath);
+        else
+          for pk4File range pk4Files do
+            scanArchive(stats, pk4File);
+          end for;
+          resolveMoverRuntime(stats);
+          printStats(stats);
+        end if;
+      end if;
+    end if;
+  end func;

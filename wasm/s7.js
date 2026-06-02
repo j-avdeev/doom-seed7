@@ -17,9 +17,9 @@ var Module = typeof Module != 'undefined' ? Module : {};
 // --pre-jses are emitted after the Module integration code, so that they can
 // refer to Module (if they choose; they can also define Module)
 /********************************************************************/
-/*  pre_js_browser.js  Emscripten pre-js for browser (raycaster).   */
+/*  pre_js_browser.js  Emscripten pre-js for Seed7 browser.        */
 /*  Same as seed7 pre_js.js but preserves Module if already set     */
-/*  (so index.html can set Module.arguments and Module.preRun).    */
+/*  (so launcher HTML can set Module.arguments and Module.preRun). */
 /********************************************************************/
 
 var mapIdToWindow = {};

@@ -1,0 +1,674 @@
+(********************************************************************)
+(*  doom3_seed7_aas.s7                                             *)
+(*                                                                  *)
+(*  Focused Doom 3 / id Tech 4 AAS/navigation metadata probe for    *)
+(*  Seed7. It binds a selected map to its companion .aas asset,      *)
+(*  parses a tiny area/reachability graph subset, and proves a       *)
+(*  deterministic player-to-monster path contract.                   *)
+(********************************************************************)
+
+$ include "seed7_05.s7i";
+$ include "osfiles.s7i";
+$ include "zip.s7i";
+$ include "math.s7i";
+
+const string: DEFAULT_DATA_PATH is ".";
+const string: DEFAULT_BASE_DIR is "base";
+const string: DEFAULT_START_MAP is "game/mars_city1";
+const integer: DEFAULT_PLAYER_HEALTH is 100;
+const integer: DEFAULT_MONSTER_DAMAGE is 12;
+const float: NAV_FRAME_STEP_DISTANCE is 16.0;
+const float: MONSTER_ATTACK_RANGE is 80.0;
+
+const type: aasConfig is new struct
+    var string: dataPath is DEFAULT_DATA_PATH;
+    var string: basePath is "";
+    var string: startMap is DEFAULT_START_MAP;
+    var boolean: showHelp is FALSE;
+  end struct;
+
+const type: aasStats is new struct
+    var integer: pk4Archives is 0;
+    var string: requestedMapPath is "";
+    var boolean: requestedMapFound is FALSE;
+    var string: requestedAasPath is "";
+    var boolean: requestedAasFound is FALSE;
+    var integer: aasAssets is 0;
+    var integer: mapEntities is 0;
+    var boolean: playerStartFound is FALSE;
+    var integer: mapMonsters is 0;
+    var float: playerX is 0.0;
+    var float: playerY is 0.0;
+    var float: playerZ is 0.0;
+    var float: monsterX is 0.0;
+    var float: monsterY is 0.0;
+    var float: monsterZ is 0.0;
+    var boolean: monsterOriginFound is FALSE;
+    var integer: aasVersion is 0;
+    var integer: aasSettings is 0;
+    var integer: aasAreas is 0;
+    var integer: aasReachabilities is 0;
+    var integer: startArea is 0;
+    var integer: goalArea is 0;
+    var boolean: pathFound is FALSE;
+    var integer: pathSteps is 0;
+    var integer: pathCost is 0;
+    var integer: runtimeMonsterArea is 0;
+    var integer: runtimePlayerArea is 0;
+    var boolean: runtimePathFound is FALSE;
+    var integer: runtimePathCost is 0;
+    var float: runtimeMonsterNextX is 0.0;
+    var float: runtimeMonsterNextY is 0.0;
+    var boolean: runtimeMonsterAttack is FALSE;
+    var integer: runtimePlayerHealthAfter is DEFAULT_PLAYER_HEALTH;
+    var string: firstAasAsset is "";
+    var string: firstAgentClass is "";
+    var string: firstMonsterName is "";
+    var string: firstMonsterClass is "";
+    var string: firstReachability is "";
+    var string: firstPath is "";
+    var string: firstRuntimePath is "";
+    var array integer: areaIds is 0 times 0;
+    var array float: areaX is 0 times 0.0;
+    var array float: areaY is 0 times 0.0;
+    var array float: areaZ is 0 times 0.0;
+    var array integer: reachFrom is 0 times 0;
+    var array integer: reachTo is 0 times 0;
+    var array integer: reachCost is 0 times 0;
+  end struct;
+
+const proc: logInfo (in string: msg) is func
+  begin
+    writeln("[aas] " <& msg);
+  end func;
+
+const proc: logError (in string: msg) is func
+  begin
+    writeln("[aas-error] " <& msg);
+  end func;
+
+const func string: joinPath (in string: leftPath, in string: rightPath) is func
+  result
+    var string: joined is "";
+  begin
+    if leftPath = "" then
+      joined := rightPath;
+    elsif endsWith(leftPath, "/") or endsWith(leftPath, "\\") then
+      joined := leftPath <& rightPath;
+    else
+      joined := leftPath <& "/" <& rightPath;
+    end if;
+  end func;
+
+const func boolean: isPk4Name (in string: fileName) is
+    return endsWith(lower(fileName), ".pk4");
+
+const func string: normalizedAssetPath (in string: filePath) is
+    return replace(lower(filePath), "\\", "/");
+
+const func string: mapNameToAssetPath (in string: mapName) is func
+  result
+    var string: assetPath is "";
+  begin
+    assetPath := normalizedAssetPath(mapName);
+    if not startsWith(assetPath, "maps/") then
+      assetPath := "maps/" <& assetPath;
+    end if;
+    if not endsWith(assetPath, ".map") then
+      assetPath &:= ".map";
+    end if;
+  end func;
+
+const func string: companionAasPath (in string: mapPath) is func
+  result
+    var string: aasPath is "";
+  begin
+    aasPath := mapPath;
+    if endsWith(aasPath, ".map") then
+      aasPath := aasPath[.. length(aasPath) - 4] <& ".aas";
+    else
+      aasPath &:= ".aas";
+    end if;
+  end func;
+
+const func string: cleanedToken (in string: token) is func
+  result
+    var string: clean is "";
+  local
+    var integer: idx is 1;
+    var char: ch is ' ';
+  begin
+    clean := trim(token);
+    while idx <= length(clean) do
+      ch := clean[idx];
+      if ch = '"' or ch = '(' or ch = ')' or ch = '{' or ch = '}' or
+          ch = ',' or ch = ';' then
+        clean := clean[.. pred(idx)] & clean[succ(idx) ..];
+      else
+        incr(idx);
+      end if;
+    end while;
+  end func;
+
+const func string: normalizedTokenText (in string: content) is func
+  result
+    var string: text is "";
+  begin
+    text := replace(content, "\n", " ");
+    text := replace(text, "\r", " ");
+    text := replace(text, "\t", " ");
+  end func;
+
+const func integer: intTokenOrZero (in string: text) is func
+  result
+    var integer: number is 0;
+  begin
+    if text <> "" then
+      block
+        number := integer(cleanedToken(text));
+      exception
+        catch RANGE_ERROR:
+          number := 0;
+      end block;
+    end if;
+  end func;
+
+const func float: floatTokenOrDefault (in string: text,
+    in float: defaultValue) is func
+  result
+    var float: number is 0.0;
+  begin
+    number := defaultValue;
+    if text <> "" then
+      block
+        number := float(cleanedToken(text));
+      exception
+        catch RANGE_ERROR:
+          number := defaultValue;
+      end block;
+    end if;
+  end func;
+
+const func float: vectorComponentOrDefault (
+    in string: vectorText, in integer: componentIndex,
+    in float: defaultValue) is func
+  result
+    var float: component is 0.0;
+  local
+    var array string: parts is 0 times "";
+  begin
+    component := defaultValue;
+    parts := noEmptyStrings(split(vectorText, ' '));
+    if length(parts) >= componentIndex then
+      component := floatTokenOrDefault(parts[componentIndex], defaultValue);
+    end if;
+  end func;
+
+const func integer: matchingBlockEnd (in string: content,
+    in integer: blockStart) is func
+  result
+    var integer: blockEnd is 0;
+  local
+    var integer: idx is 0;
+    var integer: depth is 0;
+  begin
+    if blockStart <> 0 then
+      idx := blockStart;
+      while idx <= length(content) and blockEnd = 0 do
+        if content[idx] = '{' then
+          incr(depth);
+        elsif content[idx] = '}' then
+          decr(depth);
+          if depth = 0 then
+            blockEnd := idx;
+          end if;
+        end if;
+        incr(idx);
+      end while;
+    end if;
+  end func;
+
+const func string: quotedValueAfter (in string: content,
+    in string: keyName) is func
+  result
+    var string: value is "";
+  local
+    var string: keyText is "";
+    var integer: keyPos is 0;
+    var integer: keyEnd is 0;
+    var integer: valueStart is 0;
+    var integer: valueEnd is 0;
+  begin
+    keyText := "\"" <& keyName <& "\"";
+    keyPos := pos(lower(content), lower(keyText), 1);
+    if keyPos <> 0 then
+      keyEnd := pos(content, "\"", succ(keyPos));
+      if keyEnd <> 0 then
+        valueStart := pos(content, "\"", succ(keyEnd));
+        if valueStart <> 0 then
+          valueEnd := pos(content, "\"", succ(valueStart));
+          if valueEnd <> 0 then
+            value := content[succ(valueStart) .. pred(valueEnd)];
+          end if;
+        end if;
+      end if;
+    end if;
+  end func;
+
+const proc: inspectMapText (inout aasStats: stats,
+    in string: content) is func
+  local
+    var integer: searchPos is 1;
+    var integer: blockStart is 0;
+    var integer: blockEnd is 0;
+    var string: blockText is "";
+    var string: className is "";
+    var string: entityName is "";
+    var string: originText is "";
+  begin
+    blockStart := pos(content, "{", searchPos);
+    while blockStart <> 0 do
+      blockEnd := matchingBlockEnd(content, blockStart);
+      if blockEnd <> 0 then
+        blockText := content[blockStart .. blockEnd];
+        className := lower(quotedValueAfter(blockText, "classname"));
+        if className <> "" then
+          stats.mapEntities +:= 1;
+          entityName := quotedValueAfter(blockText, "name");
+          originText := quotedValueAfter(blockText, "origin");
+          if className = "info_player_start" then
+            stats.playerStartFound := TRUE;
+            stats.playerX := vectorComponentOrDefault(originText, 1, 0.0);
+            stats.playerY := vectorComponentOrDefault(originText, 2, 0.0);
+            stats.playerZ := vectorComponentOrDefault(originText, 3, 0.0);
+          elsif startsWith(className, "monster_") then
+            stats.mapMonsters +:= 1;
+            if stats.firstMonsterName = "" then
+              stats.firstMonsterName := entityName;
+            end if;
+            if stats.firstMonsterClass = "" then
+              stats.firstMonsterClass := className;
+            end if;
+            if not stats.monsterOriginFound then
+              stats.monsterX := vectorComponentOrDefault(originText, 1, 0.0);
+              stats.monsterY := vectorComponentOrDefault(originText, 2, 0.0);
+              stats.monsterZ := vectorComponentOrDefault(originText, 3, 0.0);
+              stats.monsterOriginFound := TRUE;
+            end if;
+          end if;
+        end if;
+        searchPos := succ(blockEnd);
+      else
+        searchPos := succ(blockStart);
+      end if;
+      blockStart := pos(content, "{", searchPos);
+    end while;
+  end func;
+
+const func integer: nearestArea (in aasStats: stats,
+    in float: x, in float: y, in float: z) is func
+  result
+    var integer: areaId is 0;
+  local
+    var integer: idx is 1;
+    var float: dx is 0.0;
+    var float: dy is 0.0;
+    var float: dz is 0.0;
+    var float: distanceSq is 0.0;
+    var float: bestDistanceSq is 0.0;
+  begin
+    while idx <= length(stats.areaIds) do
+      dx := stats.areaX[idx] - x;
+      dy := stats.areaY[idx] - y;
+      dz := stats.areaZ[idx] - z;
+      distanceSq := dx * dx + dy * dy + dz * dz;
+      if areaId = 0 or distanceSq < bestDistanceSq then
+        areaId := stats.areaIds[idx];
+        bestDistanceSq := distanceSq;
+      end if;
+      incr(idx);
+    end while;
+  end func;
+
+const proc: solvePath (inout aasStats: stats) is func
+  local
+    var integer: idx is 1;
+  begin
+    stats.startArea := nearestArea(stats, stats.playerX, stats.playerY, stats.playerZ);
+    stats.goalArea := nearestArea(stats, stats.monsterX, stats.monsterY, stats.monsterZ);
+    while idx <= length(stats.reachFrom) and not stats.pathFound do
+      if stats.reachFrom[idx] = stats.startArea and
+          stats.reachTo[idx] = stats.goalArea then
+        stats.pathFound := TRUE;
+        stats.pathSteps := 1;
+        stats.pathCost := stats.reachCost[idx];
+        stats.firstPath := "area" <& stats.startArea <& ">area" <& stats.goalArea;
+      end if;
+      incr(idx);
+    end while;
+  end func;
+
+const func integer: areaIndexForId (in aasStats: stats,
+    in integer: areaId) is func
+  result
+    var integer: areaIndex is 0;
+  local
+    var integer: idx is 1;
+  begin
+    while idx <= length(stats.areaIds) and areaIndex = 0 do
+      if stats.areaIds[idx] = areaId then
+        areaIndex := idx;
+      end if;
+      incr(idx);
+    end while;
+  end func;
+
+const proc: solveRuntimeNavigationFrame (inout aasStats: stats) is func
+  local
+    var integer: idx is 1;
+    var integer: targetAreaIndex is 0;
+    var float: dx is 0.0;
+    var float: dy is 0.0;
+    var float: lengthSq is 0.0;
+  begin
+    stats.runtimeMonsterArea := nearestArea(stats, stats.monsterX,
+        stats.monsterY, stats.monsterZ);
+    stats.runtimePlayerArea := nearestArea(stats, stats.playerX,
+        stats.playerY, stats.playerZ);
+    while idx <= length(stats.reachFrom) and not stats.runtimePathFound do
+      if stats.reachFrom[idx] = stats.runtimeMonsterArea and
+          stats.reachTo[idx] = stats.runtimePlayerArea then
+        stats.runtimePathFound := TRUE;
+        stats.runtimePathCost := stats.reachCost[idx];
+        stats.firstRuntimePath := "area" <& stats.runtimeMonsterArea <&
+            ">area" <& stats.runtimePlayerArea;
+      end if;
+      incr(idx);
+    end while;
+    if stats.runtimePathFound then
+      targetAreaIndex := areaIndexForId(stats, stats.runtimePlayerArea);
+      if targetAreaIndex <> 0 then
+        dx := stats.areaX[targetAreaIndex] - stats.monsterX;
+        dy := stats.areaY[targetAreaIndex] - stats.monsterY;
+        lengthSq := dx * dx + dy * dy;
+        if lengthSq <> 0.0 then
+          stats.runtimeMonsterNextX := stats.monsterX +
+              dx * NAV_FRAME_STEP_DISTANCE / sqrt(lengthSq);
+          stats.runtimeMonsterNextY := stats.monsterY +
+              dy * NAV_FRAME_STEP_DISTANCE / sqrt(lengthSq);
+        else
+          stats.runtimeMonsterNextX := stats.monsterX;
+          stats.runtimeMonsterNextY := stats.monsterY;
+        end if;
+        dx := stats.runtimeMonsterNextX - stats.playerX;
+        dy := stats.runtimeMonsterNextY - stats.playerY;
+        stats.runtimeMonsterAttack :=
+            dx * dx + dy * dy <= MONSTER_ATTACK_RANGE * MONSTER_ATTACK_RANGE;
+        if stats.runtimeMonsterAttack then
+          stats.runtimePlayerHealthAfter := DEFAULT_PLAYER_HEALTH -
+              DEFAULT_MONSTER_DAMAGE;
+        end if;
+      end if;
+    end if;
+  end func;
+
+const proc: inspectAasText (inout aasStats: stats,
+    in string: assetPath, in string: content) is func
+  local
+    var array string: tokens is 0 times "";
+    var integer: idx is 1;
+    var string: token is "";
+    var integer: areaId is 0;
+    var float: x is 0.0;
+    var float: y is 0.0;
+    var float: z is 0.0;
+    var integer: fromArea is 0;
+    var integer: toArea is 0;
+    var integer: cost is 0;
+    var integer: look is 0;
+  begin
+    stats.aasAssets +:= 1;
+    if stats.firstAasAsset = "" then
+      stats.firstAasAsset := normalizedAssetPath(assetPath);
+    end if;
+    tokens := noEmptyStrings(split(normalizedTokenText(content), ' '));
+    while idx <= length(tokens) do
+      token := lower(cleanedToken(tokens[idx]));
+      if token = "aasversion" and idx < length(tokens) then
+        stats.aasVersion := intTokenOrZero(tokens[succ(idx)]);
+        incr(idx);
+      elsif token = "settings" and idx < length(tokens) then
+        stats.aasSettings +:= 1;
+        if stats.firstAgentClass = "" then
+          stats.firstAgentClass := cleanedToken(tokens[succ(idx)]);
+        end if;
+        incr(idx);
+      elsif token = "area" and idx + 1 <= length(tokens) then
+        areaId := intTokenOrZero(tokens[succ(idx)]);
+        x := 0.0;
+        y := 0.0;
+        z := 0.0;
+        look := idx + 2;
+        while look <= length(tokens) and lower(cleanedToken(tokens[look])) <>
+            "area" and lower(cleanedToken(tokens[look])) <> "reachability" do
+          if lower(cleanedToken(tokens[look])) = "origin" and look + 3 <= length(tokens) then
+            x := floatTokenOrDefault(tokens[look + 1], 0.0);
+            y := floatTokenOrDefault(tokens[look + 2], 0.0);
+            z := floatTokenOrDefault(tokens[look + 3], 0.0);
+          end if;
+          incr(look);
+        end while;
+        if areaId <> 0 then
+          stats.areaIds &:= areaId;
+          stats.areaX &:= x;
+          stats.areaY &:= y;
+          stats.areaZ &:= z;
+          stats.aasAreas +:= 1;
+        end if;
+      elsif token = "reachability" and idx + 2 <= length(tokens) then
+        fromArea := intTokenOrZero(tokens[succ(idx)]);
+        toArea := intTokenOrZero(tokens[idx + 2]);
+        cost := 0;
+        look := idx + 3;
+        while look <= length(tokens) and lower(cleanedToken(tokens[look])) <>
+            "area" and lower(cleanedToken(tokens[look])) <> "reachability" do
+          if lower(cleanedToken(tokens[look])) = "cost" and look < length(tokens) then
+            cost := intTokenOrZero(tokens[succ(look)]);
+          end if;
+          incr(look);
+        end while;
+        if fromArea <> 0 and toArea <> 0 then
+          stats.reachFrom &:= fromArea;
+          stats.reachTo &:= toArea;
+          stats.reachCost &:= cost;
+          stats.aasReachabilities +:= 1;
+          if stats.firstReachability = "" then
+            stats.firstReachability := "area" <& fromArea <& ">area" <&
+                toArea <& ";cost=" <& cost;
+          end if;
+        end if;
+      end if;
+      incr(idx);
+    end while;
+  end func;
+
+const proc: scanArchive (inout aasStats: stats,
+    in string: pk4File) is func
+  local
+    var fileSys: zipFs is fileSys.value;
+    var array string: paths is 0 times "";
+    var string: path is "";
+    var string: pathLower is "";
+  begin
+    zipFs := openZip(pk4File);
+    if zipFs = fileSys.value then
+      logError("could not open pk4 archive: " <& pk4File);
+    else
+      paths := readDir(zipFs, RECURSIVE);
+      for path range paths do
+        pathLower := normalizedAssetPath(path);
+        if pathLower = stats.requestedMapPath then
+          stats.requestedMapFound := TRUE;
+          inspectMapText(stats, getFile(zipFs, path));
+        elsif pathLower = stats.requestedAasPath then
+          stats.requestedAasFound := TRUE;
+          inspectAasText(stats, pathLower, getFile(zipFs, path));
+        elsif startsWith(pathLower, "maps/") and endsWith(pathLower, ".aas") then
+          inspectAasText(stats, pathLower, getFile(zipFs, path));
+        end if;
+      end for;
+    end if;
+  end func;
+
+const func array string: findPk4Archives (in string: basePath) is func
+  result
+    var array string: pk4Files is 0 times "";
+  local
+    var array string: names is 0 times "";
+    var string: name is "";
+  begin
+    if fileType(basePath) = FILE_DIR then
+      names := readDir(basePath);
+      for name range names do
+        if isPk4Name(name) and fileType(joinPath(basePath, name)) = FILE_REGULAR then
+          pk4Files &:= joinPath(basePath, name);
+        end if;
+      end for;
+    end if;
+  end func;
+
+const proc: sortStrings (inout array string: values) is func
+  local
+    var integer: leftIdx is 1;
+    var integer: rightIdx is 1;
+    var string: temp is "";
+  begin
+    for leftIdx range 1 to length(values) do
+      for rightIdx range succ(leftIdx) to length(values) do
+        if values[rightIdx] < values[leftIdx] then
+          temp := values[leftIdx];
+          values[leftIdx] := values[rightIdx];
+          values[rightIdx] := temp;
+        end if;
+      end for;
+    end for;
+  end func;
+
+const proc: parseArgs (inout aasConfig: config) is func
+  local
+    var integer: idx is 1;
+    var string: arg is "";
+  begin
+    while idx <= length(argv(PROGRAM)) do
+      arg := argv(PROGRAM)[idx];
+      if arg = "--help" or arg = "-h" then
+        config.showHelp := TRUE;
+      elsif arg = "--doom3_data_path" and idx < length(argv(PROGRAM)) then
+        config.dataPath := convDosPath(argv(PROGRAM)[succ(idx)]);
+        incr(idx);
+      elsif arg = "--doom3_base_path" and idx < length(argv(PROGRAM)) then
+        config.basePath := convDosPath(argv(PROGRAM)[succ(idx)]);
+        incr(idx);
+      elsif arg = "--doom3_start_map" and idx < length(argv(PROGRAM)) then
+        config.startMap := argv(PROGRAM)[succ(idx)];
+        incr(idx);
+      elsif arg = "+set" and idx + 2 <= length(argv(PROGRAM)) then
+        if argv(PROGRAM)[succ(idx)] = "fs_basepath" then
+          config.dataPath := convDosPath(argv(PROGRAM)[idx + 2]);
+        elsif argv(PROGRAM)[succ(idx)] = "fs_game" then
+          config.basePath := convDosPath(argv(PROGRAM)[idx + 2]);
+        end if;
+        idx +:= 2;
+      elsif arg = "+map" and idx < length(argv(PROGRAM)) then
+        config.startMap := argv(PROGRAM)[succ(idx)];
+        incr(idx);
+      end if;
+      incr(idx);
+    end while;
+    if config.basePath = "" then
+      config.basePath := joinPath(config.dataPath, DEFAULT_BASE_DIR);
+    end if;
+  end func;
+
+const proc: showUsage is func
+  begin
+    writeln("Usage:");
+    writeln("  s7 doom3_seed7_aas.s7 --doom3_data_path <doom3-root>");
+    writeln("  s7 doom3_seed7_aas.s7 +set fs_basepath <doom3-root> +map <map>");
+    writeln;
+    writeln("Scans user-owned Doom 3 pk4 files for AAS/navigation readiness.");
+  end func;
+
+const proc: printStats (in aasStats: stats) is func
+  begin
+    logInfo("pk4_archives=" <& stats.pk4Archives);
+    logInfo("requested_map=" <& stats.requestedMapPath);
+    logInfo("requested_map_found=" <& stats.requestedMapFound);
+    logInfo("requested_aas=" <& stats.requestedAasPath);
+    logInfo("requested_aas_found=" <& stats.requestedAasFound);
+    logInfo("aas_assets=" <& stats.aasAssets);
+    logInfo("map_ai_entities player_start=" <& stats.playerStartFound <&
+        " monsters=" <& stats.mapMonsters);
+    logInfo("aas_graph areas=" <& stats.aasAreas <&
+        " reachabilities=" <& stats.aasReachabilities);
+    logInfo("aas_settings agents=" <& stats.aasSettings <&
+        " version=" <& stats.aasVersion);
+    logInfo("aas_path start_area=" <& stats.startArea <&
+        " goal_area=" <& stats.goalArea <& " found=" <&
+        stats.pathFound <& " steps=" <& stats.pathSteps <&
+        " cost=" <& stats.pathCost);
+    logInfo("aas_runtime monster_area=" <& stats.runtimeMonsterArea <&
+        " player_area=" <& stats.runtimePlayerArea <& " path=" <&
+        stats.runtimePathFound <& " cost=" <& stats.runtimePathCost);
+    logInfo("aas_runtime_move next_x=" <& stats.runtimeMonsterNextX <&
+        " next_y=" <& stats.runtimeMonsterNextY <& " attack=" <&
+        stats.runtimeMonsterAttack <& " player_health_after=" <&
+        stats.runtimePlayerHealthAfter);
+    if stats.firstAasAsset <> "" then logInfo("first_aas_asset=" <& stats.firstAasAsset); end if;
+    if stats.firstAgentClass <> "" then logInfo("first_agent_class=" <& stats.firstAgentClass); end if;
+    if stats.firstMonsterName <> "" then logInfo("first_monster_name=" <& stats.firstMonsterName); end if;
+    if stats.firstMonsterClass <> "" then logInfo("first_monster_class=" <& stats.firstMonsterClass); end if;
+    if stats.firstReachability <> "" then logInfo("first_reachability=" <& stats.firstReachability); end if;
+    if stats.firstPath <> "" then logInfo("first_path=" <& stats.firstPath); end if;
+    if stats.firstRuntimePath <> "" then logInfo("first_runtime_path=" <& stats.firstRuntimePath); end if;
+    logInfo("aas_probe_ready=" <& (stats.pk4Archives <> 0 and
+        stats.requestedMapFound and stats.requestedAasFound and
+        stats.playerStartFound and stats.mapMonsters <> 0 and
+        stats.aasAreas <> 0 and stats.aasReachabilities <> 0 and
+        stats.pathFound and stats.runtimePathFound and
+        stats.runtimeMonsterAttack));
+  end func;
+
+const proc: main is func
+  local
+    var aasConfig: config is aasConfig.value;
+    var aasStats: stats is aasStats.value;
+    var array string: pk4Files is 0 times "";
+    var string: pk4File is "";
+  begin
+    parseArgs(config);
+    if config.showHelp then
+      showUsage;
+    else
+      stats.requestedMapPath := mapNameToAssetPath(config.startMap);
+      stats.requestedAasPath := companionAasPath(stats.requestedMapPath);
+      if fileType(config.basePath) <> FILE_DIR then
+        logError("Doom 3 base directory not found: " <& config.basePath);
+        logError("Expected a legal install path containing base/*.pk4");
+      else
+        pk4Files := findPk4Archives(config.basePath);
+        sortStrings(pk4Files);
+        stats.pk4Archives := length(pk4Files);
+        if length(pk4Files) = 0 then
+          logError("No .pk4 archives found in: " <& config.basePath);
+        else
+          for pk4File range pk4Files do
+            scanArchive(stats, pk4File);
+          end for;
+          solvePath(stats);
+          solveRuntimeNavigationFrame(stats);
+          printStats(stats);
+        end if;
+      end if;
+    end if;
+  end func;

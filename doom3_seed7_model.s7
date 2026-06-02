@@ -1,0 +1,915 @@
+(********************************************************************)
+(*  doom3_seed7_model.s7                                            *)
+(*                                                                  *)
+(*  Focused Doom 3 / id Tech 4 model declaration probe for Seed7.   *)
+(*  It reads user-owned pk4 archives, scans model declarations,      *)
+(*  resolves entityDef model spawnargs to mesh assets, and reports   *)
+(*  availability. No commercial data is bundled.                     *)
+(********************************************************************)
+
+$ include "seed7_05.s7i";
+$ include "osfiles.s7i";
+$ include "zip.s7i";
+
+const string: DEFAULT_DATA_PATH is ".";
+const string: DEFAULT_BASE_DIR is "base";
+
+const type: modelConfig is new struct
+    var string: dataPath is DEFAULT_DATA_PATH;
+    var string: basePath is "";
+    var boolean: showHelp is FALSE;
+  end struct;
+
+const type: modelStats is new struct
+    var integer: pk4Archives is 0;
+    var integer: modelAssets is 0;
+    var integer: modelDefs is 0;
+    var integer: modelDefMeshValues is 0;
+    var integer: entityDefs is 0;
+    var integer: entityModelRefs is 0;
+    var integer: resolvedEntityModelRefs is 0;
+    var integer: missingEntityModelRefs is 0;
+    var integer: entityAnimRefs is 0;
+    var integer: resolvedEntityAnimRefs is 0;
+    var integer: missingEntityAnimRefs is 0;
+    var integer: skinAssets is 0;
+    var integer: skinDecls is 0;
+    var integer: skinRemaps is 0;
+    var integer: entitySkinRefs is 0;
+    var integer: resolvedEntitySkinRefs is 0;
+    var integer: missingEntitySkinRefs is 0;
+    var integer: md5MeshAssets is 0;
+    var integer: md5MeshesParsed is 0;
+    var integer: md5Version10 is 0;
+    var integer: md5JointDecls is 0;
+    var integer: md5MeshBlocks is 0;
+    var integer: md5ShaderRefs is 0;
+    var integer: md5VertDecls is 0;
+    var integer: md5TriDecls is 0;
+    var integer: md5WeightDecls is 0;
+    var integer: md5AnimAssets is 0;
+    var integer: md5AnimsParsed is 0;
+    var integer: md5AnimVersion10 is 0;
+    var integer: md5AnimFrames is 0;
+    var integer: md5AnimJoints is 0;
+    var integer: md5AnimFrameRateTotal is 0;
+    var integer: md5AnimComponents is 0;
+    var integer: md5AnimHierarchyDecls is 0;
+    var integer: md5AnimBoundsDecls is 0;
+    var integer: md5AnimBaseFrameDecls is 0;
+    var integer: md5AnimPlaybackSamples is 0;
+    var integer: md5AnimInterpolationSamples is 0;
+    var integer: md5PoseCompatiblePairs is 0;
+    var string: firstModelAsset is "";
+    var string: firstModelDef is "";
+    var string: firstModelDefMesh is "";
+    var string: firstEntityModelRef is "";
+    var string: firstResolvedEntityModel is "";
+    var string: firstMissingEntityModel is "";
+    var string: firstEntityAnimRef is "";
+    var string: firstResolvedEntityAnim is "";
+    var string: firstMissingEntityAnim is "";
+    var string: firstSkinAsset is "";
+    var string: firstSkinDecl is "";
+    var string: firstSkinRemap is "";
+    var string: firstEntitySkinRef is "";
+    var string: firstResolvedEntitySkin is "";
+    var string: firstMissingEntitySkin is "";
+    var string: firstMd5Mesh is "";
+    var string: firstMd5Shader is "";
+    var string: firstMd5Anim is "";
+    var integer: firstMd5AnimSampleFrame is 0;
+    var integer: firstMd5AnimNextFrame is 0;
+    var integer: firstMd5AnimBlendPercent is 0;
+    var integer: firstPoseCompatibleJoints is 0;
+    var array string: modelAssetStems is 0 times "";
+    var array string: modelDefNames is 0 times "";
+    var array string: modelDefMeshStems is 0 times "";
+    var array string: skinAssetStems is 0 times "";
+    var array string: skinNames is 0 times "";
+  end struct;
+
+const proc: logInfo (in string: msg) is func
+  begin
+    writeln("[model] " <& msg);
+  end func;
+
+const proc: logError (in string: msg) is func
+  begin
+    writeln("[model-error] " <& msg);
+  end func;
+
+const func string: joinPath (in string: leftPath, in string: rightPath) is func
+  result
+    var string: joined is "";
+  begin
+    if leftPath = "" then
+      joined := rightPath;
+    elsif endsWith(leftPath, "/") or endsWith(leftPath, "\\") then
+      joined := leftPath <& rightPath;
+    else
+      joined := leftPath <& "/" <& rightPath;
+    end if;
+  end func;
+
+const func boolean: isPk4Name (in string: fileName) is
+    return endsWith(lower(fileName), ".pk4");
+
+const func string: normalizedAssetPath (in string: filePath) is
+    return replace(lower(filePath), "\\", "/");
+
+const func boolean: isModelRef (in string: filePath) is func
+  result
+    var boolean: modelRef is FALSE;
+  begin
+    modelRef := endsWith(lower(filePath), ".md5mesh") or
+        endsWith(lower(filePath), ".md5anim") or
+        endsWith(lower(filePath), ".lwo") or
+        endsWith(lower(filePath), ".ase");
+  end func;
+
+const func boolean: isSkinAssetPath (in string: filePath) is
+    return endsWith(normalizedAssetPath(filePath), ".skin");
+
+const func string: assetStem (in string: filePath) is func
+  result
+    var string: stem is "";
+  local
+    var string: lowerPath is "";
+    var integer: dotPos is 0;
+  begin
+    lowerPath := normalizedAssetPath(filePath);
+    dotPos := length(lowerPath);
+    while dotPos >= 1 and lowerPath[dotPos] <> '.' do
+      decr(dotPos);
+    end while;
+    if dotPos > 1 then
+      stem := lowerPath[.. pred(dotPos)];
+    else
+      stem := lowerPath;
+    end if;
+  end func;
+
+const func boolean: containsString (in array string: values,
+    in string: value) is func
+  result
+    var boolean: found is FALSE;
+  local
+    var string: current is "";
+  begin
+    for current range values do
+      if current = value then
+        found := TRUE;
+      end if;
+    end for;
+  end func;
+
+const proc: appendUnique (inout array string: values, in string: value) is func
+  begin
+    if value <> "" and not containsString(values, value) then
+      values &:= value;
+    end if;
+  end func;
+
+const func string: cleanedToken (in string: token) is func
+  result
+    var string: clean is "";
+  local
+    var integer: idx is 1;
+    var char: ch is ' ';
+  begin
+    clean := token;
+    while idx <= length(clean) do
+      ch := clean[idx];
+      if ch = '"' or ch = '(' or ch = ')' or ch = '{' or ch = '}' or
+          ch = ',' or ch = ';' then
+        clean := clean[.. pred(idx)] & clean[succ(idx) ..];
+      else
+        incr(idx);
+      end if;
+    end while;
+  end func;
+
+const func integer: integerAfterWord (in string: content,
+    in string: keyName) is func
+  result
+    var integer: value is 0;
+  local
+    var string: normalizedContent is "";
+    var array string: tokens is 0 times "";
+    var integer: tokenIndex is 1;
+    var string: token is "";
+  begin
+    normalizedContent := replace(lower(content), "\n", " ");
+    normalizedContent := replace(normalizedContent, "\r", " ");
+    normalizedContent := replace(normalizedContent, "\t", " ");
+    tokens := noEmptyStrings(split(normalizedContent, ' '));
+    while tokenIndex < length(tokens) and value = 0 do
+      if cleanedToken(tokens[tokenIndex]) = lower(keyName) then
+        token := cleanedToken(tokens[succ(tokenIndex)]);
+        block
+          value := integer(token);
+        exception
+          catch RANGE_ERROR:
+          value := 0;
+        end block;
+      end if;
+      incr(tokenIndex);
+    end while;
+  end func;
+
+const func integer: countWord (in string: content,
+    in string: keyName) is func
+  result
+    var integer: count is 0;
+  local
+    var string: normalizedContent is "";
+    var array string: tokens is 0 times "";
+    var string: token is "";
+  begin
+    normalizedContent := replace(lower(content), "\n", " ");
+    normalizedContent := replace(normalizedContent, "\r", " ");
+    normalizedContent := replace(normalizedContent, "\t", " ");
+    tokens := noEmptyStrings(split(normalizedContent, ' '));
+    for token range tokens do
+      if cleanedToken(token) = lower(keyName) then
+        count +:= 1;
+      end if;
+    end for;
+  end func;
+
+const func string: valueAfterWord (in string: content,
+    in string: keyName) is func
+  result
+    var string: value is "";
+  local
+    var string: normalizedContent is "";
+    var array string: tokens is 0 times "";
+    var integer: tokenIndex is 1;
+  begin
+    normalizedContent := replace(content, "\n", " ");
+    normalizedContent := replace(normalizedContent, "\r", " ");
+    normalizedContent := replace(normalizedContent, "\t", " ");
+    tokens := noEmptyStrings(split(normalizedContent, ' '));
+    while tokenIndex < length(tokens) and value = "" do
+      if lower(cleanedToken(tokens[tokenIndex])) = lower(keyName) then
+        value := cleanedToken(tokens[succ(tokenIndex)]);
+      end if;
+      incr(tokenIndex);
+    end while;
+  end func;
+
+const func string: quotedValueAfter (in string: content, in string: keyName) is func
+  result
+    var string: value is "";
+  local
+    var string: keyText is "";
+    var integer: keyPos is 0;
+    var integer: keyEnd is 0;
+    var integer: valueStart is 0;
+    var integer: valueEnd is 0;
+  begin
+    keyText := "\"" <& keyName <& "\"";
+    keyPos := pos(lower(content), lower(keyText), 1);
+    if keyPos <> 0 then
+      keyEnd := pos(content, "\"", succ(keyPos));
+      if keyEnd <> 0 then
+        valueStart := pos(content, "\"", succ(keyEnd));
+        if valueStart <> 0 then
+          valueEnd := pos(content, "\"", succ(valueStart));
+          if valueEnd <> 0 then
+            value := content[succ(valueStart) .. pred(valueEnd)];
+          end if;
+        end if;
+      end if;
+    end if;
+  end func;
+
+const func string: declNameAfter (in string: content, in integer: startPos) is func
+  result
+    var string: declName is "";
+  local
+    var integer: idx is 0;
+    var char: ch is ' ';
+  begin
+    idx := startPos;
+    while idx <= length(content) and declName = "" do
+      ch := content[idx];
+      if ch <> ' ' and ch <> '\t' and ch <> '\n' and ch <> '\r' then
+        while idx <= length(content) and content[idx] <> ' ' and
+            content[idx] <> '\t' and content[idx] <> '\n' and
+            content[idx] <> '\r' and content[idx] <> '{' do
+          declName &:= content[idx];
+          incr(idx);
+        end while;
+      end if;
+      incr(idx);
+    end while;
+  end func;
+
+const func integer: matchingBlockEnd (in string: content,
+    in integer: blockStart) is func
+  result
+    var integer: blockEnd is 0;
+  local
+    var integer: idx is 0;
+    var integer: depth is 0;
+  begin
+    if blockStart <> 0 then
+      idx := blockStart;
+      while idx <= length(content) and blockEnd = 0 do
+        if content[idx] = '{' then
+          incr(depth);
+        elsif content[idx] = '}' then
+          decr(depth);
+          if depth = 0 then
+            blockEnd := idx;
+          end if;
+        end if;
+        incr(idx);
+      end while;
+    end if;
+  end func;
+
+const func string: meshStemFromModelBlock (in string: blockText) is func
+  result
+    var string: meshStem is "";
+  local
+    var string: normalizedBlock is "";
+    var array string: tokens is 0 times "";
+    var integer: tokenIndex is 1;
+    var string: token is "";
+  begin
+    normalizedBlock := replace(lower(blockText), "\n", " ");
+    normalizedBlock := replace(normalizedBlock, "\r", " ");
+    normalizedBlock := replace(normalizedBlock, "\t", " ");
+    tokens := noEmptyStrings(split(normalizedBlock, ' '));
+    while tokenIndex < length(tokens) and meshStem = "" do
+      if cleanedToken(tokens[tokenIndex]) = "mesh" then
+        token := cleanedToken(tokens[succ(tokenIndex)]);
+        if isModelRef(token) then
+          meshStem := assetStem(token);
+        end if;
+      end if;
+      incr(tokenIndex);
+    end while;
+  end func;
+
+const func string: meshStemForModelDef (
+    in modelStats: stats, in string: modelName) is func
+  result
+    var string: meshStem is "";
+  local
+    var integer: modelIndex is 1;
+  begin
+    while modelIndex <= length(stats.modelDefNames) and meshStem = "" do
+      if stats.modelDefNames[modelIndex] = lower(modelName) and
+          modelIndex <= length(stats.modelDefMeshStems) then
+        meshStem := stats.modelDefMeshStems[modelIndex];
+      end if;
+      incr(modelIndex);
+    end while;
+  end func;
+
+const proc: inspectModelDefs (inout modelStats: stats,
+    in string: content) is func
+  local
+    var string: contentLower is "";
+    var integer: searchPos is 1;
+    var integer: modelPos is 0;
+    var string: modelName is "";
+    var integer: blockStart is 0;
+    var integer: blockEnd is 0;
+    var string: meshStem is "";
+  begin
+    contentLower := lower(content);
+    modelPos := pos(contentLower, "model ", searchPos);
+    while modelPos <> 0 do
+      modelName := lower(declNameAfter(content, modelPos + length("model ")));
+      blockStart := pos(content, "{", modelPos);
+      blockEnd := matchingBlockEnd(content, blockStart);
+      if modelName <> "" and blockStart <> 0 and blockEnd <> 0 and
+          (modelPos = 1 or content[pred(modelPos)] <> '"') then
+        meshStem := meshStemFromModelBlock(content[blockStart .. blockEnd]);
+        stats.modelDefs +:= 1;
+        stats.modelDefNames &:= modelName;
+        stats.modelDefMeshStems &:= meshStem;
+        if meshStem <> "" then
+          stats.modelDefMeshValues +:= 1;
+          if stats.firstModelDefMesh = "" then
+            stats.firstModelDefMesh := modelName <& "=" <& meshStem;
+          end if;
+        end if;
+        if stats.firstModelDef = "" then
+          stats.firstModelDef := modelName;
+        end if;
+      end if;
+      searchPos := modelPos + length("model ");
+      modelPos := pos(contentLower, "model ", searchPos);
+    end while;
+  end func;
+
+const proc: inspectSkinContent (inout modelStats: stats,
+    in string: path, in string: content) is func
+  local
+    var string: contentLower is "";
+    var integer: searchPos is 1;
+    var integer: skinPos is 0;
+    var string: skinName is "";
+    var integer: blockStart is 0;
+    var integer: blockEnd is 0;
+    var string: blockText is "";
+    var string: normalizedBlock is "";
+    var array string: tokens is 0 times "";
+    var integer: tokenIndex is 1;
+    var string: fromMaterial is "";
+    var string: toMaterial is "";
+  begin
+    stats.skinAssets +:= 1;
+    appendUnique(stats.skinAssetStems, assetStem(path));
+    if stats.firstSkinAsset = "" then
+      stats.firstSkinAsset := path;
+    end if;
+    contentLower := lower(content);
+    skinPos := pos(contentLower, "skin ", searchPos);
+    while skinPos <> 0 do
+      skinName := lower(declNameAfter(content, skinPos + length("skin ")));
+      blockStart := pos(content, "{", skinPos);
+      blockEnd := matchingBlockEnd(content, blockStart);
+      if skinName <> "" and blockStart <> 0 and blockEnd <> 0 then
+        stats.skinDecls +:= 1;
+        stats.skinNames &:= skinName;
+        if stats.firstSkinDecl = "" then
+          stats.firstSkinDecl := skinName;
+        end if;
+        blockText := content[blockStart .. blockEnd];
+        normalizedBlock := replace(lower(blockText), "\n", " ");
+        normalizedBlock := replace(normalizedBlock, "\r", " ");
+        normalizedBlock := replace(normalizedBlock, "\t", " ");
+        tokens := noEmptyStrings(split(normalizedBlock, ' '));
+        tokenIndex := 1;
+        while tokenIndex < length(tokens) do
+          fromMaterial := cleanedToken(tokens[tokenIndex]);
+          toMaterial := cleanedToken(tokens[succ(tokenIndex)]);
+          if startsWith(fromMaterial, "textures/") or
+              startsWith(fromMaterial, "models/") then
+            stats.skinRemaps +:= 1;
+            if stats.firstSkinRemap = "" then
+              stats.firstSkinRemap := fromMaterial <& ">" <& toMaterial;
+            end if;
+            incr(tokenIndex);
+          end if;
+          incr(tokenIndex);
+        end while;
+      end if;
+      searchPos := skinPos + length("skin ");
+      skinPos := pos(contentLower, "skin ", searchPos);
+    end while;
+  end func;
+
+const func boolean: skinRefResolved (in modelStats: stats,
+    in string: skinRef) is func
+  result
+    var boolean: resolved is FALSE;
+  begin
+    resolved := containsString(stats.skinNames, lower(skinRef)) or
+        containsString(stats.skinAssetStems, assetStem(skinRef));
+  end func;
+
+const proc: inspectEntityDefs (inout modelStats: stats,
+    in string: content) is func
+  local
+    var string: contentLower is "";
+    var integer: searchPos is 1;
+    var integer: defPos is 0;
+    var integer: blockStart is 0;
+    var integer: blockEnd is 0;
+    var string: modelRef is "";
+    var string: meshStem is "";
+    var string: animRef is "";
+    var string: animStem is "";
+    var string: skinRef is "";
+  begin
+    contentLower := lower(content);
+    defPos := pos(contentLower, "entitydef ", searchPos);
+    while defPos <> 0 do
+      stats.entityDefs +:= 1;
+      blockStart := pos(content, "{", defPos);
+      blockEnd := matchingBlockEnd(content, blockStart);
+      if blockStart <> 0 and blockEnd <> 0 then
+        modelRef := quotedValueAfter(content[blockStart .. blockEnd], "model");
+        if modelRef <> "" then
+          stats.entityModelRefs +:= 1;
+          if stats.firstEntityModelRef = "" then
+            stats.firstEntityModelRef := modelRef;
+          end if;
+          if isModelRef(modelRef) then
+            meshStem := assetStem(modelRef);
+          else
+            meshStem := meshStemForModelDef(stats, modelRef);
+          end if;
+          if meshStem <> "" and containsString(stats.modelAssetStems, meshStem) then
+            stats.resolvedEntityModelRefs +:= 1;
+            if stats.firstResolvedEntityModel = "" then
+              stats.firstResolvedEntityModel := modelRef <& "=" <& meshStem;
+            end if;
+          else
+            stats.missingEntityModelRefs +:= 1;
+            if stats.firstMissingEntityModel = "" then
+              stats.firstMissingEntityModel := modelRef;
+            end if;
+          end if;
+        end if;
+        animRef := quotedValueAfter(content[blockStart .. blockEnd], "anim");
+        if animRef <> "" then
+          stats.entityAnimRefs +:= 1;
+          if stats.firstEntityAnimRef = "" then
+            stats.firstEntityAnimRef := animRef;
+          end if;
+          if endsWith(lower(animRef), ".md5anim") then
+            animStem := assetStem(animRef);
+          else
+            animStem := "";
+          end if;
+          if animStem <> "" and containsString(stats.modelAssetStems,
+              animStem) then
+            stats.resolvedEntityAnimRefs +:= 1;
+            if stats.firstResolvedEntityAnim = "" then
+              stats.firstResolvedEntityAnim := animRef <& "=" <& animStem;
+            end if;
+          else
+            stats.missingEntityAnimRefs +:= 1;
+            if stats.firstMissingEntityAnim = "" then
+              stats.firstMissingEntityAnim := animRef;
+            end if;
+          end if;
+        end if;
+        skinRef := quotedValueAfter(content[blockStart .. blockEnd], "skin");
+        if skinRef <> "" then
+          stats.entitySkinRefs +:= 1;
+          if stats.firstEntitySkinRef = "" then
+            stats.firstEntitySkinRef := skinRef;
+          end if;
+          if skinRefResolved(stats, skinRef) then
+            stats.resolvedEntitySkinRefs +:= 1;
+            if stats.firstResolvedEntitySkin = "" then
+              stats.firstResolvedEntitySkin := skinRef;
+            end if;
+          else
+            stats.missingEntitySkinRefs +:= 1;
+            if stats.firstMissingEntitySkin = "" then
+              stats.firstMissingEntitySkin := skinRef;
+            end if;
+          end if;
+        end if;
+      end if;
+      searchPos := defPos + length("entitydef ");
+      defPos := pos(contentLower, "entitydef ", searchPos);
+    end while;
+  end func;
+
+const proc: inspectMd5MeshContent (inout modelStats: stats,
+    in string: path, in string: content) is func
+  local
+    var string: contentLower is "";
+    var integer: version is 0;
+    var string: shaderRef is "";
+  begin
+    contentLower := lower(content);
+    if pos(contentLower, "md5version", 1) <> 0 and
+        pos(contentLower, "numjoints", 1) <> 0 and
+        pos(contentLower, "mesh", 1) <> 0 then
+      stats.md5MeshesParsed +:= 1;
+      if stats.firstMd5Mesh = "" then
+        stats.firstMd5Mesh := path;
+      end if;
+      version := integerAfterWord(content, "md5version");
+      if version = 10 then
+        stats.md5Version10 +:= 1;
+      end if;
+      stats.md5JointDecls +:= integerAfterWord(content, "numjoints");
+      stats.md5MeshBlocks +:= integerAfterWord(content, "nummeshes");
+      stats.md5VertDecls +:= integerAfterWord(content, "numverts");
+      stats.md5TriDecls +:= integerAfterWord(content, "numtris");
+      stats.md5WeightDecls +:= integerAfterWord(content, "numweights");
+      stats.md5ShaderRefs +:= countWord(content, "shader");
+      shaderRef := valueAfterWord(content, "shader");
+      if stats.firstMd5Shader = "" and shaderRef <> "" then
+        stats.firstMd5Shader := shaderRef;
+      end if;
+    end if;
+  end func;
+
+const proc: inspectMd5AnimContent (inout modelStats: stats,
+    in string: path, in string: content) is func
+  local
+    var string: contentLower is "";
+    var integer: version is 0;
+    var integer: frameCount is 0;
+    var integer: frameRate is 0;
+    var integer: sampleFrame is 0;
+    var integer: nextFrame is 0;
+    var integer: frameMillis is 0;
+    var integer: sampleMillis is 0;
+    var integer: blendPercent is 0;
+  begin
+    contentLower := lower(content);
+    if pos(contentLower, "md5version", 1) <> 0 and
+        pos(contentLower, "numframes", 1) <> 0 and
+        pos(contentLower, "framerate", 1) <> 0 and
+        pos(contentLower, "hierarchy", 1) <> 0 then
+      stats.md5AnimsParsed +:= 1;
+      if stats.firstMd5Anim = "" then
+        stats.firstMd5Anim := path;
+      end if;
+      version := integerAfterWord(content, "md5version");
+      if version = 10 then
+        stats.md5AnimVersion10 +:= 1;
+      end if;
+      frameCount := integerAfterWord(content, "numframes");
+      frameRate := integerAfterWord(content, "framerate");
+      stats.md5AnimFrames +:= frameCount;
+      stats.md5AnimJoints +:= integerAfterWord(content, "numjoints");
+      stats.md5AnimFrameRateTotal +:= frameRate;
+      stats.md5AnimComponents +:= integerAfterWord(content,
+          "numanimatedcomponents");
+      stats.md5AnimHierarchyDecls +:= countWord(content, "hierarchy");
+      stats.md5AnimBoundsDecls +:= countWord(content, "bounds");
+      stats.md5AnimBaseFrameDecls +:= countWord(content, "baseframe");
+      if frameCount <> 0 and frameRate <> 0 then
+        sampleFrame := (frameRate * 75 div 1000) rem frameCount;
+        nextFrame := (sampleFrame + 1) rem frameCount;
+        frameMillis := 1000 div frameRate;
+        if frameMillis <> 0 then
+          sampleMillis := 75 rem frameMillis;
+          blendPercent := sampleMillis * 100 div frameMillis;
+        end if;
+        stats.md5AnimPlaybackSamples +:= 1;
+        stats.md5AnimInterpolationSamples +:= 1;
+        if stats.firstMd5AnimSampleFrame = 0 then
+          stats.firstMd5AnimSampleFrame := sampleFrame;
+        end if;
+        if stats.md5AnimInterpolationSamples = 1 then
+          stats.firstMd5AnimNextFrame := nextFrame;
+          stats.firstMd5AnimBlendPercent := blendPercent;
+        end if;
+      end if;
+    end if;
+  end func;
+
+const proc: updatePoseCompatibility (inout modelStats: stats) is func
+  begin
+    if stats.md5PoseCompatiblePairs = 0 and stats.md5JointDecls <> 0 and
+        stats.md5JointDecls = stats.md5AnimJoints then
+      stats.md5PoseCompatiblePairs := 1;
+      stats.firstPoseCompatibleJoints := stats.md5JointDecls;
+    end if;
+  end func;
+
+const func array string: findPk4Archives (in string: basePath) is func
+  result
+    var array string: pk4Files is 0 times "";
+  local
+    var array string: names is 0 times "";
+    var string: name is "";
+  begin
+    if fileType(basePath) = FILE_DIR then
+      names := readDir(basePath);
+      for name range names do
+        if isPk4Name(name) and fileType(joinPath(basePath, name)) = FILE_REGULAR then
+          pk4Files &:= joinPath(basePath, name);
+        end if;
+      end for;
+    end if;
+  end func;
+
+const proc: scanArchive (inout modelStats: stats,
+    in string: pk4File) is func
+  local
+    var fileSys: zipFs is fileSys.value;
+    var array string: paths is 0 times "";
+    var string: path is "";
+    var string: pathLower is "";
+    var string: content is "";
+  begin
+    zipFs := openZip(pk4File);
+    if zipFs = fileSys.value then
+      logError("could not open pk4 archive: " <& pk4File);
+    else
+      paths := readDir(zipFs, RECURSIVE);
+      for path range paths do
+        pathLower := normalizedAssetPath(path);
+        if isModelRef(pathLower) then
+          stats.modelAssets +:= 1;
+          appendUnique(stats.modelAssetStems, assetStem(pathLower));
+          if stats.firstModelAsset = "" then
+            stats.firstModelAsset := pathLower;
+          end if;
+          if endsWith(pathLower, ".md5mesh") then
+            stats.md5MeshAssets +:= 1;
+            inspectMd5MeshContent(stats, pathLower, getFile(zipFs, path));
+          elsif endsWith(pathLower, ".md5anim") then
+            stats.md5AnimAssets +:= 1;
+            inspectMd5AnimContent(stats, pathLower, getFile(zipFs, path));
+          end if;
+        elsif isSkinAssetPath(pathLower) then
+          inspectSkinContent(stats, pathLower, getFile(zipFs, path));
+        end if;
+      end for;
+      for path range paths do
+        pathLower := normalizedAssetPath(path);
+        if endsWith(pathLower, ".def") or endsWith(pathLower, ".decl") then
+          content := getFile(zipFs, path);
+          inspectModelDefs(stats, content);
+          inspectEntityDefs(stats, content);
+        end if;
+      end for;
+      updatePoseCompatibility(stats);
+      close(zipFs);
+    end if;
+  end func;
+
+const proc: parseArgs (inout modelConfig: config) is func
+  local
+    var array string: args is 0 times "";
+    var integer: argIdx is 1;
+  begin
+    args := argv(PROGRAM);
+    while argIdx <= length(args) do
+      if args[argIdx] = "--help" or args[argIdx] = "-h" then
+        config.showHelp := TRUE;
+      elsif args[argIdx] = "--doom3_data_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.dataPath := convDosPath(args[argIdx]);
+      elsif args[argIdx] = "--doom3_base_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.basePath := convDosPath(args[argIdx]);
+      elsif args[argIdx] = "+set" and argIdx + 2 <= length(args) then
+        if args[argIdx + 1] = "fs_basepath" then
+          config.dataPath := convDosPath(args[argIdx + 2]);
+        elsif args[argIdx + 1] = "fs_game" then
+          config.basePath := convDosPath(args[argIdx + 2]);
+        end if;
+        argIdx +:= 2;
+      end if;
+      incr(argIdx);
+    end while;
+    if config.basePath = "" then
+      config.basePath := joinPath(config.dataPath, DEFAULT_BASE_DIR);
+    end if;
+  end func;
+
+const proc: showUsage is func
+  begin
+    writeln("Usage:");
+    writeln("  s7 doom3_seed7_model.s7 --doom3_data_path <doom3-root>");
+    writeln("  s7 doom3_seed7_model.s7 +set fs_basepath <doom3-root>");
+    writeln("");
+    writeln("Scans user-owned Doom 3 pk4 files for modelDef readiness.");
+  end func;
+
+const proc: printStats (in modelStats: stats) is func
+  begin
+    logInfo("pk4_archives=" <& stats.pk4Archives);
+    logInfo("model_assets=" <& stats.modelAssets <&
+        " unique=" <& length(stats.modelAssetStems));
+    logInfo("model_defs=" <& stats.modelDefs <&
+        " mesh_values=" <& stats.modelDefMeshValues);
+    logInfo("entity_defs=" <& stats.entityDefs <&
+        " model_refs=" <& stats.entityModelRefs);
+    logInfo("entity_model_resolution resolved=" <&
+        stats.resolvedEntityModelRefs <& " missing=" <&
+        stats.missingEntityModelRefs);
+    logInfo("entity_anim_refs=" <& stats.entityAnimRefs <&
+        " resolved=" <& stats.resolvedEntityAnimRefs <&
+        " missing=" <& stats.missingEntityAnimRefs);
+    logInfo("skin_assets=" <& stats.skinAssets <&
+        " unique=" <& length(stats.skinAssetStems) <&
+        " skin_decls=" <& stats.skinDecls <&
+        " remaps=" <& stats.skinRemaps);
+    logInfo("entity_skin_refs=" <& stats.entitySkinRefs <&
+        " resolved=" <& stats.resolvedEntitySkinRefs <&
+        " missing=" <& stats.missingEntitySkinRefs);
+    logInfo("md5_mesh_assets=" <& stats.md5MeshAssets <&
+        " parsed=" <& stats.md5MeshesParsed <&
+        " version10=" <& stats.md5Version10);
+    logInfo("md5_mesh_metadata joints=" <& stats.md5JointDecls <&
+        " meshes=" <& stats.md5MeshBlocks <&
+        " shaders=" <& stats.md5ShaderRefs <&
+        " verts=" <& stats.md5VertDecls <&
+        " tris=" <& stats.md5TriDecls <&
+        " weights=" <& stats.md5WeightDecls);
+    logInfo("md5_anim_assets=" <& stats.md5AnimAssets <&
+        " parsed=" <& stats.md5AnimsParsed <&
+        " version10=" <& stats.md5AnimVersion10);
+    logInfo("md5_anim_metadata frames=" <& stats.md5AnimFrames <&
+        " joints=" <& stats.md5AnimJoints <&
+        " framerate_total=" <& stats.md5AnimFrameRateTotal <&
+        " components=" <& stats.md5AnimComponents <&
+        " hierarchy=" <& stats.md5AnimHierarchyDecls <&
+        " bounds=" <& stats.md5AnimBoundsDecls <&
+        " baseframe=" <& stats.md5AnimBaseFrameDecls);
+    logInfo("md5_anim_playback_samples=" <& stats.md5AnimPlaybackSamples <&
+        " first_frame_75ms=" <& stats.firstMd5AnimSampleFrame);
+    logInfo("md5_anim_interpolation samples=" <&
+        stats.md5AnimInterpolationSamples <&
+        " first_next_frame=" <& stats.firstMd5AnimNextFrame <&
+        " first_blend_percent=" <& stats.firstMd5AnimBlendPercent);
+    logInfo("md5_pose_compat pairs=" <& stats.md5PoseCompatiblePairs <&
+        " first_joint_count=" <& stats.firstPoseCompatibleJoints);
+    if stats.firstModelAsset <> "" then
+      logInfo("first_model_asset=" <& stats.firstModelAsset);
+    end if;
+    if stats.firstModelDef <> "" then
+      logInfo("first_model_def=" <& stats.firstModelDef);
+    end if;
+    if stats.firstModelDefMesh <> "" then
+      logInfo("first_model_def_mesh=" <& stats.firstModelDefMesh);
+    end if;
+    if stats.firstEntityModelRef <> "" then
+      logInfo("first_entity_model_ref=" <& stats.firstEntityModelRef);
+    end if;
+    if stats.firstResolvedEntityModel <> "" then
+      logInfo("first_resolved_entity_model=" <&
+          stats.firstResolvedEntityModel);
+    end if;
+    if stats.firstMissingEntityModel <> "" then
+      logInfo("first_missing_entity_model=" <& stats.firstMissingEntityModel);
+    end if;
+    if stats.firstEntityAnimRef <> "" then
+      logInfo("first_entity_anim_ref=" <& stats.firstEntityAnimRef);
+    end if;
+    if stats.firstResolvedEntityAnim <> "" then
+      logInfo("first_resolved_entity_anim=" <&
+          stats.firstResolvedEntityAnim);
+    end if;
+    if stats.firstMissingEntityAnim <> "" then
+      logInfo("first_missing_entity_anim=" <& stats.firstMissingEntityAnim);
+    end if;
+    if stats.firstSkinAsset <> "" then
+      logInfo("first_skin_asset=" <& stats.firstSkinAsset);
+    end if;
+    if stats.firstSkinDecl <> "" then
+      logInfo("first_skin_decl=" <& stats.firstSkinDecl);
+    end if;
+    if stats.firstSkinRemap <> "" then
+      logInfo("first_skin_remap=" <& stats.firstSkinRemap);
+    end if;
+    if stats.firstEntitySkinRef <> "" then
+      logInfo("first_entity_skin_ref=" <& stats.firstEntitySkinRef);
+    end if;
+    if stats.firstResolvedEntitySkin <> "" then
+      logInfo("first_resolved_entity_skin=" <& stats.firstResolvedEntitySkin);
+    end if;
+    if stats.firstMissingEntitySkin <> "" then
+      logInfo("first_missing_entity_skin=" <& stats.firstMissingEntitySkin);
+    end if;
+    if stats.firstMd5Mesh <> "" then
+      logInfo("first_md5_mesh=" <& stats.firstMd5Mesh);
+    end if;
+    if stats.firstMd5Shader <> "" then
+      logInfo("first_md5_shader=" <& stats.firstMd5Shader);
+    end if;
+    if stats.firstMd5Anim <> "" then
+      logInfo("first_md5_anim=" <& stats.firstMd5Anim);
+    end if;
+    logInfo("model_probe_ready=" <& (stats.modelDefs <> 0 and
+        stats.resolvedEntityModelRefs <> 0 and stats.md5MeshesParsed <> 0 and
+        stats.md5VertDecls <> 0 and stats.md5TriDecls <> 0 and
+        stats.md5WeightDecls <> 0 and stats.md5AnimsParsed <> 0 and
+        stats.md5AnimFrames <> 0 and stats.md5AnimComponents <> 0 and
+        stats.md5AnimPlaybackSamples <> 0 and
+        stats.md5AnimInterpolationSamples <> 0 and
+        stats.md5PoseCompatiblePairs <> 0 and
+        stats.resolvedEntityAnimRefs <> 0 and
+        stats.skinDecls <> 0 and stats.skinRemaps <> 0 and
+        stats.resolvedEntitySkinRefs <> 0));
+  end func;
+
+const proc: main is func
+  local
+    var modelConfig: config is modelConfig.value;
+    var modelStats: stats is modelStats.value;
+    var array string: pk4Files is 0 times "";
+    var string: pk4File is "";
+  begin
+    parseArgs(config);
+    if config.showHelp then
+      showUsage;
+    else
+      if fileType(config.basePath) <> FILE_DIR then
+        logError("Doom 3 base directory not found: " <& config.basePath);
+      else
+        pk4Files := sort(findPk4Archives(config.basePath));
+        stats.pk4Archives := length(pk4Files);
+        if length(pk4Files) = 0 then
+          logError("No .pk4 archives found in: " <& config.basePath);
+        else
+          for pk4File range pk4Files do
+            scanArchive(stats, pk4File);
+          end for;
+          printStats(stats);
+        end if;
+      end if;
+    end if;
+  end func;

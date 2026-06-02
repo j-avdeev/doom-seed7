@@ -1,0 +1,568 @@
+(********************************************************************)
+(*  doom3_seed7_decl.s7                                             *)
+(*                                                                  *)
+(*  Focused Doom 3 / id Tech 4 declaration registry probe for       *)
+(*  Seed7. It catalogs named decls from user-owned pk4 archives and *)
+(*  validates mount-order override semantics for later resources.    *)
+(********************************************************************)
+
+$ include "seed7_05.s7i";
+$ include "osfiles.s7i";
+$ include "zip.s7i";
+
+const string: DEFAULT_DATA_PATH is ".";
+const string: DEFAULT_BASE_DIR is "base";
+
+const type: declConfig is new struct
+    var string: dataPath is DEFAULT_DATA_PATH;
+    var string: basePath is "";
+    var boolean: showHelp is FALSE;
+  end struct;
+
+const type: declStats is new struct
+    var integer: pk4Archives is 0;
+    var integer: declFiles is 0;
+    var integer: rawDecls is 0;
+    var integer: uniqueDecls is 0;
+    var integer: overrideDecls is 0;
+    var integer: materialDecls is 0;
+    var integer: entityDefDecls is 0;
+    var integer: skinDecls is 0;
+    var integer: soundDecls is 0;
+    var integer: modelDecls is 0;
+    var integer: inheritedEntityDefs is 0;
+    var integer: materialStageDecls is 0;
+    var integer: skinRemaps is 0;
+    var integer: soundSampleRefs is 0;
+    var string: firstDeclFile is "";
+    var string: firstDeclKey is "";
+    var string: firstOverrideKey is "";
+    var string: firstOverrideArchive is "";
+    var string: firstMaterialDecl is "";
+    var string: firstEntityDefDecl is "";
+    var string: firstSkinDecl is "";
+    var string: firstSoundDecl is "";
+    var string: firstModelDecl is "";
+    var array string: declKeys is 0 times "";
+    var array string: declArchiveByKey is 0 times "";
+  end struct;
+
+const proc: logInfo (in string: msg) is func
+  begin
+    writeln("[decl] " <& msg);
+  end func;
+
+const proc: logError (in string: msg) is func
+  begin
+    writeln("[decl-error] " <& msg);
+  end func;
+
+const func string: joinPath (in string: leftPath, in string: rightPath) is func
+  result
+    var string: joined is "";
+  begin
+    if leftPath = "" then
+      joined := rightPath;
+    elsif endsWith(leftPath, "/") or endsWith(leftPath, "\\") then
+      joined := leftPath <& rightPath;
+    else
+      joined := leftPath <& "/" <& rightPath;
+    end if;
+  end func;
+
+const func boolean: isPk4Name (in string: fileName) is
+    return endsWith(lower(fileName), ".pk4");
+
+const func string: normalizedAssetPath (in string: filePath) is
+    return replace(lower(filePath), "\\", "/");
+
+const func boolean: isDeclTextPath (in string: filePath) is func
+  result
+    var boolean: isDeclText is FALSE;
+  local
+    var string: path is "";
+  begin
+    path := normalizedAssetPath(filePath);
+    isDeclText := endsWith(path, ".decl") or endsWith(path, ".mtr") or
+        endsWith(path, ".def") or endsWith(path, ".skin") or
+        endsWith(path, ".sndshd") or endsWith(path, ".sound");
+  end func;
+
+const func string: cleanedToken (in string: token) is func
+  result
+    var string: clean is "";
+  local
+    var integer: idx is 1;
+    var char: ch is ' ';
+  begin
+    clean := trim(token);
+    while idx <= length(clean) do
+      ch := clean[idx];
+      if ch = '"' or ch = '(' or ch = ')' or ch = '{' or ch = '}' or
+          ch = ',' or ch = ';' then
+        clean := clean[.. pred(idx)] & clean[succ(idx) ..];
+      else
+        incr(idx);
+      end if;
+    end while;
+  end func;
+
+const func boolean: containsString (in array string: values,
+    in string: value) is func
+  result
+    var boolean: found is FALSE;
+  local
+    var string: current is "";
+  begin
+    for current range values do
+      if current = value then
+        found := TRUE;
+      end if;
+    end for;
+  end func;
+
+const func integer: indexOfString (in array string: values,
+    in string: value) is func
+  result
+    var integer: foundIndex is 0;
+  local
+    var integer: idx is 1;
+  begin
+    while idx <= length(values) and foundIndex = 0 do
+      if values[idx] = value then
+        foundIndex := idx;
+      end if;
+      incr(idx);
+    end while;
+  end func;
+
+const func integer: countOccurrences (in string: content,
+    in string: needle) is func
+  result
+    var integer: count is 0;
+  local
+    var integer: searchPos is 1;
+    var integer: foundPos is 0;
+  begin
+    if needle <> "" then
+      foundPos := pos(content, needle, searchPos);
+      while foundPos <> 0 do
+        count +:= 1;
+        searchPos := foundPos + length(needle);
+        foundPos := pos(content, needle, searchPos);
+      end while;
+    end if;
+  end func;
+
+const func integer: matchingBlockEnd (in string: content,
+    in integer: blockStart) is func
+  result
+    var integer: blockEnd is 0;
+  local
+    var integer: idx is 0;
+    var integer: depth is 0;
+  begin
+    if blockStart <> 0 then
+      idx := blockStart;
+      while idx <= length(content) and blockEnd = 0 do
+        if content[idx] = '{' then
+          incr(depth);
+        elsif content[idx] = '}' then
+          decr(depth);
+          if depth = 0 then
+            blockEnd := idx;
+          end if;
+        end if;
+        incr(idx);
+      end while;
+    end if;
+  end func;
+
+const func string: declNameAfter (in string: content,
+    in integer: startPos) is func
+  result
+    var string: declName is "";
+  local
+    var integer: idx is 0;
+    var integer: nameStart is 0;
+    var integer: nameEnd is 0;
+  begin
+    idx := startPos;
+    while idx <= length(content) and
+        (content[idx] = ' ' or content[idx] = '\t' or
+        content[idx] = '\n' or content[idx] = '\r') do
+      incr(idx);
+    end while;
+    nameStart := idx;
+    while idx <= length(content) and content[idx] <> ' ' and
+        content[idx] <> '\t' and content[idx] <> '\n' and
+        content[idx] <> '\r' and content[idx] <> '{' do
+      incr(idx);
+    end while;
+    nameEnd := pred(idx);
+    if nameStart <= nameEnd then
+      declName := lower(cleanedToken(content[nameStart .. nameEnd]));
+    end if;
+  end func;
+
+const func string: declNameBeforeBlock (in string: content,
+    in integer: blockStart) is func
+  result
+    var string: declName is "";
+  local
+    var integer: idx is 0;
+    var integer: endPos is 0;
+    var integer: startPos is 0;
+  begin
+    idx := pred(blockStart);
+    while idx >= 1 and
+        (content[idx] = ' ' or content[idx] = '\t' or
+        content[idx] = '\n' or content[idx] = '\r') do
+      decr(idx);
+    end while;
+    endPos := idx;
+    while idx >= 1 and content[idx] <> ' ' and content[idx] <> '\t' and
+        content[idx] <> '\n' and content[idx] <> '\r' and
+        content[idx] <> '{' and content[idx] <> '}' do
+      decr(idx);
+    end while;
+    startPos := succ(idx);
+    if startPos <= endPos then
+      declName := lower(cleanedToken(content[startPos .. endPos]));
+    end if;
+  end func;
+
+const func string: quotedValueAfter (in string: content,
+    in string: keyName) is func
+  result
+    var string: value is "";
+  local
+    var string: keyText is "";
+    var integer: keyPos is 0;
+    var integer: keyEnd is 0;
+    var integer: valueStart is 0;
+    var integer: valueEnd is 0;
+  begin
+    keyText := "\"" <& keyName <& "\"";
+    keyPos := pos(lower(content), lower(keyText), 1);
+    if keyPos <> 0 then
+      keyEnd := pos(content, "\"", succ(keyPos));
+      if keyEnd <> 0 then
+        valueStart := pos(content, "\"", succ(keyEnd));
+        if valueStart <> 0 then
+          valueEnd := pos(content, "\"", succ(valueStart));
+          if valueEnd <> 0 then
+            value := content[succ(valueStart) .. pred(valueEnd)];
+          end if;
+        end if;
+      end if;
+    end if;
+  end func;
+
+const proc: registerDecl (inout declStats: stats,
+    in string: declType, in string: declName, in string: archivePath) is func
+  local
+    var string: declKey is "";
+    var integer: idx is 0;
+  begin
+    if declType <> "" and declName <> "" then
+      declKey := declType <& ":" <& lower(declName);
+      stats.rawDecls +:= 1;
+      idx := indexOfString(stats.declKeys, declKey);
+      if idx = 0 then
+        stats.declKeys &:= declKey;
+        stats.declArchiveByKey &:= archivePath;
+        stats.uniqueDecls +:= 1;
+        if stats.firstDeclKey = "" then
+          stats.firstDeclKey := declKey;
+        end if;
+      else
+        stats.overrideDecls +:= 1;
+        stats.declArchiveByKey[idx] := archivePath;
+        if stats.firstOverrideKey = "" then
+          stats.firstOverrideKey := declKey;
+          stats.firstOverrideArchive := archivePath;
+        end if;
+      end if;
+    end if;
+  end func;
+
+const proc: inspectEntityDefs (inout declStats: stats,
+    in string: content, in string: archivePath) is func
+  local
+    var string: contentLower is "";
+    var integer: searchPos is 1;
+    var integer: defPos is 0;
+    var integer: blockStart is 0;
+    var integer: blockEnd is 0;
+    var string: declName is "";
+    var string: blockText is "";
+  begin
+    contentLower := lower(content);
+    defPos := pos(contentLower, "entitydef ", searchPos);
+    while defPos <> 0 do
+      declName := declNameAfter(content, defPos + length("entitydef "));
+      blockStart := pos(content, "{", defPos);
+      blockEnd := matchingBlockEnd(content, blockStart);
+      if declName <> "" and blockStart <> 0 and blockEnd <> 0 then
+        stats.entityDefDecls +:= 1;
+        if stats.firstEntityDefDecl = "" then
+          stats.firstEntityDefDecl := declName;
+        end if;
+        blockText := content[blockStart .. blockEnd];
+        if quotedValueAfter(blockText, "inherit") <> "" then
+          stats.inheritedEntityDefs +:= 1;
+        end if;
+        registerDecl(stats, "entityDef", declName, archivePath);
+        searchPos := succ(blockEnd);
+      else
+        searchPos := defPos + length("entitydef ");
+      end if;
+      defPos := pos(contentLower, "entitydef ", searchPos);
+    end while;
+  end func;
+
+const proc: inspectModelDefs (inout declStats: stats,
+    in string: content, in string: archivePath) is func
+  local
+    var string: contentLower is "";
+    var integer: searchPos is 1;
+    var integer: modelPos is 0;
+    var integer: blockStart is 0;
+    var integer: blockEnd is 0;
+    var string: declName is "";
+  begin
+    contentLower := lower(content);
+    modelPos := pos(contentLower, "model ", searchPos);
+    while modelPos <> 0 do
+      declName := declNameAfter(content, modelPos + length("model "));
+      blockStart := pos(content, "{", modelPos);
+      blockEnd := matchingBlockEnd(content, blockStart);
+      if declName <> "" and blockStart <> 0 and blockEnd <> 0 then
+        stats.modelDecls +:= 1;
+        if stats.firstModelDecl = "" then
+          stats.firstModelDecl := declName;
+        end if;
+        registerDecl(stats, "model", declName, archivePath);
+        searchPos := succ(blockEnd);
+      else
+        searchPos := modelPos + length("model ");
+      end if;
+      modelPos := pos(contentLower, "model ", searchPos);
+    end while;
+  end func;
+
+const proc: inspectBraceDecls (inout declStats: stats,
+    in string: path, in string: content, in string: archivePath) is func
+  local
+    var string: pathLower is "";
+    var string: contentLower is "";
+    var integer: blockStart is 0;
+    var integer: blockEnd is 0;
+    var integer: searchPos is 1;
+    var string: declName is "";
+    var string: blockText is "";
+    var string: blockLower is "";
+  begin
+    pathLower := normalizedAssetPath(path);
+    contentLower := lower(content);
+    blockStart := pos(content, "{", searchPos);
+    while blockStart <> 0 do
+      declName := declNameBeforeBlock(content, blockStart);
+      blockEnd := matchingBlockEnd(content, blockStart);
+      if blockEnd <> 0 then
+        blockText := content[blockStart .. blockEnd];
+        blockLower := lower(blockText);
+        if endsWith(pathLower, ".mtr") and pos(declName, "/", 1) <> 0 then
+          stats.materialDecls +:= 1;
+          if stats.firstMaterialDecl = "" then
+            stats.firstMaterialDecl := declName;
+          end if;
+          stats.materialStageDecls +:= countOccurrences(blockLower, "map ");
+          registerDecl(stats, "material", declName, archivePath);
+        elsif endsWith(pathLower, ".skin") and
+            not startsWith(declName, "textures/") and declName <> "" then
+          stats.skinDecls +:= 1;
+          if stats.firstSkinDecl = "" then
+            stats.firstSkinDecl := declName;
+          end if;
+          stats.skinRemaps +:= countOccurrences(blockText, "textures/");
+          registerDecl(stats, "skin", declName, archivePath);
+        elsif (endsWith(pathLower, ".sndshd") or endsWith(pathLower, ".sound")) and
+            startsWith(declName, "sound/") then
+          stats.soundDecls +:= 1;
+          if stats.firstSoundDecl = "" then
+            stats.firstSoundDecl := declName;
+          end if;
+          stats.soundSampleRefs +:= countOccurrences(blockLower, ".wav") +
+              countOccurrences(blockLower, ".ogg");
+          registerDecl(stats, "sound", declName, archivePath);
+        end if;
+        searchPos := succ(blockEnd);
+      else
+        searchPos := succ(blockStart);
+      end if;
+      blockStart := pos(content, "{", searchPos);
+    end while;
+  end func;
+
+const proc: inspectDeclText (inout declStats: stats,
+    in string: path, in string: content, in string: archivePath) is func
+  begin
+    stats.declFiles +:= 1;
+    if stats.firstDeclFile = "" then
+      stats.firstDeclFile := path;
+    end if;
+    inspectEntityDefs(stats, content, archivePath);
+    inspectModelDefs(stats, content, archivePath);
+    inspectBraceDecls(stats, path, content, archivePath);
+  end func;
+
+const func array string: findPk4Archives (in string: basePath) is func
+  result
+    var array string: pk4Files is 0 times "";
+  local
+    var array string: names is 0 times "";
+    var string: name is "";
+  begin
+    if fileType(basePath) = FILE_DIR then
+      names := readDir(basePath);
+      for name range names do
+        if isPk4Name(name) and fileType(joinPath(basePath, name)) = FILE_REGULAR then
+          pk4Files &:= joinPath(basePath, name);
+        end if;
+      end for;
+    end if;
+  end func;
+
+const proc: scanArchive (inout declStats: stats,
+    in string: pk4File) is func
+  local
+    var fileSys: zipFs is fileSys.value;
+    var array string: paths is 0 times "";
+    var string: path is "";
+  begin
+    zipFs := openZip(pk4File);
+    if zipFs = fileSys.value then
+      logError("could not open pk4 archive: " <& pk4File);
+    else
+      paths := readDir(zipFs, RECURSIVE);
+      for path range paths do
+        if isDeclTextPath(path) then
+          inspectDeclText(stats, normalizedAssetPath(path), getFile(zipFs, path),
+              pk4File);
+        end if;
+      end for;
+      close(zipFs);
+    end if;
+  end func;
+
+const proc: parseArgs (inout declConfig: config) is func
+  local
+    var array string: args is 0 times "";
+    var integer: argIdx is 1;
+  begin
+    args := argv(PROGRAM);
+    while argIdx <= length(args) do
+      if args[argIdx] = "--help" or args[argIdx] = "-h" then
+        config.showHelp := TRUE;
+      elsif args[argIdx] = "--doom3_data_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.dataPath := convDosPath(args[argIdx]);
+      elsif args[argIdx] = "--doom3_base_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.basePath := convDosPath(args[argIdx]);
+      elsif args[argIdx] = "+set" and argIdx + 2 <= length(args) then
+        if args[argIdx + 1] = "fs_basepath" then
+          config.dataPath := convDosPath(args[argIdx + 2]);
+        elsif args[argIdx + 1] = "fs_game" then
+          config.basePath := convDosPath(args[argIdx + 2]);
+        end if;
+        argIdx +:= 2;
+      end if;
+      incr(argIdx);
+    end while;
+    if config.basePath = "" then
+      config.basePath := joinPath(config.dataPath, DEFAULT_BASE_DIR);
+    end if;
+  end func;
+
+const proc: showUsage is func
+  begin
+    writeln("Usage:");
+    writeln("  s7 doom3_seed7_decl.s7 --doom3_data_path <doom3-root>");
+    writeln("  s7 doom3_seed7_decl.s7 +set fs_basepath <doom3-root>");
+    writeln("");
+    writeln("Scans user-owned Doom 3 pk4 files for declaration registry readiness.");
+  end func;
+
+const proc: printStats (in declStats: stats) is func
+  begin
+    logInfo("pk4_archives=" <& stats.pk4Archives);
+    logInfo("decl_files=" <& stats.declFiles);
+    logInfo("decl_registry raw=" <& stats.rawDecls <& " unique=" <&
+        stats.uniqueDecls <& " overrides=" <& stats.overrideDecls);
+    logInfo("decl_types material=" <& stats.materialDecls <& " entityDef=" <&
+        stats.entityDefDecls <& " skin=" <& stats.skinDecls <& " sound=" <&
+        stats.soundDecls <& " model=" <& stats.modelDecls);
+    logInfo("decl_details inherited_entityDefs=" <& stats.inheritedEntityDefs <&
+        " material_stages=" <& stats.materialStageDecls <& " skin_remaps=" <&
+        stats.skinRemaps <& " sound_samples=" <& stats.soundSampleRefs);
+    if stats.firstDeclFile <> "" then
+      logInfo("first_decl_file=" <& stats.firstDeclFile);
+    end if;
+    if stats.firstDeclKey <> "" then
+      logInfo("first_decl_key=" <& stats.firstDeclKey);
+    end if;
+    if stats.firstOverrideKey <> "" then
+      logInfo("first_override_key=" <& stats.firstOverrideKey);
+      logInfo("first_override_archive=" <& stats.firstOverrideArchive);
+    end if;
+    if stats.firstMaterialDecl <> "" then
+      logInfo("first_material_decl=" <& stats.firstMaterialDecl);
+    end if;
+    if stats.firstEntityDefDecl <> "" then
+      logInfo("first_entityDef_decl=" <& stats.firstEntityDefDecl);
+    end if;
+    if stats.firstSkinDecl <> "" then
+      logInfo("first_skin_decl=" <& stats.firstSkinDecl);
+    end if;
+    if stats.firstSoundDecl <> "" then
+      logInfo("first_sound_decl=" <& stats.firstSoundDecl);
+    end if;
+    if stats.firstModelDecl <> "" then
+      logInfo("first_model_decl=" <& stats.firstModelDecl);
+    end if;
+    logInfo("decl_probe_ready=" <& (stats.pk4Archives <> 0 and
+        stats.materialDecls <> 0 and stats.entityDefDecls <> 0 and
+        stats.skinDecls <> 0 and stats.soundDecls <> 0 and
+        stats.uniqueDecls <> 0));
+  end func;
+
+const proc: main is func
+  local
+    var declConfig: config is declConfig.value;
+    var declStats: stats is declStats.value;
+    var array string: pk4Files is 0 times "";
+    var string: pk4File is "";
+  begin
+    parseArgs(config);
+    if config.showHelp then
+      showUsage;
+    else
+      if fileType(config.basePath) <> FILE_DIR then
+        logError("Doom 3 base directory not found: " <& config.basePath);
+      else
+        pk4Files := sort(findPk4Archives(config.basePath));
+        stats.pk4Archives := length(pk4Files);
+        if length(pk4Files) = 0 then
+          logError("No .pk4 archives found in: " <& config.basePath);
+        else
+          for pk4File range pk4Files do
+            scanArchive(stats, pk4File);
+          end for;
+          printStats(stats);
+        end if;
+      end if;
+    end if;
+  end func;

@@ -1,0 +1,749 @@
+(********************************************************************)
+(*  doom3_seed7_weapon.s7                                          *)
+(*                                                                  *)
+(*  Focused Doom 3 / id Tech 4 weapon subsystem probe for Seed7.   *)
+(*  It reads user-owned pk4 archives, scans weapon/projectile       *)
+(*  entityDefs, resolves ammo and projectile bindings from the      *)
+(*  selected map, and reports readiness for a future weapon runtime.*)
+(*  No commercial data is bundled.                                  *)
+(********************************************************************)
+
+$ include "seed7_05.s7i";
+$ include "osfiles.s7i";
+$ include "zip.s7i";
+
+const string: DEFAULT_DATA_PATH is ".";
+const string: DEFAULT_BASE_DIR is "base";
+const string: DEFAULT_START_MAP is "game/mars_city1";
+
+const type: weaponConfig is new struct
+    var string: dataPath is DEFAULT_DATA_PATH;
+    var string: basePath is "";
+    var string: startMap is DEFAULT_START_MAP;
+    var boolean: showHelp is FALSE;
+  end struct;
+
+const type: weaponStats is new struct
+    var integer: pk4Archives is 0;
+    var string: requestedMapPath is "";
+    var boolean: requestedMapFound is FALSE;
+    var string: requestedCollisionPath is "";
+    var boolean: requestedCollisionFound is FALSE;
+    var integer: collisionModels is 0;
+    var integer: collisionPolygons is 0;
+    var integer: entityDefs is 0;
+    var integer: weaponDefs is 0;
+    var integer: weaponAmmoTypeRefs is 0;
+    var integer: weaponAmmoRequiredValues is 0;
+    var integer: weaponClipSizeValues is 0;
+    var integer: weaponNumProjectilesValues is 0;
+    var integer: weaponSpreadValues is 0;
+    var integer: weaponProjectileRefs is 0;
+    var integer: weaponFireSoundRefs is 0;
+    var integer: weaponViewModelRefs is 0;
+    var integer: projectileDefs is 0;
+    var integer: projectileDamageValues is 0;
+    var integer: projectileSplashDamageValues is 0;
+    var integer: projectileSplashRadiusValues is 0;
+    var integer: projectileSpeedValues is 0;
+    var integer: mapEntities is 0;
+    var integer: mapWeaponPickups is 0;
+    var integer: mapAmmoPickups is 0;
+    var integer: mapMonsters is 0;
+    var boolean: weaponPickupResolved is FALSE;
+    var boolean: ammoPickupResolved is FALSE;
+    var boolean: projectileResolved is FALSE;
+    var boolean: fireSoundResolved is FALSE;
+    var boolean: viewModelResolved is FALSE;
+    var integer: simulatedAmmoBefore is 0;
+    var integer: simulatedAmmoAfter is 0;
+    var integer: simulatedShots is 0;
+    var integer: simulatedDamage is 0;
+    var integer: simulatedProjectiles is 0;
+    var integer: simulatedSpread is 0;
+    var string: firstWeaponDef is "";
+    var string: firstWeaponAmmoType is "";
+    var string: firstWeaponProjectile is "";
+    var string: firstWeaponFireSound is "";
+    var string: firstWeaponViewModel is "";
+    var string: firstProjectileDef is "";
+    var string: firstMapWeaponPickup is "";
+    var string: firstMapAmmoPickup is "";
+    var string: firstMapMonster is "";
+    var array string: entityDefNames is 0 times "";
+    var array string: modelAssetStems is 0 times "";
+    var array string: soundAssetStems is 0 times "";
+  end struct;
+
+const proc: logInfo (in string: msg) is func
+  begin
+    writeln("[weapon] " <& msg);
+  end func;
+
+const proc: logError (in string: msg) is func
+  begin
+    writeln("[weapon-error] " <& msg);
+  end func;
+
+const func string: joinPath (in string: leftPath, in string: rightPath) is func
+  result
+    var string: joined is "";
+  begin
+    if leftPath = "" then
+      joined := rightPath;
+    elsif endsWith(leftPath, "/") or endsWith(leftPath, "\\") then
+      joined := leftPath <& rightPath;
+    else
+      joined := leftPath <& "/" <& rightPath;
+    end if;
+  end func;
+
+const func boolean: isPk4Name (in string: fileName) is
+    return endsWith(lower(fileName), ".pk4");
+
+const func string: normalizedAssetPath (in string: filePath) is
+    return replace(lower(filePath), "\\", "/");
+
+const func string: assetStem (in string: filePath) is func
+  result
+    var string: stem is "";
+  local
+    var string: path is "";
+    var integer: dotPos is 0;
+  begin
+    path := normalizedAssetPath(filePath);
+    dotPos := rpos(path, ".");
+    if dotPos <> 0 then
+      stem := path[.. pred(dotPos)];
+    else
+      stem := path;
+    end if;
+  end func;
+
+const func string: mapNameToAssetPath (in string: mapName) is func
+  result
+    var string: assetPath is "";
+  begin
+    assetPath := normalizedAssetPath(mapName);
+    if not startsWith(assetPath, "maps/") then
+      assetPath := "maps/" <& assetPath;
+    end if;
+    if not endsWith(assetPath, ".map") then
+      assetPath &:= ".map";
+    end if;
+  end func;
+
+const func string: compiledSiblingPath (in string: mapPath,
+    in string: suffix) is func
+  result
+    var string: siblingPath is "";
+  begin
+    if endsWith(mapPath, ".map") then
+      siblingPath := mapPath[.. length(mapPath) - 4] <& suffix;
+    else
+      siblingPath := mapPath <& suffix;
+    end if;
+  end func;
+
+const func boolean: containsString (in array string: values,
+    in string: value) is func
+  result
+    var boolean: found is FALSE;
+  local
+    var string: current is "";
+  begin
+    for current range values do
+      if current = value then
+        found := TRUE;
+      end if;
+    end for;
+  end func;
+
+const proc: appendUnique (inout array string: values, in string: value) is func
+  begin
+    if value <> "" and not containsString(values, value) then
+      values &:= value;
+    end if;
+  end func;
+
+const func string: cleanedToken (in string: token) is func
+  result
+    var string: clean is "";
+  local
+    var integer: idx is 1;
+    var char: ch is ' ';
+  begin
+    clean := token;
+    while idx <= length(clean) do
+      ch := clean[idx];
+      if ch = '"' or ch = '(' or ch = ')' or ch = '{' or ch = '}' or
+          ch = ',' or ch = ';' then
+        clean := clean[.. pred(idx)] & clean[succ(idx) ..];
+      else
+        incr(idx);
+      end if;
+    end while;
+  end func;
+
+const func integer: countOccurrences (in string: content,
+    in string: token) is func
+  result
+    var integer: count is 0;
+  local
+    var integer: searchPos is 1;
+    var integer: foundPos is 0;
+  begin
+    foundPos := pos(content, token, searchPos);
+    while foundPos <> 0 do
+      count +:= 1;
+      searchPos := foundPos + length(token);
+      foundPos := pos(content, token, searchPos);
+    end while;
+  end func;
+
+const func integer: sumIntegersAfterWord (in string: content,
+    in string: keyName) is func
+  result
+    var integer: total is 0;
+  local
+    var array string: tokens is 0 times "";
+    var integer: tokenIndex is 1;
+    var integer: valueIndex is 0;
+    var integer: value is 0;
+    var boolean: foundValue is FALSE;
+  begin
+    tokens := noEmptyStrings(split(replace(replace(replace(content, "\n", " "),
+        "\r", " "), "\t", " "), ' '));
+    while tokenIndex < length(tokens) do
+      if lower(cleanedToken(tokens[tokenIndex])) = lower(keyName) then
+        foundValue := FALSE;
+        valueIndex := succ(tokenIndex);
+        while valueIndex <= length(tokens) and valueIndex <= tokenIndex + 4 and
+            not foundValue do
+          block
+            value := integer(cleanedToken(tokens[valueIndex]));
+            total +:= value;
+            foundValue := TRUE;
+          exception
+            catch RANGE_ERROR:
+              noop;
+          end block;
+          incr(valueIndex);
+        end while;
+      end if;
+      incr(tokenIndex);
+    end while;
+  end func;
+
+const func integer: matchingBlockEnd (in string: content,
+    in integer: blockStart) is func
+  result
+    var integer: blockEnd is 0;
+  local
+    var integer: idx is 0;
+    var integer: depth is 0;
+  begin
+    if blockStart <> 0 then
+      idx := blockStart;
+      while idx <= length(content) and blockEnd = 0 do
+        if content[idx] = '{' then
+          incr(depth);
+        elsif content[idx] = '}' then
+          decr(depth);
+          if depth = 0 then
+            blockEnd := idx;
+          end if;
+        end if;
+        incr(idx);
+      end while;
+    end if;
+  end func;
+
+const func string: declNameAfter (in string: content, in integer: startPos) is func
+  result
+    var string: declName is "";
+  local
+    var integer: idx is 0;
+    var char: ch is ' ';
+  begin
+    idx := startPos;
+    while idx <= length(content) and declName = "" do
+      ch := content[idx];
+      if ch <> ' ' and ch <> '\t' and ch <> '\n' and ch <> '\r' then
+        while idx <= length(content) and content[idx] <> ' ' and
+            content[idx] <> '\t' and content[idx] <> '\n' and
+            content[idx] <> '\r' and content[idx] <> '{' do
+          declName &:= content[idx];
+          incr(idx);
+        end while;
+      end if;
+      incr(idx);
+    end while;
+  end func;
+
+const func string: quotedValueAfter (in string: content, in string: keyName) is func
+  result
+    var string: value is "";
+  local
+    var string: keyText is "";
+    var integer: keyPos is 0;
+    var integer: keyEnd is 0;
+    var integer: valueStart is 0;
+    var integer: valueEnd is 0;
+  begin
+    keyText := "\"" <& keyName <& "\"";
+    keyPos := pos(lower(content), lower(keyText), 1);
+    if keyPos <> 0 then
+      keyEnd := pos(content, "\"", succ(keyPos));
+      if keyEnd <> 0 then
+        valueStart := pos(content, "\"", succ(keyEnd));
+        if valueStart <> 0 then
+          valueEnd := pos(content, "\"", succ(valueStart));
+          if valueEnd <> 0 then
+            value := content[succ(valueStart) .. pred(valueEnd)];
+          end if;
+        end if;
+      end if;
+    end if;
+  end func;
+
+const func integer: intSpawnargOrZero (in string: entityBlock,
+    in string: keyName) is func
+  result
+    var integer: number is 0;
+  local
+    var string: text is "";
+  begin
+    text := quotedValueAfter(entityBlock, keyName);
+    if text <> "" then
+      block
+        number := integer(text);
+      exception
+        catch RANGE_ERROR:
+          number := 0;
+      end block;
+    end if;
+  end func;
+
+const func boolean: isSoundAssetPath (in string: path) is func
+  result
+    var boolean: isSound is FALSE;
+  local
+    var string: lowerPath is "";
+  begin
+    lowerPath := normalizedAssetPath(path);
+    isSound := startsWith(lowerPath, "sound/") and
+        (endsWith(lowerPath, ".wav") or endsWith(lowerPath, ".ogg"));
+  end func;
+
+const proc: inspectEntityDef (inout weaponStats: stats,
+    in string: className, in string: entityBlock) is func
+  local
+    var string: ammoType is "";
+    var string: projectileName is "";
+    var string: fireSound is "";
+    var string: viewModel is "";
+    var integer: ammoRequired is 0;
+    var integer: clipSize is 0;
+    var integer: numProjectiles is 0;
+    var integer: spread is 0;
+    var integer: damage is 0;
+    var integer: splashDamage is 0;
+    var integer: splashRadius is 0;
+    var integer: speed is 0;
+  begin
+    stats.entityDefs +:= 1;
+    appendUnique(stats.entityDefNames, lower(className));
+    if startsWith(lower(className), "weapon_") then
+      stats.weaponDefs +:= 1;
+      if stats.firstWeaponDef = "" then
+        stats.firstWeaponDef := lower(className);
+      end if;
+      ammoType := lower(quotedValueAfter(entityBlock, "ammoType"));
+      if ammoType <> "" then
+        stats.weaponAmmoTypeRefs +:= 1;
+        if stats.firstWeaponAmmoType = "" then
+          stats.firstWeaponAmmoType := ammoType;
+        end if;
+      end if;
+      ammoRequired := intSpawnargOrZero(entityBlock, "ammoRequired");
+      if ammoRequired <> 0 then
+        stats.weaponAmmoRequiredValues +:= 1;
+      end if;
+      clipSize := intSpawnargOrZero(entityBlock, "clipSize");
+      if clipSize <> 0 then
+        stats.weaponClipSizeValues +:= 1;
+      end if;
+      numProjectiles := intSpawnargOrZero(entityBlock, "num_projectiles");
+      if numProjectiles <> 0 then
+        stats.weaponNumProjectilesValues +:= 1;
+        if stats.simulatedProjectiles = 0 then
+          stats.simulatedProjectiles := numProjectiles;
+        end if;
+      end if;
+      spread := intSpawnargOrZero(entityBlock, "spread");
+      if spread <> 0 or quotedValueAfter(entityBlock, "spread") <> "" then
+        stats.weaponSpreadValues +:= 1;
+        stats.simulatedSpread := spread;
+      end if;
+      projectileName := lower(quotedValueAfter(entityBlock, "def_projectile"));
+      if projectileName <> "" then
+        stats.weaponProjectileRefs +:= 1;
+        if stats.firstWeaponProjectile = "" then
+          stats.firstWeaponProjectile := projectileName;
+        end if;
+      end if;
+      fireSound := quotedValueAfter(entityBlock, "snd_fire");
+      if fireSound <> "" then
+        stats.weaponFireSoundRefs +:= 1;
+        if stats.firstWeaponFireSound = "" then
+          stats.firstWeaponFireSound := fireSound;
+        end if;
+      end if;
+      viewModel := quotedValueAfter(entityBlock, "model_view");
+      if viewModel <> "" then
+        stats.weaponViewModelRefs +:= 1;
+        if stats.firstWeaponViewModel = "" then
+          stats.firstWeaponViewModel := assetStem(viewModel);
+        end if;
+      end if;
+    elsif startsWith(lower(className), "projectile_") then
+      stats.projectileDefs +:= 1;
+      if stats.firstProjectileDef = "" then
+        stats.firstProjectileDef := lower(className);
+      end if;
+      damage := intSpawnargOrZero(entityBlock, "damage");
+      if damage <> 0 then
+        stats.projectileDamageValues +:= 1;
+        if stats.simulatedDamage = 0 then
+          stats.simulatedDamage := damage;
+        end if;
+      end if;
+      splashDamage := intSpawnargOrZero(entityBlock, "splash_damage");
+      if splashDamage <> 0 then
+        stats.projectileSplashDamageValues +:= 1;
+      end if;
+      splashRadius := intSpawnargOrZero(entityBlock, "splash_radius");
+      if splashRadius <> 0 then
+        stats.projectileSplashRadiusValues +:= 1;
+      end if;
+      speed := intSpawnargOrZero(entityBlock, "speed");
+      if speed <> 0 then
+        stats.projectileSpeedValues +:= 1;
+      end if;
+    end if;
+  end func;
+
+const proc: inspectDefText (inout weaponStats: stats,
+    in string: content) is func
+  local
+    var string: contentLower is "";
+    var integer: searchPos is 1;
+    var integer: defPos is 0;
+    var integer: blockStart is 0;
+    var integer: blockEnd is 0;
+    var string: className is "";
+  begin
+    contentLower := lower(content);
+    defPos := pos(contentLower, "entitydef ", searchPos);
+    while defPos <> 0 do
+      className := declNameAfter(content, defPos + length("entitydef "));
+      blockStart := pos(content, "{", defPos);
+      blockEnd := matchingBlockEnd(content, blockStart);
+      if blockStart <> 0 and blockEnd <> 0 then
+        inspectEntityDef(stats, className, content[blockStart .. blockEnd]);
+      end if;
+      searchPos := defPos + length("entitydef ");
+      defPos := pos(contentLower, "entitydef ", searchPos);
+    end while;
+  end func;
+
+const proc: inspectMapText (inout weaponStats: stats,
+    in string: content) is func
+  local
+    var integer: searchPos is 1;
+    var integer: blockStart is 0;
+    var integer: blockEnd is 0;
+    var string: blockText is "";
+    var string: className is "";
+    var string: entityName is "";
+  begin
+    blockStart := pos(content, "{", searchPos);
+    while blockStart <> 0 do
+      blockEnd := matchingBlockEnd(content, blockStart);
+      if blockEnd <> 0 then
+        stats.mapEntities +:= 1;
+        blockText := content[blockStart .. blockEnd];
+        className := lower(quotedValueAfter(blockText, "classname"));
+        entityName := quotedValueAfter(blockText, "name");
+        if startsWith(className, "weapon_") then
+          stats.mapWeaponPickups +:= 1;
+          if stats.firstMapWeaponPickup = "" then
+            stats.firstMapWeaponPickup := entityName;
+          end if;
+        elsif startsWith(className, "ammo_") then
+          stats.mapAmmoPickups +:= 1;
+          if stats.firstMapAmmoPickup = "" then
+            stats.firstMapAmmoPickup := entityName;
+          end if;
+        elsif startsWith(className, "monster_") then
+          stats.mapMonsters +:= 1;
+          if stats.firstMapMonster = "" then
+            stats.firstMapMonster := entityName;
+          end if;
+        end if;
+        searchPos := succ(blockEnd);
+      else
+        searchPos := succ(blockStart);
+      end if;
+      blockStart := pos(content, "{", searchPos);
+    end while;
+  end func;
+
+const proc: inspectCollisionContent (inout weaponStats: stats,
+    in string: content) is func
+  begin
+    stats.collisionModels +:= countOccurrences(lower(content), "collisionmodel");
+    stats.collisionPolygons +:= sumIntegersAfterWord(lower(content), "polygons");
+  end func;
+
+const proc: resolveWeaponRuntime (inout weaponStats: stats) is func
+  local
+    var integer: ammoRequired is 1;
+    var boolean: traceWorldReady is FALSE;
+  begin
+    traceWorldReady := stats.requestedCollisionFound and
+        stats.collisionModels <> 0 and stats.collisionPolygons <> 0;
+    stats.weaponPickupResolved := stats.firstWeaponDef <> "" and
+        containsString(stats.entityDefNames, stats.firstWeaponDef);
+    stats.ammoPickupResolved := stats.firstWeaponAmmoType <> "" and
+        stats.mapAmmoPickups <> 0 and
+        containsString(stats.entityDefNames, stats.firstWeaponAmmoType);
+    stats.projectileResolved := stats.firstWeaponProjectile <> "" and
+        containsString(stats.entityDefNames, stats.firstWeaponProjectile);
+    stats.fireSoundResolved := stats.firstWeaponFireSound <> "" and
+        containsString(stats.soundAssetStems, assetStem(stats.firstWeaponFireSound));
+    stats.viewModelResolved := stats.firstWeaponViewModel <> "" and
+        containsString(stats.modelAssetStems, stats.firstWeaponViewModel);
+    if stats.weaponAmmoRequiredValues <> 0 then
+      ammoRequired := 1;
+    end if;
+    if stats.mapWeaponPickups <> 0 and stats.mapAmmoPickups <> 0 and
+        stats.projectileResolved and traceWorldReady then
+      stats.simulatedAmmoBefore := 12;
+      stats.simulatedShots := 1;
+      if stats.simulatedProjectiles = 0 then
+        stats.simulatedProjectiles := 1;
+      end if;
+      stats.simulatedAmmoAfter := stats.simulatedAmmoBefore - ammoRequired;
+    end if;
+  end func;
+
+const func array string: findPk4Archives (in string: basePath) is func
+  result
+    var array string: pk4Files is 0 times "";
+  local
+    var array string: names is 0 times "";
+    var string: name is "";
+  begin
+    if fileType(basePath) = FILE_DIR then
+      names := readDir(basePath);
+      for name range names do
+        if isPk4Name(name) and fileType(joinPath(basePath, name)) = FILE_REGULAR then
+          pk4Files &:= joinPath(basePath, name);
+        end if;
+      end for;
+    end if;
+  end func;
+
+const proc: scanArchive (inout weaponStats: stats,
+    in string: pk4File, in string: requestedMapPath) is func
+  local
+    var fileSys: zipFs is fileSys.value;
+    var array string: paths is 0 times "";
+    var string: path is "";
+    var string: pathLower is "";
+  begin
+    zipFs := openZip(pk4File);
+    if zipFs = fileSys.value then
+      logError("could not open pk4 archive: " <& pk4File);
+    else
+      paths := readDir(zipFs, RECURSIVE);
+      for path range paths do
+        pathLower := normalizedAssetPath(path);
+        if isSoundAssetPath(pathLower) then
+          appendUnique(stats.soundAssetStems, assetStem(pathLower));
+        elsif endsWith(pathLower, ".md5mesh") then
+          appendUnique(stats.modelAssetStems, assetStem(pathLower));
+        end if;
+      end for;
+      for path range paths do
+        pathLower := normalizedAssetPath(path);
+        if endsWith(pathLower, ".def") then
+          inspectDefText(stats, getFile(zipFs, path));
+        elsif pathLower = requestedMapPath then
+          stats.requestedMapFound := TRUE;
+          inspectMapText(stats, getFile(zipFs, path));
+        elsif pathLower = stats.requestedCollisionPath then
+          stats.requestedCollisionFound := TRUE;
+          inspectCollisionContent(stats, getFile(zipFs, path));
+        end if;
+      end for;
+      close(zipFs);
+    end if;
+  end func;
+
+const proc: parseArgs (inout weaponConfig: config) is func
+  local
+    var array string: args is 0 times "";
+    var integer: argIdx is 1;
+  begin
+    args := argv(PROGRAM);
+    while argIdx <= length(args) do
+      if args[argIdx] = "--help" or args[argIdx] = "-h" then
+        config.showHelp := TRUE;
+      elsif args[argIdx] = "--doom3_data_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.dataPath := convDosPath(args[argIdx]);
+      elsif args[argIdx] = "--doom3_base_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.basePath := convDosPath(args[argIdx]);
+      elsif args[argIdx] = "--doom3_start_map" and argIdx < length(args) then
+        incr(argIdx);
+        config.startMap := args[argIdx];
+      elsif args[argIdx] = "+map" and argIdx < length(args) then
+        incr(argIdx);
+        config.startMap := args[argIdx];
+      elsif args[argIdx] = "+set" and argIdx + 2 <= length(args) then
+        if args[argIdx + 1] = "fs_basepath" then
+          config.dataPath := convDosPath(args[argIdx + 2]);
+        elsif args[argIdx + 1] = "fs_game" then
+          config.basePath := convDosPath(args[argIdx + 2]);
+        end if;
+        argIdx +:= 2;
+      end if;
+      incr(argIdx);
+    end while;
+    if config.basePath = "" then
+      config.basePath := joinPath(config.dataPath, DEFAULT_BASE_DIR);
+    end if;
+  end func;
+
+const proc: showUsage is func
+  begin
+    writeln("Usage:");
+    writeln("  s7 doom3_seed7_weapon.s7 --doom3_data_path <doom3-root>");
+    writeln("  s7 doom3_seed7_weapon.s7 +set fs_basepath <doom3-root> +map <map>");
+    writeln("");
+    writeln("Scans user-owned Doom 3 pk4 files for weapon/projectile readiness.");
+  end func;
+
+const proc: printStats (in weaponStats: stats) is func
+  begin
+    logInfo("pk4_archives=" <& stats.pk4Archives);
+    logInfo("requested_map=" <& stats.requestedMapPath);
+    logInfo("requested_map_found=" <& stats.requestedMapFound);
+    logInfo("weapon_collision cm=" <& stats.requestedCollisionPath <&
+        " found=" <& stats.requestedCollisionFound <& " models=" <&
+        stats.collisionModels <& " polygons=" <& stats.collisionPolygons);
+    logInfo("entity_defs=" <& stats.entityDefs <&
+        " weapon_defs=" <& stats.weaponDefs <&
+        " projectile_defs=" <& stats.projectileDefs);
+    logInfo("weapon_spawnargs ammo_type=" <& stats.weaponAmmoTypeRefs <&
+        " ammo_required=" <& stats.weaponAmmoRequiredValues <&
+        " clip_size=" <& stats.weaponClipSizeValues <&
+        " num_projectiles=" <& stats.weaponNumProjectilesValues <&
+        " spread=" <& stats.weaponSpreadValues <&
+        " projectile=" <& stats.weaponProjectileRefs <&
+        " fire_sound=" <& stats.weaponFireSoundRefs <&
+        " view_model=" <& stats.weaponViewModelRefs);
+    logInfo("projectile_spawnargs damage=" <& stats.projectileDamageValues <&
+        " splash_damage=" <& stats.projectileSplashDamageValues <&
+        " splash_radius=" <& stats.projectileSplashRadiusValues <&
+        " speed=" <& stats.projectileSpeedValues);
+    logInfo("map_weapon_entities weapons=" <& stats.mapWeaponPickups <&
+        " ammo=" <& stats.mapAmmoPickups <&
+        " monsters=" <& stats.mapMonsters);
+    logInfo("weapon_resolution pickup=" <& stats.weaponPickupResolved <&
+        " ammo=" <& stats.ammoPickupResolved <&
+        " projectile=" <& stats.projectileResolved <&
+        " fire_sound=" <& stats.fireSoundResolved <&
+        " view_model=" <& stats.viewModelResolved);
+    logInfo("weapon_fire_sim shots=" <& stats.simulatedShots <&
+        " ammo_before=" <& stats.simulatedAmmoBefore <&
+        " ammo_after=" <& stats.simulatedAmmoAfter <&
+        " damage=" <& stats.simulatedDamage <&
+        " projectiles=" <& stats.simulatedProjectiles <&
+        " spread=" <& stats.simulatedSpread);
+    logInfo("weapon_trace fire_ready=" <& (stats.requestedCollisionFound and
+        stats.collisionModels <> 0 and stats.collisionPolygons <> 0) <&
+        " collision_models=" <& stats.collisionModels <&
+        " collision_polygons=" <& stats.collisionPolygons);
+    if stats.firstWeaponDef <> "" then
+      logInfo("first_weapon_def=" <& stats.firstWeaponDef);
+    end if;
+    if stats.firstWeaponAmmoType <> "" then
+      logInfo("first_weapon_ammo_type=" <& stats.firstWeaponAmmoType);
+    end if;
+    if stats.firstWeaponProjectile <> "" then
+      logInfo("first_weapon_projectile=" <& stats.firstWeaponProjectile);
+    end if;
+    if stats.firstProjectileDef <> "" then
+      logInfo("first_projectile_def=" <& stats.firstProjectileDef);
+    end if;
+    if stats.firstWeaponFireSound <> "" then
+      logInfo("first_weapon_fire_sound=" <& stats.firstWeaponFireSound);
+    end if;
+    if stats.firstWeaponViewModel <> "" then
+      logInfo("first_weapon_view_model=" <& stats.firstWeaponViewModel);
+    end if;
+    if stats.firstMapWeaponPickup <> "" then
+      logInfo("first_map_weapon_pickup=" <& stats.firstMapWeaponPickup);
+    end if;
+    if stats.firstMapAmmoPickup <> "" then
+      logInfo("first_map_ammo_pickup=" <& stats.firstMapAmmoPickup);
+    end if;
+    if stats.firstMapMonster <> "" then
+      logInfo("first_map_monster=" <& stats.firstMapMonster);
+    end if;
+    logInfo("weapon_probe_ready=" <& (stats.weaponDefs <> 0 and
+        stats.requestedCollisionFound and stats.collisionModels <> 0 and
+        stats.collisionPolygons <> 0 and
+        stats.projectileDefs <> 0 and stats.mapWeaponPickups <> 0 and
+        stats.mapAmmoPickups <> 0 and stats.mapMonsters <> 0 and
+        stats.weaponPickupResolved and stats.ammoPickupResolved and
+        stats.projectileResolved and stats.viewModelResolved and
+        stats.simulatedShots <> 0));
+  end func;
+
+const proc: main is func
+  local
+    var weaponConfig: config is weaponConfig.value;
+    var weaponStats: stats is weaponStats.value;
+    var array string: pk4Files is 0 times "";
+    var string: pk4File is "";
+  begin
+    parseArgs(config);
+    if config.showHelp then
+      showUsage;
+    else
+      stats.requestedMapPath := mapNameToAssetPath(config.startMap);
+      stats.requestedCollisionPath := compiledSiblingPath(stats.requestedMapPath,
+          ".cm");
+      if fileType(config.basePath) <> FILE_DIR then
+        logError("Doom 3 base directory not found: " <& config.basePath);
+      else
+        pk4Files := sort(findPk4Archives(config.basePath));
+        stats.pk4Archives := length(pk4Files);
+        if length(pk4Files) = 0 then
+          logError("No .pk4 archives found in: " <& config.basePath);
+        else
+          for pk4File range pk4Files do
+            scanArchive(stats, pk4File, stats.requestedMapPath);
+          end for;
+          resolveWeaponRuntime(stats);
+          printStats(stats);
+        end if;
+      end if;
+    end if;
+  end func;

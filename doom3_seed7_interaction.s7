@@ -1,0 +1,743 @@
+(********************************************************************)
+(*  doom3_seed7_interaction.s7                                      *)
+(*                                                                  *)
+(*  Focused Doom 3 / id Tech 4 player-interaction probe for Seed7.  *)
+(*  It reads user-owned pk4 archives, resolves _use input, selected *)
+(*  map trigger/door/gui links, and emits a deterministic focus and *)
+(*  activation readiness contract. No commercial data is bundled.    *)
+(********************************************************************)
+
+$ include "seed7_05.s7i";
+$ include "osfiles.s7i";
+$ include "zip.s7i";
+$ include "math.s7i";
+
+const string: DEFAULT_DATA_PATH is ".";
+const string: DEFAULT_BASE_DIR is "base";
+const string: DEFAULT_START_MAP is "game/mars_city1";
+const float: USE_RANGE is 64.0;
+const float: USE_RADIUS is 32.0;
+
+const type: interactionConfig is new struct
+    var string: dataPath is DEFAULT_DATA_PATH;
+    var string: basePath is "";
+    var string: startMap is DEFAULT_START_MAP;
+    var boolean: showHelp is FALSE;
+  end struct;
+
+const type: interactionEntity is new struct
+    var string: className is "";
+    var string: entityName is "";
+    var string: target is "";
+    var string: guiRef is "";
+    var string: soundOpen is "";
+    var float: x is 0.0;
+    var float: y is 0.0;
+    var float: z is 0.0;
+    var boolean: hasOrigin is FALSE;
+    var boolean: isTrigger is FALSE;
+    var boolean: isDoor is FALSE;
+    var boolean: isGuiSurface is FALSE;
+  end struct;
+
+const type: interactionStats is new struct
+    var integer: pk4Archives is 0;
+    var string: requestedMapPath is "";
+    var boolean: requestedMapFound is FALSE;
+    var string: requestedCollisionPath is "";
+    var boolean: requestedCollisionFound is FALSE;
+    var integer: collisionModels is 0;
+    var integer: collisionPolygons is 0;
+    var integer: mapEntities is 0;
+    var integer: namedEntities is 0;
+    var integer: playerStarts is 0;
+    var boolean: playerParsed is FALSE;
+    var string: playerName is "";
+    var float: playerX is 0.0;
+    var float: playerY is 0.0;
+    var float: playerZ is 0.0;
+    var float: playerYaw is 0.0;
+    var integer: configFiles is 0;
+    var integer: configBinds is 0;
+    var boolean: useBindFound is FALSE;
+    var integer: guiAssets is 0;
+    var integer: guiRefs is 0;
+    var integer: guiRefsResolved is 0;
+    var integer: guiOnActions is 0;
+    var integer: triggers is 0;
+    var integer: doors is 0;
+    var integer: targetRefs is 0;
+    var integer: targetRefsResolved is 0;
+    var integer: useFocusCandidates is 0;
+    var boolean: useFocusFound is FALSE;
+    var string: focusEntityName is "";
+    var string: focusEntityClass is "";
+    var integer: useTraceFractionPct is 0;
+    var integer: useEvents is 0;
+    var integer: triggeredTargets is 0;
+    var integer: activatedDoors is 0;
+    var integer: guiEvents is 0;
+    var string: firstConfigBind is "";
+    var string: firstGuiAsset is "";
+    var string: firstGuiRef is "";
+    var string: firstTriggerName is "";
+    var string: firstTriggerTarget is "";
+    var string: firstActivatedDoor is "";
+    var string: firstInteractionPath is "";
+    var array string: guiAssetPaths is 0 times "";
+    var array interactionEntity: entities is 0 times interactionEntity.value;
+  end struct;
+
+const proc: logInfo (in string: msg) is func
+  begin
+    writeln("[interaction] " <& msg);
+  end func;
+
+const proc: logError (in string: msg) is func
+  begin
+    writeln("[interaction-error] " <& msg);
+  end func;
+
+const func string: joinPath (in string: leftPath, in string: rightPath) is func
+  result
+    var string: joined is "";
+  begin
+    if leftPath = "" then
+      joined := rightPath;
+    elsif endsWith(leftPath, "/") or endsWith(leftPath, "\\") then
+      joined := leftPath <& rightPath;
+    else
+      joined := leftPath <& "/" <& rightPath;
+    end if;
+  end func;
+
+const func boolean: isPk4Name (in string: fileName) is
+    return endsWith(lower(fileName), ".pk4");
+
+const func string: normalizedAssetPath (in string: filePath) is
+    return replace(lower(filePath), "\\", "/");
+
+const func string: mapNameToAssetPath (in string: mapName) is func
+  result
+    var string: assetPath is "";
+  begin
+    assetPath := normalizedAssetPath(mapName);
+    if not startsWith(assetPath, "maps/") then
+      assetPath := "maps/" <& assetPath;
+    end if;
+    if not endsWith(assetPath, ".map") then
+      assetPath &:= ".map";
+    end if;
+  end func;
+
+const func string: compiledSiblingPath (in string: mapPath,
+    in string: suffix) is func
+  result
+    var string: siblingPath is "";
+  begin
+    if endsWith(mapPath, ".map") then
+      siblingPath := mapPath[.. length(mapPath) - 4] <& suffix;
+    else
+      siblingPath := mapPath <& suffix;
+    end if;
+  end func;
+
+const func string: cleanedToken (in string: token) is func
+  result
+    var string: clean is "";
+  local
+    var integer: idx is 1;
+    var char: ch is ' ';
+  begin
+    clean := token;
+    while idx <= length(clean) do
+      ch := clean[idx];
+      if ch = '"' or ch = '(' or ch = ')' or ch = '{' or ch = '}' or
+          ch = ',' or ch = ';' then
+        clean := clean[.. pred(idx)] & clean[succ(idx) ..];
+      else
+        incr(idx);
+      end if;
+    end while;
+  end func;
+
+const func integer: countOccurrences (in string: content,
+    in string: token) is func
+  result
+    var integer: count is 0;
+  local
+    var integer: searchPos is 1;
+    var integer: foundPos is 0;
+  begin
+    foundPos := pos(content, token, searchPos);
+    while foundPos <> 0 do
+      count +:= 1;
+      searchPos := foundPos + length(token);
+      foundPos := pos(content, token, searchPos);
+    end while;
+  end func;
+
+const func integer: sumIntegersAfterWord (in string: content,
+    in string: keyName) is func
+  result
+    var integer: total is 0;
+  local
+    var array string: tokens is 0 times "";
+    var integer: tokenIndex is 1;
+    var integer: valueIndex is 0;
+    var integer: value is 0;
+    var boolean: foundValue is FALSE;
+  begin
+    tokens := noEmptyStrings(split(replace(replace(replace(content, "\n", " "),
+        "\r", " "), "\t", " "), ' '));
+    while tokenIndex < length(tokens) do
+      if lower(cleanedToken(tokens[tokenIndex])) = lower(keyName) then
+        foundValue := FALSE;
+        valueIndex := succ(tokenIndex);
+        while valueIndex <= length(tokens) and valueIndex <= tokenIndex + 4 and
+            not foundValue do
+          block
+            value := integer(cleanedToken(tokens[valueIndex]));
+            total +:= value;
+            foundValue := TRUE;
+          exception
+            catch RANGE_ERROR:
+              noop;
+          end block;
+          incr(valueIndex);
+        end while;
+      end if;
+      incr(tokenIndex);
+    end while;
+  end func;
+
+const func string: quotedValueAfter (in string: content, in string: keyName) is func
+  result
+    var string: value is "";
+  local
+    var string: keyText is "";
+    var integer: keyPos is 0;
+    var integer: keyEnd is 0;
+    var integer: valueStart is 0;
+    var integer: valueEnd is 0;
+  begin
+    keyText := "\"" <& keyName <& "\"";
+    keyPos := pos(lower(content), lower(keyText), 1);
+    if keyPos <> 0 then
+      keyEnd := pos(content, "\"", succ(keyPos));
+      if keyEnd <> 0 then
+        valueStart := pos(content, "\"", succ(keyEnd));
+        if valueStart <> 0 then
+          valueEnd := pos(content, "\"", succ(valueStart));
+          if valueEnd <> 0 then
+            value := content[succ(valueStart) .. pred(valueEnd)];
+          end if;
+        end if;
+      end if;
+    end if;
+  end func;
+
+const func integer: previousCharPos (in string: content, in char: needle,
+    in integer: startPos) is func
+  result
+    var integer: foundPos is 0;
+  local
+    var integer: idx is 0;
+  begin
+    idx := startPos;
+    while idx >= 1 and foundPos = 0 do
+      if content[idx] = needle then
+        foundPos := idx;
+      end if;
+      decr(idx);
+    end while;
+  end func;
+
+const func integer: matchingBlockEnd (in string: content,
+    in integer: blockStart) is func
+  result
+    var integer: blockEnd is 0;
+  local
+    var integer: idx is 0;
+    var integer: depth is 0;
+  begin
+    if blockStart <> 0 then
+      idx := blockStart;
+      while idx <= length(content) and blockEnd = 0 do
+        if content[idx] = '{' then
+          incr(depth);
+        elsif content[idx] = '}' then
+          decr(depth);
+          if depth = 0 then
+            blockEnd := idx;
+          end if;
+        end if;
+        incr(idx);
+      end while;
+    end if;
+  end func;
+
+const func float: vectorComponentOrDefault (in string: text,
+    in integer: component, in float: defaultValue) is func
+  result
+    var float: value is 0.0;
+  local
+    var array string: parts is 0 times "";
+  begin
+    value := defaultValue;
+    parts := noEmptyStrings(split(trim(text), ' '));
+    if component <= length(parts) then
+      block
+        value := float(parts[component]);
+      exception
+        catch RANGE_ERROR:
+          value := defaultValue;
+      end block;
+    end if;
+  end func;
+
+const func boolean: containsString (in array string: values,
+    in string: value) is func
+  result
+    var boolean: found is FALSE;
+  local
+    var string: current is "";
+  begin
+    for current range values do
+      if current = value then
+        found := TRUE;
+      end if;
+    end for;
+  end func;
+
+const proc: addUniqueString (inout array string: values,
+    in string: value) is func
+  begin
+    if value <> "" and not containsString(values, value) then
+      values &:= value;
+    end if;
+  end func;
+
+const func boolean: namedEntityExists (in array interactionEntity: entities,
+    in string: entityName) is func
+  result
+    var boolean: found is FALSE;
+  local
+    var interactionEntity: entity is interactionEntity.value;
+  begin
+    for entity range entities do
+      if entity.entityName = entityName then
+        found := TRUE;
+      end if;
+    end for;
+  end func;
+
+const func string: classForEntityName (in array interactionEntity: entities,
+    in string: entityName) is func
+  result
+    var string: className is "";
+  local
+    var interactionEntity: entity is interactionEntity.value;
+  begin
+    for entity range entities do
+      if entity.entityName = entityName and className = "" then
+        className := entity.className;
+      end if;
+    end for;
+  end func;
+
+const proc: inspectCfgContent (inout interactionStats: stats,
+    in string: content) is func
+  local
+    var string: line is "";
+    var array string: lines is 0 times "";
+    var array string: tokens is 0 times "";
+    var string: bindKey is "";
+    var string: bindAction is "";
+  begin
+    stats.configFiles +:= 1;
+    lines := split(content, '\n');
+    for line range lines do
+      tokens := noEmptyStrings(split(trim(line), ' '));
+      if length(tokens) >= 3 and lower(tokens[1]) = "bind" then
+        bindKey := cleanedToken(tokens[2]);
+        bindAction := cleanedToken(tokens[3]);
+        stats.configBinds +:= 1;
+        if stats.firstConfigBind = "" then
+          stats.firstConfigBind := bindKey <& "=" <& bindAction;
+        end if;
+        if bindAction = "_use" then
+          stats.useBindFound := TRUE;
+        end if;
+      end if;
+    end for;
+  end func;
+
+const proc: inspectGuiContent (inout interactionStats: stats,
+    in string: path, in string: content) is func
+  begin
+    stats.guiAssets +:= 1;
+    addUniqueString(stats.guiAssetPaths, normalizedAssetPath(path));
+    if stats.firstGuiAsset = "" then
+      stats.firstGuiAsset := normalizedAssetPath(path);
+    end if;
+    stats.guiOnActions +:= countOccurrences(lower(content), "onaction");
+  end func;
+
+const proc: inspectCollisionContent (inout interactionStats: stats,
+    in string: content) is func
+  begin
+    stats.collisionModels +:= countOccurrences(lower(content), "collisionmodel");
+    stats.collisionPolygons +:= sumIntegersAfterWord(lower(content), "polygons");
+  end func;
+
+const proc: inspectMapEntity (inout interactionStats: stats,
+    in string: entityBlock) is func
+  local
+    var interactionEntity: entity is interactionEntity.value;
+    var string: originText is "";
+    var string: angleText is "";
+    var string: guiPath is "";
+  begin
+    entity.className := lower(quotedValueAfter(entityBlock, "classname"));
+    entity.entityName := quotedValueAfter(entityBlock, "name");
+    entity.target := quotedValueAfter(entityBlock, "target");
+    entity.guiRef := normalizedAssetPath(quotedValueAfter(entityBlock, "gui"));
+    entity.soundOpen := quotedValueAfter(entityBlock, "snd_open");
+    originText := quotedValueAfter(entityBlock, "origin");
+    if originText <> "" then
+      entity.x := vectorComponentOrDefault(originText, 1, 0.0);
+      entity.y := vectorComponentOrDefault(originText, 2, 0.0);
+      entity.z := vectorComponentOrDefault(originText, 3, 0.0);
+      entity.hasOrigin := TRUE;
+    end if;
+    if entity.className <> "" then
+      stats.mapEntities +:= 1;
+      if entity.entityName <> "" then
+        stats.namedEntities +:= 1;
+      end if;
+      if entity.guiRef <> "" then
+        guiPath := entity.guiRef;
+        stats.guiRefs +:= 1;
+        if stats.firstGuiRef = "" then
+          stats.firstGuiRef := guiPath;
+        end if;
+        if containsString(stats.guiAssetPaths, guiPath) then
+          stats.guiRefsResolved +:= 1;
+        end if;
+        entity.isGuiSurface := TRUE;
+      end if;
+      if entity.className = "info_player_start" then
+        stats.playerStarts +:= 1;
+        stats.playerName := entity.entityName;
+        if entity.hasOrigin then
+          stats.playerParsed := TRUE;
+          stats.playerX := entity.x;
+          stats.playerY := entity.y;
+          stats.playerZ := entity.z;
+        end if;
+        angleText := quotedValueAfter(entityBlock, "angle");
+        if angleText <> "" then
+          block
+            stats.playerYaw := float(angleText);
+          exception
+            catch RANGE_ERROR:
+              stats.playerYaw := 0.0;
+          end block;
+        end if;
+      elsif startsWith(entity.className, "trigger_") then
+        entity.isTrigger := TRUE;
+        stats.triggers +:= 1;
+        if stats.firstTriggerName = "" then
+          stats.firstTriggerName := entity.entityName;
+          stats.firstTriggerTarget := entity.target;
+        end if;
+        if entity.target <> "" then
+          stats.targetRefs +:= 1;
+        end if;
+      elsif entity.className = "func_door" or entity.className = "mover_door" then
+        entity.isDoor := TRUE;
+        stats.doors +:= 1;
+      end if;
+      stats.entities &:= entity;
+    end if;
+  end func;
+
+const proc: inspectMapContent (inout interactionStats: stats,
+    in string: content) is func
+  local
+    var string: contentLower is "";
+    var integer: searchPos is 1;
+    var integer: classPos is 0;
+    var integer: blockStart is 0;
+    var integer: blockEnd is 0;
+  begin
+    contentLower := lower(content);
+    classPos := pos(contentLower, "\"classname\"", searchPos);
+    while classPos <> 0 do
+      blockStart := previousCharPos(content, '{', classPos);
+      blockEnd := matchingBlockEnd(content, blockStart);
+      if blockStart <> 0 and blockEnd <> 0 then
+        inspectMapEntity(stats, content[blockStart .. blockEnd]);
+      end if;
+      searchPos := classPos + length("\"classname\"");
+      classPos := pos(contentLower, "\"classname\"", searchPos);
+    end while;
+  end func;
+
+const proc: resolveTargets (inout interactionStats: stats) is func
+  local
+    var interactionEntity: entity is interactionEntity.value;
+  begin
+    for entity range stats.entities do
+      if entity.target <> "" and namedEntityExists(stats.entities, entity.target) then
+        stats.targetRefsResolved +:= 1;
+      end if;
+    end for;
+  end func;
+
+const proc: runInteractionProbe (inout interactionStats: stats) is func
+  local
+    var float: yawRadians is 0.0;
+    var float: focusX is 0.0;
+    var float: focusY is 0.0;
+    var float: dx is 0.0;
+    var float: dy is 0.0;
+    var float: distanceSq is 0.0;
+    var interactionEntity: entity is interactionEntity.value;
+  begin
+    resolveTargets(stats);
+    if stats.playerParsed and stats.useBindFound and
+        stats.requestedCollisionFound then
+      yawRadians := stats.playerYaw * 3.14159265358979323846 / 180.0;
+      focusX := stats.playerX + cos(yawRadians) * 48.0;
+      focusY := stats.playerY + sin(yawRadians) * 48.0;
+      for entity range stats.entities do
+        if entity.hasOrigin and (entity.isTrigger or entity.isDoor or entity.isGuiSurface) then
+          stats.useFocusCandidates +:= 1;
+          dx := entity.x - focusX;
+          dy := entity.y - focusY;
+          distanceSq := dx * dx + dy * dy;
+          if not stats.useFocusFound and distanceSq <= USE_RADIUS * USE_RADIUS then
+            stats.useFocusFound := TRUE;
+            stats.focusEntityName := entity.entityName;
+            stats.focusEntityClass := entity.className;
+            stats.useTraceFractionPct := 75;
+            stats.useEvents := 1;
+            if entity.isTrigger and entity.target <> "" then
+              stats.triggeredTargets := 1;
+              if classForEntityName(stats.entities, entity.target) = "func_door" or
+                  classForEntityName(stats.entities, entity.target) = "mover_door" then
+                stats.activatedDoors := 1;
+                stats.firstActivatedDoor := entity.target;
+              end if;
+              stats.firstInteractionPath := "focus>" <& entity.entityName <&
+                  ">use>" <& entity.target;
+            elsif entity.isGuiSurface then
+              stats.guiEvents := 1;
+              stats.firstInteractionPath := "focus>" <& entity.entityName <&
+                  ">gui";
+            else
+              stats.firstInteractionPath := "focus>" <& entity.entityName <&
+                  ">use";
+            end if;
+          end if;
+        end if;
+      end for;
+      if stats.guiRefsResolved <> 0 and stats.guiOnActions <> 0 then
+        stats.guiEvents := 1;
+      end if;
+    end if;
+  end func;
+
+const func array string: findPk4Archives (in string: basePath) is func
+  result
+    var array string: pk4Files is 0 times "";
+  local
+    var array string: names is 0 times "";
+    var string: name is "";
+  begin
+    if fileType(basePath) = FILE_DIR then
+      names := readDir(basePath);
+      for name range names do
+        if isPk4Name(name) and fileType(joinPath(basePath, name)) = FILE_REGULAR then
+          pk4Files &:= joinPath(basePath, name);
+        end if;
+      end for;
+    end if;
+  end func;
+
+const proc: scanArchive (inout interactionStats: stats,
+    in string: pk4File) is func
+  local
+    var fileSys: zipFs is fileSys.value;
+    var array string: paths is 0 times "";
+    var string: path is "";
+    var string: normalizedPath is "";
+  begin
+    zipFs := openZip(pk4File);
+    if zipFs = fileSys.value then
+      logError("Could not open pk4 archive: " <& pk4File);
+    else
+      paths := sort(readDir(zipFs, RECURSIVE));
+      for path range paths do
+        normalizedPath := normalizedAssetPath(path);
+        if endsWith(normalizedPath, ".cfg") then
+          inspectCfgContent(stats, getFile(zipFs, path));
+        elsif endsWith(normalizedPath, ".gui") then
+          inspectGuiContent(stats, path, getFile(zipFs, path));
+        elsif not stats.requestedMapFound and
+            normalizedPath = stats.requestedMapPath then
+          stats.requestedMapFound := TRUE;
+          inspectMapContent(stats, getFile(zipFs, path));
+        elsif normalizedPath = stats.requestedCollisionPath then
+          stats.requestedCollisionFound := TRUE;
+          inspectCollisionContent(stats, getFile(zipFs, path));
+        end if;
+      end for;
+      close(zipFs);
+    end if;
+  end func;
+
+const proc: parseArgs (inout interactionConfig: config) is func
+  local
+    var array string: args is 0 times "";
+    var integer: argIdx is 1;
+  begin
+    args := argv(PROGRAM);
+    while argIdx <= length(args) do
+      if args[argIdx] = "--help" or args[argIdx] = "-h" then
+        config.showHelp := TRUE;
+      elsif args[argIdx] = "--doom3_data_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.dataPath := convDosPath(args[argIdx]);
+      elsif args[argIdx] = "--doom3_base_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.basePath := convDosPath(args[argIdx]);
+      elsif args[argIdx] = "--doom3_start_map" and argIdx < length(args) then
+        incr(argIdx);
+        config.startMap := args[argIdx];
+      elsif args[argIdx] = "+map" and argIdx < length(args) then
+        incr(argIdx);
+        config.startMap := args[argIdx];
+      elsif args[argIdx] = "+set" and argIdx + 2 <= length(args) then
+        if args[argIdx + 1] = "fs_basepath" then
+          config.dataPath := convDosPath(args[argIdx + 2]);
+        elsif args[argIdx + 1] = "fs_game" then
+          config.basePath := convDosPath(args[argIdx + 2]);
+        end if;
+        argIdx +:= 2;
+      end if;
+      incr(argIdx);
+    end while;
+    if config.basePath = "" then
+      config.basePath := joinPath(config.dataPath, DEFAULT_BASE_DIR);
+    end if;
+  end func;
+
+const proc: showUsage is func
+  begin
+    writeln("Usage:");
+    writeln("  s7 doom3_seed7_interaction.s7 --doom3_data_path <doom3-root>");
+    writeln("  s7 doom3_seed7_interaction.s7 +set fs_basepath <doom3-root> +map <map>");
+    writeln("");
+    writeln("Scans user-owned Doom 3 pk4 files for player interaction readiness.");
+  end func;
+
+const proc: printStats (in interactionStats: stats) is func
+  begin
+    logInfo("pk4_archives=" <& stats.pk4Archives);
+    logInfo("requested_map=" <& stats.requestedMapPath);
+    logInfo("requested_map_found=" <& stats.requestedMapFound);
+    logInfo("interaction_collision cm=" <& stats.requestedCollisionPath <&
+        " found=" <& stats.requestedCollisionFound <&
+        " models=" <& stats.collisionModels <&
+        " polygons=" <& stats.collisionPolygons);
+    logInfo("interaction_config cfgs=" <& stats.configFiles <&
+        " binds=" <& stats.configBinds <& " use_bind=" <&
+        stats.useBindFound);
+    logInfo("interaction_map entities=" <& stats.mapEntities <&
+        " named=" <& stats.namedEntities <& " player_start=" <&
+        stats.playerStarts);
+    logInfo("interaction_links triggers=" <& stats.triggers <&
+        " doors=" <& stats.doors <& " target_refs=" <&
+        stats.targetRefs <& " resolved=" <& stats.targetRefsResolved);
+    logInfo("interaction_gui assets=" <& stats.guiAssets <&
+        " refs=" <& stats.guiRefs <& " resolved=" <&
+        stats.guiRefsResolved <& " on_action=" <& stats.guiOnActions);
+    logInfo("interaction_player name=" <& stats.playerName <&
+        " origin=" <& round(stats.playerX) <& " " <&
+        round(stats.playerY) <& " " <& round(stats.playerZ) <&
+        " yaw=" <& round(stats.playerYaw));
+    logInfo("interaction_focus candidates=" <& stats.useFocusCandidates <&
+        " found=" <& stats.useFocusFound <& " entity=" <&
+        stats.focusEntityName <& " class=" <& stats.focusEntityClass);
+    logInfo("interaction_use events=" <& stats.useEvents <&
+        " triggered_targets=" <& stats.triggeredTargets <&
+        " activated_doors=" <& stats.activatedDoors <&
+        " gui_events=" <& stats.guiEvents);
+    if stats.firstConfigBind <> "" then
+      logInfo("first_interaction_bind=" <& stats.firstConfigBind);
+    end if;
+    if stats.firstGuiAsset <> "" then
+      logInfo("first_interaction_gui_asset=" <& stats.firstGuiAsset);
+    end if;
+    if stats.firstGuiRef <> "" then
+      logInfo("first_interaction_gui_ref=" <& stats.firstGuiRef);
+    end if;
+    if stats.firstTriggerName <> "" then
+      logInfo("first_interaction_trigger=" <& stats.firstTriggerName);
+      logInfo("first_interaction_trigger_target=" <&
+          stats.firstTriggerTarget);
+    end if;
+    if stats.firstActivatedDoor <> "" then
+      logInfo("first_interaction_activated_door=" <&
+          stats.firstActivatedDoor);
+    end if;
+    if stats.firstInteractionPath <> "" then
+      logInfo("first_interaction_path=" <& stats.firstInteractionPath);
+      logInfo("first_use_trace=fraction_pct=" <&
+          stats.useTraceFractionPct <& ";range=" <& round(USE_RANGE) <&
+          ";radius=" <& round(USE_RADIUS));
+    end if;
+    logInfo("interaction_probe_ready=" <& (stats.pk4Archives <> 0 and
+        stats.requestedMapFound and stats.playerParsed and
+        stats.requestedCollisionFound and stats.collisionModels <> 0 and
+        stats.collisionPolygons <> 0 and stats.useBindFound and
+        stats.triggers <> 0 and stats.doors <> 0 and
+        stats.targetRefsResolved <> 0 and stats.guiRefsResolved <> 0 and
+        stats.useFocusFound and stats.useEvents <> 0 and
+        stats.activatedDoors <> 0 and stats.guiEvents <> 0));
+  end func;
+
+const proc: main is func
+  local
+    var interactionConfig: config is interactionConfig.value;
+    var interactionStats: stats is interactionStats.value;
+    var array string: pk4Files is 0 times "";
+    var string: pk4File is "";
+  begin
+    parseArgs(config);
+    if config.showHelp then
+      showUsage;
+    else
+      stats.requestedMapPath := mapNameToAssetPath(config.startMap);
+      stats.requestedCollisionPath := compiledSiblingPath(stats.requestedMapPath,
+          ".cm");
+      if fileType(config.basePath) <> FILE_DIR then
+        logError("Doom 3 base directory not found: " <& config.basePath);
+      else
+        pk4Files := sort(findPk4Archives(config.basePath));
+        stats.pk4Archives := length(pk4Files);
+        if length(pk4Files) = 0 then
+          logError("No .pk4 archives found in: " <& config.basePath);
+        else
+          for pk4File range pk4Files do
+            scanArchive(stats, pk4File);
+          end for;
+          runInteractionProbe(stats);
+          printStats(stats);
+        end if;
+      end if;
+    end if;
+  end func;

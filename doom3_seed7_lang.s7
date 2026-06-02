@@ -1,0 +1,495 @@
+(********************************************************************)
+(*  doom3_seed7_lang.s7                                             *)
+(*                                                                  *)
+(*  Focused Doom 3 / id Tech 4 localization probe for Seed7. It     *)
+(*  reads user-owned pk4 archives, parses strings/*.lang tables,    *)
+(*  scans maps/defs/materials/GUIs for #str_* references, resolves  *)
+(*  them, and reports placeholder fallback readiness. No commercial *)
+(*  data is bundled.                                                *)
+(********************************************************************)
+
+$ include "seed7_05.s7i";
+$ include "osfiles.s7i";
+$ include "zip.s7i";
+
+const string: DEFAULT_DATA_PATH is ".";
+const string: DEFAULT_BASE_DIR is "base";
+const string: DEFAULT_LANGUAGE is "english";
+
+const type: langConfig is new struct
+    var string: dataPath is DEFAULT_DATA_PATH;
+    var string: basePath is "";
+    var string: language is DEFAULT_LANGUAGE;
+    var boolean: showHelp is FALSE;
+  end struct;
+
+const type: langEntry is new struct
+    var string: langKey is "";
+    var string: value is "";
+    var string: sourcePath is "";
+  end struct;
+
+const type: langStats is new struct
+    var integer: pk4Archives is 0;
+    var integer: langFiles is 0;
+    var integer: selectedLangFiles is 0;
+    var integer: langEntries is 0;
+    var integer: uniqueLangKeys is 0;
+    var integer: langOverrides is 0;
+    var integer: localizedFilesScanned is 0;
+    var integer: localizedRefs is 0;
+    var integer: resolvedRefs is 0;
+    var integer: missingRefs is 0;
+    var integer: guiRefs is 0;
+    var integer: mapRefs is 0;
+    var integer: defRefs is 0;
+    var integer: materialRefs is 0;
+    var integer: placeholderStrings is 0;
+    var string: firstLangFile is "";
+    var string: firstLangKey is "";
+    var string: firstLangValue is "";
+    var string: firstOverrideKey is "";
+    var string: firstLocalizedRef is "";
+    var string: firstResolvedRef is "";
+    var string: firstResolvedText is "";
+    var string: firstMissingRef is "";
+    var string: firstGuiRef is "";
+    var string: firstMapRef is "";
+    var string: firstDefRef is "";
+    var string: firstMaterialRef is "";
+    var array langEntry: entries is 0 times langEntry.value;
+    var array string: refsSeen is 0 times "";
+  end struct;
+
+const proc: logInfo (in string: msg) is func
+  begin
+    writeln("[lang] " <& msg);
+  end func;
+
+const proc: logError (in string: msg) is func
+  begin
+    writeln("[lang-error] " <& msg);
+  end func;
+
+const func string: joinPath (in string: leftPath, in string: rightPath) is func
+  result
+    var string: joined is "";
+  begin
+    if leftPath = "" then
+      joined := rightPath;
+    elsif endsWith(leftPath, "/") or endsWith(leftPath, "\\") then
+      joined := leftPath <& rightPath;
+    else
+      joined := leftPath <& "/" <& rightPath;
+    end if;
+  end func;
+
+const func boolean: isPk4Name (in string: fileName) is
+    return endsWith(lower(fileName), ".pk4");
+
+const func string: normalizedAssetPath (in string: filePath) is
+    return replace(lower(filePath), "\\", "/");
+
+const func boolean: containsString (in array string: values,
+    in string: value) is func
+  result
+    var boolean: found is FALSE;
+  local
+    var string: current is "";
+  begin
+    for current range values do
+      if current = value then
+        found := TRUE;
+      end if;
+    end for;
+  end func;
+
+const proc: appendUnique (inout array string: values,
+    in string: value) is func
+  begin
+    if value <> "" and not containsString(values, value) then
+      values &:= value;
+    end if;
+  end func;
+
+const func string: cleanedToken (in string: token) is func
+  result
+    var string: clean is "";
+  local
+    var integer: idx is 1;
+    var char: ch is ' ';
+  begin
+    clean := trim(token);
+    while idx <= length(clean) do
+      ch := clean[idx];
+      if ch = '"' or ch = ',' or ch = ';' or ch = '{' or ch = '}' or
+          ch = '(' or ch = ')' then
+        clean := clean[.. pred(idx)] & clean[succ(idx) ..];
+      else
+        incr(idx);
+      end if;
+    end while;
+  end func;
+
+const func array string: quotedTokens (in string: content) is func
+  result
+    var array string: tokens is 0 times "";
+  local
+    var integer: idx is 1;
+    var integer: startIdx is 1;
+    var string: token is "";
+  begin
+    while idx <= length(content) do
+      if content[idx] = '"' then
+        incr(idx);
+        startIdx := idx;
+        while idx <= length(content) and content[idx] <> '"' do
+          incr(idx);
+        end while;
+        if idx > startIdx then
+          token := content[startIdx .. pred(idx)];
+          tokens &:= token;
+        end if;
+      end if;
+      incr(idx);
+    end while;
+  end func;
+
+const func string: langValueForKey (in array langEntry: entries,
+    in string: idName) is func
+  result
+    var string: value is "";
+  local
+    var langEntry: entry is langEntry.value;
+  begin
+    for entry range entries do
+      if entry.langKey = idName then
+        value := entry.value;
+      end if;
+    end for;
+  end func;
+
+const proc: putLangEntry (inout langStats: stats,
+    in string: idName, in string: value, in string: sourcePath) is func
+  local
+    var integer: idx is 1;
+    var langEntry: entry is langEntry.value;
+  begin
+    if idName <> "" and startsWith(idName, "#str_") then
+      stats.langEntries +:= 1;
+      while idx <= length(stats.entries) and stats.entries[idx].langKey <> idName do
+        incr(idx);
+      end while;
+      if idx <= length(stats.entries) then
+        stats.entries[idx].value := value;
+        stats.entries[idx].sourcePath := sourcePath;
+        stats.langOverrides +:= 1;
+        if stats.firstOverrideKey = "" then
+          stats.firstOverrideKey := idName;
+        end if;
+      else
+        entry.langKey := idName;
+        entry.value := value;
+        entry.sourcePath := sourcePath;
+        stats.entries &:= entry;
+        if stats.firstLangKey = "" then
+          stats.firstLangKey := idName;
+          stats.firstLangValue := value;
+        end if;
+      end if;
+      stats.uniqueLangKeys := length(stats.entries);
+    end if;
+  end func;
+
+const proc: inspectLangFile (inout langStats: stats,
+    in string: path, in string: content) is func
+  local
+    var array string: tokens is 0 times "";
+    var integer: idx is 1;
+  begin
+    stats.langFiles +:= 1;
+    stats.selectedLangFiles +:= 1;
+    if stats.firstLangFile = "" then
+      stats.firstLangFile := normalizedAssetPath(path);
+    end if;
+    tokens := quotedTokens(content);
+    while idx < length(tokens) do
+      if startsWith(tokens[idx], "#str_") then
+        putLangEntry(stats, tokens[idx], tokens[succ(idx)],
+            normalizedAssetPath(path));
+        incr(idx);
+      end if;
+      incr(idx);
+    end while;
+  end func;
+
+const proc: noteLocalizedRef (inout langStats: stats,
+    in string: refText, in string: sourceKind) is func
+  local
+    var string: refValue is "";
+    var string: resolvedText is "";
+  begin
+    refValue := cleanedToken(refText);
+    if startsWith(refValue, "#str_") then
+      stats.localizedRefs +:= 1;
+      appendUnique(stats.refsSeen, refValue);
+      if stats.firstLocalizedRef = "" then
+        stats.firstLocalizedRef := refValue;
+      end if;
+      if sourceKind = "gui" then
+        stats.guiRefs +:= 1;
+        if stats.firstGuiRef = "" then stats.firstGuiRef := refValue; end if;
+      elsif sourceKind = "map" then
+        stats.mapRefs +:= 1;
+        if stats.firstMapRef = "" then stats.firstMapRef := refValue; end if;
+      elsif sourceKind = "def" then
+        stats.defRefs +:= 1;
+        if stats.firstDefRef = "" then stats.firstDefRef := refValue; end if;
+      elsif sourceKind = "material" then
+        stats.materialRefs +:= 1;
+        if stats.firstMaterialRef = "" then stats.firstMaterialRef := refValue; end if;
+      end if;
+      resolvedText := langValueForKey(stats.entries, refValue);
+      if resolvedText <> "" then
+        stats.resolvedRefs +:= 1;
+        if stats.firstResolvedRef = "" then
+          stats.firstResolvedRef := refValue;
+          stats.firstResolvedText := resolvedText;
+        end if;
+      else
+        stats.missingRefs +:= 1;
+        stats.placeholderStrings +:= 1;
+        if stats.firstMissingRef = "" then
+          stats.firstMissingRef := refValue;
+        end if;
+      end if;
+    end if;
+  end func;
+
+const proc: inspectLocalizedText (inout langStats: stats,
+    in string: path, in string: content) is func
+  local
+    var array string: tokens is 0 times "";
+    var string: token is "";
+    var string: sourceKind is "";
+    var string: pathLower is "";
+  begin
+    pathLower := normalizedAssetPath(path);
+    if endsWith(pathLower, ".gui") then
+      sourceKind := "gui";
+    elsif endsWith(pathLower, ".map") then
+      sourceKind := "map";
+    elsif endsWith(pathLower, ".def") or endsWith(pathLower, ".decl") then
+      sourceKind := "def";
+    elsif endsWith(pathLower, ".mtr") then
+      sourceKind := "material";
+    else
+      sourceKind := "";
+    end if;
+    if sourceKind <> "" then
+      stats.localizedFilesScanned +:= 1;
+      tokens := quotedTokens(content);
+      for token range tokens do
+        noteLocalizedRef(stats, token, sourceKind);
+      end for;
+    end if;
+  end func;
+
+const func array string: findPk4Archives (in string: basePath) is func
+  result
+    var array string: pk4Files is 0 times "";
+  local
+    var array string: names is 0 times "";
+    var string: name is "";
+  begin
+    if fileType(basePath) = FILE_DIR then
+      names := readDir(basePath);
+      for name range names do
+        if isPk4Name(name) and fileType(joinPath(basePath, name)) = FILE_REGULAR then
+          pk4Files &:= joinPath(basePath, name);
+        end if;
+      end for;
+    end if;
+  end func;
+
+const proc: scanArchiveLang (inout langStats: stats,
+    in langConfig: config, in string: pk4File) is func
+  local
+    var fileSys: zipFs is fileSys.value;
+    var array string: paths is 0 times "";
+    var string: path is "";
+    var string: pathLower is "";
+  begin
+    zipFs := openZip(pk4File);
+    if zipFs = fileSys.value then
+      logError("could not open pk4 archive: " <& pk4File);
+    else
+      paths := sort(readDir(zipFs, RECURSIVE));
+      for path range paths do
+        pathLower := normalizedAssetPath(path);
+        if startsWith(pathLower, "strings/") and
+            endsWith(pathLower, ".lang") and
+            (config.language = "" or
+            pos(pathLower, lower(config.language), 1) <> 0) then
+          inspectLangFile(stats, path, getFile(zipFs, path));
+        elsif startsWith(pathLower, "strings/") and endsWith(pathLower, ".lang") then
+          stats.langFiles +:= 1;
+        end if;
+      end for;
+      close(zipFs);
+    end if;
+  end func;
+
+const proc: scanArchiveRefs (inout langStats: stats,
+    in string: pk4File) is func
+  local
+    var fileSys: zipFs is fileSys.value;
+    var array string: paths is 0 times "";
+    var string: path is "";
+    var string: pathLower is "";
+  begin
+    zipFs := openZip(pk4File);
+    if zipFs = fileSys.value then
+      logError("could not open pk4 archive: " <& pk4File);
+    else
+      paths := sort(readDir(zipFs, RECURSIVE));
+      for path range paths do
+        pathLower := normalizedAssetPath(path);
+        if endsWith(pathLower, ".gui") or endsWith(pathLower, ".map") or
+            endsWith(pathLower, ".def") or endsWith(pathLower, ".decl") or
+            endsWith(pathLower, ".mtr") then
+          inspectLocalizedText(stats, path, getFile(zipFs, path));
+        end if;
+      end for;
+      close(zipFs);
+    end if;
+  end func;
+
+const proc: parseArgs (inout langConfig: config) is func
+  local
+    var array string: args is 0 times "";
+    var integer: argIdx is 1;
+  begin
+    args := argv(PROGRAM);
+    while argIdx <= length(args) do
+      if args[argIdx] = "--help" or args[argIdx] = "-h" then
+        config.showHelp := TRUE;
+      elsif args[argIdx] = "--doom3_data_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.dataPath := convDosPath(args[argIdx]);
+      elsif args[argIdx] = "--doom3_base_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.basePath := convDosPath(args[argIdx]);
+      elsif args[argIdx] = "--doom3_language" and argIdx < length(args) then
+        incr(argIdx);
+        config.language := args[argIdx];
+      elsif args[argIdx] = "+set" and argIdx + 2 <= length(args) then
+        if args[argIdx + 1] = "fs_basepath" then
+          config.dataPath := convDosPath(args[argIdx + 2]);
+        elsif args[argIdx + 1] = "fs_game" then
+          config.basePath := convDosPath(args[argIdx + 2]);
+        elsif args[argIdx + 1] = "sys_lang" then
+          config.language := args[argIdx + 2];
+        end if;
+        argIdx +:= 2;
+      end if;
+      incr(argIdx);
+    end while;
+    if config.basePath = "" then
+      config.basePath := joinPath(config.dataPath, DEFAULT_BASE_DIR);
+    end if;
+  end func;
+
+const proc: showUsage is func
+  begin
+    writeln("Usage:");
+    writeln("  s7 doom3_seed7_lang.s7 --doom3_data_path <doom3-root>");
+    writeln("  s7 doom3_seed7_lang.s7 +set fs_basepath <doom3-root> +set sys_lang english");
+    writeln("");
+    writeln("Scans user-owned Doom 3 pk4 files for localization/string-table readiness.");
+  end func;
+
+const proc: printStats (in langConfig: config,
+    in langStats: stats) is func
+  begin
+    logInfo("pk4_archives=" <& stats.pk4Archives);
+    logInfo("language=" <& config.language);
+    logInfo("lang_files total=" <& stats.langFiles <&
+        " selected=" <& stats.selectedLangFiles);
+    logInfo("lang_entries raw=" <& stats.langEntries <&
+        " unique=" <& stats.uniqueLangKeys <&
+        " overrides=" <& stats.langOverrides);
+    logInfo("localized_refs files=" <& stats.localizedFilesScanned <&
+        " refs=" <& stats.localizedRefs <&
+        " unique=" <& length(stats.refsSeen) <&
+        " resolved=" <& stats.resolvedRefs <&
+        " missing=" <& stats.missingRefs);
+    logInfo("localized_ref_kinds gui=" <& stats.guiRefs <&
+        " map=" <& stats.mapRefs <& " def=" <& stats.defRefs <&
+        " material=" <& stats.materialRefs);
+    logInfo("placeholder_strings=" <& stats.placeholderStrings);
+    if stats.firstLangFile <> "" then
+      logInfo("first_lang_file=" <& stats.firstLangFile);
+    end if;
+    if stats.firstLangKey <> "" then
+      logInfo("first_lang_key=" <& stats.firstLangKey);
+      logInfo("first_lang_value=" <& stats.firstLangValue);
+    end if;
+    if stats.firstLocalizedRef <> "" then
+      logInfo("first_localized_ref=" <& stats.firstLocalizedRef);
+    end if;
+    if stats.firstResolvedRef <> "" then
+      logInfo("first_resolved_ref=" <& stats.firstResolvedRef);
+      logInfo("first_resolved_text=" <& stats.firstResolvedText);
+    end if;
+    if stats.firstMissingRef <> "" then
+      logInfo("first_missing_ref=" <& stats.firstMissingRef);
+    end if;
+    if stats.firstGuiRef <> "" then
+      logInfo("first_gui_lang_ref=" <& stats.firstGuiRef);
+    end if;
+    if stats.firstMapRef <> "" then
+      logInfo("first_map_lang_ref=" <& stats.firstMapRef);
+    end if;
+    if stats.firstDefRef <> "" then
+      logInfo("first_def_lang_ref=" <& stats.firstDefRef);
+    end if;
+    if stats.firstMaterialRef <> "" then
+      logInfo("first_material_lang_ref=" <& stats.firstMaterialRef);
+    end if;
+    logInfo("lang_probe_ready=" <& (stats.pk4Archives <> 0 and
+        stats.selectedLangFiles <> 0 and stats.uniqueLangKeys <> 0 and
+        stats.localizedRefs <> 0 and stats.resolvedRefs <> 0 and
+        stats.missingRefs <> 0 and stats.placeholderStrings <> 0));
+  end func;
+
+const proc: main is func
+  local
+    var langConfig: config is langConfig.value;
+    var langStats: stats is langStats.value;
+    var array string: pk4Files is 0 times "";
+    var string: pk4File is "";
+  begin
+    parseArgs(config);
+    if config.showHelp then
+      showUsage;
+    else
+      if fileType(config.basePath) <> FILE_DIR then
+        logError("Doom 3 base directory not found: " <& config.basePath);
+      else
+        pk4Files := sort(findPk4Archives(config.basePath));
+        stats.pk4Archives := length(pk4Files);
+        if length(pk4Files) = 0 then
+          logError("No .pk4 archives found in: " <& config.basePath);
+        else
+          for pk4File range pk4Files do
+            scanArchiveLang(stats, config, pk4File);
+          end for;
+          for pk4File range pk4Files do
+            scanArchiveRefs(stats, pk4File);
+          end for;
+          printStats(config, stats);
+        end if;
+      end if;
+    end if;
+  end func;

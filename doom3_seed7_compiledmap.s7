@@ -1,0 +1,1325 @@
+(********************************************************************)
+(*  doom3_seed7_compiledmap.s7                                      *)
+(*                                                                  *)
+(*  Focused Doom 3 / id Tech 4 compiled-map probe for Seed7.        *)
+(*  It reads user-owned pk4 archives and verifies that the selected *)
+(*  map has .proc render geometry and .cm collision companions.     *)
+(*  No commercial data is bundled.                                  *)
+(********************************************************************)
+
+$ include "seed7_05.s7i";
+$ include "osfiles.s7i";
+$ include "zip.s7i";
+
+const string: DEFAULT_DATA_PATH is ".";
+const string: DEFAULT_BASE_DIR is "base";
+const string: DEFAULT_START_MAP is "game/mars_city1";
+
+const type: compiledConfig is new struct
+    var string: dataPath is DEFAULT_DATA_PATH;
+    var string: basePath is "";
+    var string: startMap is DEFAULT_START_MAP;
+    var boolean: showHelp is FALSE;
+  end struct;
+
+const type: compiledStats is new struct
+    var integer: pk4Archives is 0;
+    var string: requestedMapPath is "";
+    var string: requestedRenderPath is "";
+    var string: requestedCollisionPath is "";
+    var integer: mapAssets is 0;
+    var integer: renderAssets is 0;
+    var integer: collisionAssets is 0;
+    var integer: imageAssets is 0;
+    var integer: materialDecls is 0;
+    var boolean: requestedMapFound is FALSE;
+    var boolean: requestedRenderFound is FALSE;
+    var boolean: requestedCollisionFound is FALSE;
+    var integer: renderModels is 0;
+    var integer: renderSurfaces is 0;
+    var integer: renderPortalAreas is 0;
+    var integer: renderPortals is 0;
+    var integer: renderVertexDecls is 0;
+    var integer: renderIndexDecls is 0;
+    var integer: renderVertexTotal is 0;
+    var integer: renderIndexTotal is 0;
+    var integer: renderMaterialRefs is 0;
+    var integer: renderMaterialDeclared is 0;
+    var integer: renderMaterialMissing is 0;
+    var integer: renderTextureRefs is 0;
+    var integer: renderTextureResolved is 0;
+    var integer: renderTextureMissing is 0;
+    var integer: materialNonsolidDecls is 0;
+    var integer: collisionModels is 0;
+    var integer: collisionVertexDecls is 0;
+    var integer: collisionEdgeDecls is 0;
+    var integer: collisionPolygonDecls is 0;
+    var integer: collisionBrushDecls is 0;
+    var integer: collisionVertexTotal is 0;
+    var integer: collisionEdgeTotal is 0;
+    var integer: collisionPolygonTotal is 0;
+    var integer: collisionBrushTotal is 0;
+    var integer: collisionPolygonsClassified is 0;
+    var integer: collisionPolygonsBlocking is 0;
+    var integer: collisionPolygonsNonblocking is 0;
+    var integer: collisionPolygonPlanes is 0;
+    var integer: compiledSegmentTracePlanes is 0;
+    var integer: compiledSegmentTraceBlockingHits is 0;
+    var integer: compiledSegmentTraceNonblockingSkipped is 0;
+    var integer: compiledSegmentTraceNearestFractionPercent is -1;
+    var string: firstMapAsset is "";
+    var string: firstRenderAsset is "";
+    var string: firstCollisionAsset is "";
+    var string: firstImageAsset is "";
+    var string: firstMaterialDecl is "";
+    var string: firstRenderMaterialRef is "";
+    var string: firstMissingRenderMaterial is "";
+    var string: firstRenderTextureBinding is "";
+    var string: firstMissingRenderTexture is "";
+    var string: firstRenderSurfaceRecord is "";
+    var string: firstRenderPortalRecord is "";
+    var string: firstRenderPortalDetailRecord is "";
+    var integer: firstRenderPortalPositiveArea is 0;
+    var integer: firstRenderPortalNegativeArea is 0;
+    var string: firstVisibilityScopeSummary is "";
+    var string: firstVisibilityFloodSummary is "";
+    var string: firstCompiledSurfaceSummary is "";
+    var string: firstCompiledDrawCallSummary is "";
+    var string: firstRenderVersion is "";
+    var string: firstCollisionVersion is "";
+    var string: firstRenderModelName is "";
+    var string: firstCollisionModelName is "";
+    var string: firstModelPairSummary is "";
+    var string: firstCollisionPayloadRecord is "";
+    var string: firstCollisionPolygonRecord is "";
+    var string: firstCollisionPolygonPlaneRecord is "";
+    var string: firstCompiledSegmentHitRecord is "";
+    var boolean: firstCollisionPolygonMaterialDeclared is FALSE;
+    var boolean: firstCollisionPolygonBlocking is FALSE;
+    var array string: imageAssetStems is 0 times "";
+    var array string: materialNames is 0 times "";
+    var array boolean: materialNonsolidByIndex is 0 times FALSE;
+    var array string: materialTextureNames is 0 times "";
+    var array string: materialTextureStems is 0 times "";
+    var array string: renderMaterialNames is 0 times "";
+    var array string: collisionPolygonMaterials is 0 times "";
+    var array string: collisionPolygonContents is 0 times "";
+    var array string: collisionPolygonPlaneRecords is 0 times "";
+  end struct;
+
+const proc: logInfo (in string: msg) is func
+  begin
+    writeln("[compiled-map] " <& msg);
+  end func;
+
+const proc: logError (in string: msg) is func
+  begin
+    writeln("[compiled-map-error] " <& msg);
+  end func;
+
+const func string: joinPath (in string: leftPath, in string: rightPath) is func
+  result
+    var string: joined is "";
+  begin
+    if leftPath = "" then
+      joined := rightPath;
+    elsif endsWith(leftPath, "/") or endsWith(leftPath, "\\") then
+      joined := leftPath <& rightPath;
+    else
+      joined := leftPath <& "/" <& rightPath;
+    end if;
+  end func;
+
+const func boolean: isPk4Name (in string: fileName) is
+    return endsWith(lower(fileName), ".pk4");
+
+const func string: normalizedAssetPath (in string: filePath) is
+    return replace(lower(filePath), "\\", "/");
+
+const func string: assetStem (in string: filePath) is func
+  result
+    var string: stem is "";
+  local
+    var string: path is "";
+    var integer: dotPos is 0;
+  begin
+    path := normalizedAssetPath(filePath);
+    dotPos := rpos(path, ".");
+    if dotPos <> 0 then
+      stem := path[.. pred(dotPos)];
+    else
+      stem := path;
+    end if;
+  end func;
+
+const func boolean: isImageAssetPath (in string: filePath) is func
+  result
+    var boolean: isImage is FALSE;
+  local
+    var string: pathLower is "";
+  begin
+    pathLower := normalizedAssetPath(filePath);
+    isImage := endsWith(pathLower, ".tga") or endsWith(pathLower, ".dds") or
+        endsWith(pathLower, ".jpg") or endsWith(pathLower, ".png");
+  end func;
+
+const func string: mapNameToAssetPath (in string: mapName) is func
+  result
+    var string: assetPath is "";
+  begin
+    assetPath := normalizedAssetPath(mapName);
+    if not startsWith(assetPath, "maps/") then
+      assetPath := "maps/" <& assetPath;
+    end if;
+    if not endsWith(assetPath, ".map") then
+      assetPath &:= ".map";
+    end if;
+  end func;
+
+const func string: compiledSiblingPath (in string: mapPath,
+    in string: suffix) is func
+  result
+    var string: sibling is "";
+  begin
+    sibling := mapPath[.. pred(pred(pred(pred(length(mapPath)))))] <& suffix;
+  end func;
+
+const func integer: countOccurrences (in string: content,
+    in string: token) is func
+  result
+    var integer: count is 0;
+  local
+    var integer: searchPos is 1;
+    var integer: foundPos is 0;
+  begin
+    foundPos := pos(content, token, searchPos);
+    while foundPos <> 0 do
+      count +:= 1;
+      searchPos := foundPos + length(token);
+      foundPos := pos(content, token, searchPos);
+    end while;
+  end func;
+
+const func boolean: areaInList (in string: areaList, in integer: areaNum) is func
+  result
+    var boolean: found is FALSE;
+  begin
+    found := pos(areaList, ";" <& areaNum <& ";") <> 0;
+  end func;
+
+const proc: addAreaToList (inout string: areaList, in integer: areaNum) is func
+  begin
+    if not areaInList(areaList, areaNum) then
+      areaList &:= areaNum <& ";";
+    end if;
+  end func;
+
+const func string: cleanedToken (in string: token) is func
+  result
+    var string: clean is "";
+  local
+    var integer: idx is 1;
+    var char: ch is ' ';
+  begin
+    clean := token;
+    while idx <= length(clean) do
+      ch := clean[idx];
+      if ch = '"' or ch = '(' or ch = ')' or ch = '{' or ch = '}' or
+          ch = ',' or ch = ';' then
+        clean := clean[.. pred(idx)] & clean[succ(idx) ..];
+      else
+        incr(idx);
+      end if;
+    end while;
+  end func;
+
+const func boolean: containsString (in array string: values,
+    in string: searched) is func
+  result
+    var boolean: found is FALSE;
+  local
+    var string: value is "";
+  begin
+    for value range values do
+      if value = searched then
+        found := TRUE;
+      end if;
+    end for;
+  end func;
+
+const proc: appendUnique (inout array string: values, in string: value) is func
+  begin
+    if value <> "" and not containsString(values, value) then
+      values &:= value;
+    end if;
+  end func;
+
+const func integer: indexOfString (in array string: values,
+    in string: searched) is func
+  result
+    var integer: foundIndex is 0;
+  local
+    var integer: idx is 1;
+  begin
+    while idx <= length(values) and foundIndex = 0 do
+      if values[idx] = searched then
+        foundIndex := idx;
+      end if;
+      incr(idx);
+    end while;
+  end func;
+
+const func boolean: materialIsNonsolid (in compiledStats: stats,
+    in string: materialName) is func
+  result
+    var boolean: nonsolid is FALSE;
+  local
+    var integer: materialIndex is 0;
+  begin
+    materialIndex := indexOfString(stats.materialNames, materialName);
+    if materialIndex <> 0 and
+        materialIndex <= length(stats.materialNonsolidByIndex) then
+      nonsolid := stats.materialNonsolidByIndex[materialIndex];
+    end if;
+  end func;
+
+const func string: declNameAfter (in string: content,
+    in integer: startPos) is func
+  result
+    var string: declName is "";
+  local
+    var integer: idx is 0;
+    var char: ch is ' ';
+  begin
+    idx := startPos;
+    while idx <= length(content) and declName = "" do
+      ch := content[idx];
+      if ch <> ' ' and ch <> '\t' and ch <> '\n' and ch <> '\r' then
+        while idx <= length(content) and content[idx] <> ' ' and
+            content[idx] <> '\t' and content[idx] <> '\n' and
+            content[idx] <> '\r' and content[idx] <> '{' do
+          declName &:= content[idx];
+          incr(idx);
+        end while;
+      end if;
+      incr(idx);
+    end while;
+  end func;
+
+const proc: addMaterialDecls (inout compiledStats: stats,
+    in string: content) is func
+  local
+    var array string: lines is 0 times "";
+    var string: line is "";
+    var string: trimmedLine is "";
+    var string: materialName is "";
+    var integer: materialIndex is 0;
+  begin
+    lines := split(content, '\n');
+    for line range lines do
+      trimmedLine := trim(line);
+      if startsWith(lower(trimmedLine), "textures/") then
+        materialName := lower(cleanedToken(trimmedLine));
+        if materialName <> "" then
+          stats.materialDecls +:= 1;
+          if not containsString(stats.materialNames, materialName) then
+            stats.materialNames &:= materialName;
+            stats.materialNonsolidByIndex &:= FALSE;
+          end if;
+          if stats.firstMaterialDecl = "" then
+            stats.firstMaterialDecl := materialName;
+          end if;
+        end if;
+      elsif materialName <> "" and pos(lower(trimmedLine), "nonsolid", 1) <> 0 then
+        materialIndex := indexOfString(stats.materialNames, materialName);
+        if materialIndex <> 0 and
+            materialIndex <= length(stats.materialNonsolidByIndex) and
+            not stats.materialNonsolidByIndex[materialIndex] then
+          stats.materialNonsolidByIndex[materialIndex] := TRUE;
+          stats.materialNonsolidDecls +:= 1;
+        end if;
+      end if;
+    end for;
+  end func;
+
+const proc: addMaterialTextureBindings (inout compiledStats: stats,
+    in string: content) is func
+  local
+    var array string: lines is 0 times "";
+    var array string: tokens is 0 times "";
+    var string: line is "";
+    var string: trimmedLine is "";
+    var string: currentMaterial is "";
+    var string: textureName is "";
+  begin
+    lines := split(content, '\n');
+    for line range lines do
+      trimmedLine := trim(line);
+      if startsWith(lower(trimmedLine), "textures/") then
+        currentMaterial := lower(cleanedToken(trimmedLine));
+      elsif currentMaterial <> "" and
+          (startsWith(lower(trimmedLine), "map ") or
+          startsWith(lower(trimmedLine), "diffusemap ")) then
+        tokens := noEmptyStrings(split(trimmedLine, ' '));
+        if length(tokens) >= 2 then
+          textureName := lower(cleanedToken(tokens[2]));
+          if textureName <> "" then
+            stats.materialTextureNames &:= currentMaterial;
+            stats.materialTextureStems &:= assetStem(textureName);
+            if stats.firstRenderTextureBinding = "" then
+              stats.firstRenderTextureBinding := currentMaterial <& "=" <&
+                  assetStem(textureName);
+            end if;
+          end if;
+        end if;
+      end if;
+    end for;
+  end func;
+
+const proc: addRenderMaterialRefs (inout compiledStats: stats,
+    in string: content) is func
+  local
+    var array string: tokens is 0 times "";
+    var integer: tokenIndex is 1;
+    var string: materialName is "";
+  begin
+    tokens := noEmptyStrings(split(replace(replace(replace(content, "\n", " "),
+        "\r", " "), "\t", " "), ' '));
+    while tokenIndex < length(tokens) do
+      if lower(cleanedToken(tokens[tokenIndex])) = "material" then
+        materialName := lower(cleanedToken(tokens[succ(tokenIndex)]));
+        if materialName <> "" then
+          stats.renderMaterialRefs +:= 1;
+          appendUnique(stats.renderMaterialNames, materialName);
+          if stats.firstRenderMaterialRef = "" then
+            stats.firstRenderMaterialRef := materialName;
+          end if;
+        end if;
+      end if;
+      incr(tokenIndex);
+    end while;
+  end func;
+
+const func string: versionAfterHeader (in string: content,
+    in string: headerName) is func
+  result
+    var string: versionText is "";
+  local
+    var array string: tokens is 0 times "";
+    var integer: tokenIndex is 1;
+  begin
+    tokens := noEmptyStrings(split(replace(replace(replace(content, "\n", " "),
+        "\r", " "), "\t", " "), ' '));
+    while tokenIndex < length(tokens) and versionText = "" do
+      if lower(cleanedToken(tokens[tokenIndex])) = lower(headerName) then
+        versionText := cleanedToken(tokens[succ(tokenIndex)]);
+      end if;
+      incr(tokenIndex);
+    end while;
+  end func;
+
+const proc: addFirstRenderModelName (inout compiledStats: stats,
+    in string: content) is func
+  local
+    var array string: tokens is 0 times "";
+    var integer: tokenIndex is 1;
+    var integer: nameIndex is 0;
+    var string: modelName is "";
+  begin
+    tokens := noEmptyStrings(split(replace(replace(replace(content, "\n", " "),
+        "\r", " "), "\t", " "), ' '));
+    while tokenIndex < length(tokens) and stats.firstRenderModelName = "" do
+      if lower(cleanedToken(tokens[tokenIndex])) = "model" then
+        nameIndex := succ(tokenIndex);
+        while nameIndex <= length(tokens) and modelName = "" do
+          modelName := cleanedToken(tokens[nameIndex]);
+          if modelName = "" then
+            incr(nameIndex);
+          end if;
+        end while;
+        if modelName <> "" then
+          stats.firstRenderModelName := modelName;
+        end if;
+      end if;
+      incr(tokenIndex);
+    end while;
+  end func;
+
+const proc: addFirstCollisionModelName (inout compiledStats: stats,
+    in string: content) is func
+  local
+    var array string: tokens is 0 times "";
+    var integer: tokenIndex is 1;
+    var string: modelName is "";
+  begin
+    tokens := noEmptyStrings(split(replace(replace(replace(content, "\n", " "),
+        "\r", " "), "\t", " "), ' '));
+    while tokenIndex < length(tokens) and stats.firstCollisionModelName = "" do
+      if lower(cleanedToken(tokens[tokenIndex])) = "collisionmodel" then
+        modelName := cleanedToken(tokens[succ(tokenIndex)]);
+        if modelName <> "" then
+          stats.firstCollisionModelName := modelName;
+        end if;
+      end if;
+      incr(tokenIndex);
+    end while;
+  end func;
+
+const proc: addFirstRenderSurfaceRecord (inout compiledStats: stats,
+    in string: content) is func
+  local
+    var array string: tokens is 0 times "";
+    var integer: tokenIndex is 1;
+    var string: token is "";
+    var string: materialName is "";
+    var integer: vertexCount is 0;
+    var integer: indexCount is 0;
+    var boolean: inSurface is FALSE;
+  begin
+    tokens := noEmptyStrings(split(replace(replace(replace(content, "\n", " "),
+        "\r", " "), "\t", " "), ' '));
+    while tokenIndex < length(tokens) and stats.firstRenderSurfaceRecord = "" do
+      token := lower(cleanedToken(tokens[tokenIndex]));
+      if token = "surface" then
+        inSurface := TRUE;
+      elsif inSurface and token = "material" and tokenIndex < length(tokens) then
+        materialName := lower(cleanedToken(tokens[succ(tokenIndex)]));
+      elsif inSurface and token = "numverts" and tokenIndex < length(tokens) then
+        block
+          vertexCount := integer(cleanedToken(tokens[succ(tokenIndex)]));
+        exception
+          catch RANGE_ERROR:
+            vertexCount := 0;
+        end block;
+      elsif inSurface and token = "numindexes" and tokenIndex < length(tokens) then
+        block
+          indexCount := integer(cleanedToken(tokens[succ(tokenIndex)]));
+        exception
+          catch RANGE_ERROR:
+            indexCount := 0;
+        end block;
+      end if;
+      if materialName <> "" and vertexCount <> 0 and indexCount <> 0 then
+        stats.firstRenderSurfaceRecord := "material=" <& materialName <&
+            ";verts=" <& vertexCount <& ";indexes=" <& indexCount;
+      end if;
+      incr(tokenIndex);
+    end while;
+  end func;
+
+const proc: addRenderPortalFloodRecord (inout compiledStats: stats,
+    in string: content) is func
+  local
+    var array string: lines is 0 times "";
+    var array string: tokens is 0 times "";
+    var string: line is "";
+    var string: areaList is "";
+    var integer: passIndex is 1;
+    var integer: pointCount is 0;
+    var integer: positiveArea is 0;
+    var integer: negativeArea is 0;
+    var integer: portalLinks is 0;
+    var boolean: inPortalBlock is FALSE;
+    var boolean: headerRead is FALSE;
+  begin
+    if stats.renderPortalAreas <> 0 and
+        stats.firstRenderPortalDetailRecord <> "" then
+      areaList := ";";
+      addAreaToList(areaList, stats.firstRenderPortalPositiveArea);
+      lines := split(content, '\n');
+      while passIndex <= stats.renderPortalAreas do
+        inPortalBlock := FALSE;
+        headerRead := FALSE;
+        for line range lines do
+          if pos(lower(line), "interareaportals") <> 0 then
+            inPortalBlock := TRUE;
+            headerRead := FALSE;
+          elsif inPortalBlock and pos(line, "}") <> 0 then
+            inPortalBlock := FALSE;
+          elsif inPortalBlock then
+            tokens := noEmptyStrings(split(trim(line), ' '));
+            if not headerRead then
+              if length(tokens) >= 2 then
+                headerRead := TRUE;
+              end if;
+            elsif length(tokens) >= 3 then
+              block
+                pointCount := integer(cleanedToken(tokens[1]));
+                positiveArea := integer(cleanedToken(tokens[2]));
+                negativeArea := integer(cleanedToken(tokens[3]));
+                if pointCount <> 0 then
+                  if passIndex = 1 then
+                    incr(portalLinks);
+                  end if;
+                  if areaInList(areaList, positiveArea) or
+                      areaInList(areaList, negativeArea) then
+                    addAreaToList(areaList, positiveArea);
+                    addAreaToList(areaList, negativeArea);
+                  end if;
+                end if;
+              exception
+                catch RANGE_ERROR:
+                  noop;
+              end block;
+            end if;
+          end if;
+        end for;
+        incr(passIndex);
+      end while;
+      if portalLinks <> 0 then
+        stats.firstVisibilityFloodSummary := "camera_area=" <&
+            stats.firstRenderPortalPositiveArea <& ";visible_areas=" <&
+            pred(countOccurrences(areaList, ";")) <& ";portal_links=" <&
+            portalLinks;
+      end if;
+    end if;
+  end func;
+
+const proc: addFirstRenderPortalRecord (inout compiledStats: stats,
+    in string: content) is func
+  local
+    var array string: tokens is 0 times "";
+    var integer: tokenIndex is 1;
+    var integer: valueIndex is 0;
+    var integer: integersFound is 0;
+    var integer: parsedValue is 0;
+    var integer: areaCount is 0;
+    var integer: portalCount is 0;
+    var integer: firstPortalPoints is 0;
+    var integer: firstPortalPositiveArea is 0;
+    var integer: firstPortalNegativeArea is 0;
+  begin
+    tokens := noEmptyStrings(split(replace(replace(replace(content, "\n", " "),
+        "\r", " "), "\t", " "), ' '));
+    while tokenIndex < length(tokens) and stats.firstRenderPortalRecord = "" do
+      if lower(cleanedToken(tokens[tokenIndex])) = "interareaportals" then
+        valueIndex := succ(tokenIndex);
+        while valueIndex <= length(tokens) and integersFound < 5 do
+          block
+            parsedValue := integer(cleanedToken(tokens[valueIndex]));
+            incr(integersFound);
+            if integersFound = 1 then
+              areaCount := parsedValue;
+            elsif integersFound = 2 then
+              portalCount := parsedValue;
+            elsif integersFound = 3 then
+              firstPortalPoints := parsedValue;
+            elsif integersFound = 4 then
+              firstPortalPositiveArea := parsedValue;
+            elsif integersFound = 5 then
+              firstPortalNegativeArea := parsedValue;
+            end if;
+          exception
+            catch RANGE_ERROR:
+              noop;
+          end block;
+          incr(valueIndex);
+        end while;
+        if integersFound >= 2 then
+          stats.renderPortalAreas := areaCount;
+          stats.renderPortals := portalCount;
+          stats.firstRenderPortalRecord := "areas=" <& areaCount <&
+              ";portals=" <& portalCount;
+        end if;
+        if integersFound >= 5 then
+          stats.firstRenderPortalPositiveArea := firstPortalPositiveArea;
+          stats.firstRenderPortalNegativeArea := firstPortalNegativeArea;
+          stats.firstRenderPortalDetailRecord := "points=" <&
+              firstPortalPoints <& ";positive_area=" <&
+              firstPortalPositiveArea <& ";negative_area=" <&
+              firstPortalNegativeArea;
+          stats.firstVisibilityScopeSummary := "camera_area=" <&
+              firstPortalPositiveArea <& ";visible_areas=" <&
+              succ(ord(firstPortalPositiveArea <> firstPortalNegativeArea)) <&
+              ";via_portals=" <& portalCount;
+          addRenderPortalFloodRecord(stats, content);
+        end if;
+      end if;
+      incr(tokenIndex);
+    end while;
+  end func;
+
+const func integer: sumIntegersAfterWord (in string: content,
+    in string: keyName) is func
+  result
+    var integer: total is 0;
+  local
+    var array string: tokens is 0 times "";
+    var integer: tokenIndex is 1;
+    var integer: valueIndex is 0;
+    var integer: value is 0;
+    var boolean: foundValue is FALSE;
+  begin
+    tokens := noEmptyStrings(split(replace(replace(replace(content, "\n", " "),
+        "\r", " "), "\t", " "), ' '));
+    while tokenIndex < length(tokens) do
+      if lower(cleanedToken(tokens[tokenIndex])) = lower(keyName) then
+        foundValue := FALSE;
+        valueIndex := succ(tokenIndex);
+        while valueIndex <= length(tokens) and valueIndex <= tokenIndex + 4 and
+            not foundValue do
+          block
+            value := integer(cleanedToken(tokens[valueIndex]));
+            total +:= value;
+            foundValue := TRUE;
+          exception
+            catch RANGE_ERROR:
+            noop;
+          end block;
+          incr(valueIndex);
+        end while;
+      end if;
+      incr(tokenIndex);
+    end while;
+  end func;
+
+const proc: resolveRenderMaterialRefs (inout compiledStats: stats) is func
+  local
+    var string: materialName is "";
+  begin
+    stats.renderMaterialDeclared := 0;
+    stats.renderMaterialMissing := 0;
+    stats.firstMissingRenderMaterial := "";
+    for materialName range stats.renderMaterialNames do
+      if containsString(stats.materialNames, materialName) then
+        stats.renderMaterialDeclared +:= 1;
+      else
+        stats.renderMaterialMissing +:= 1;
+        if stats.firstMissingRenderMaterial = "" then
+          stats.firstMissingRenderMaterial := materialName;
+        end if;
+      end if;
+    end for;
+  end func;
+
+const proc: resolveRenderTextureRefs (inout compiledStats: stats) is func
+  local
+    var string: materialName is "";
+    var integer: bindingIndex is 1;
+    var string: textureStem is "";
+    var boolean: foundBinding is FALSE;
+  begin
+    stats.renderTextureRefs := 0;
+    stats.renderTextureResolved := 0;
+    stats.renderTextureMissing := 0;
+    stats.firstMissingRenderTexture := "";
+    for materialName range stats.renderMaterialNames do
+      stats.renderTextureRefs +:= 1;
+      bindingIndex := 1;
+      textureStem := "";
+      foundBinding := FALSE;
+      while bindingIndex <= length(stats.materialTextureNames) and
+          not foundBinding do
+        if stats.materialTextureNames[bindingIndex] = materialName then
+          textureStem := stats.materialTextureStems[bindingIndex];
+          foundBinding := TRUE;
+        end if;
+        incr(bindingIndex);
+      end while;
+      if textureStem <> "" and containsString(stats.imageAssetStems,
+          textureStem) then
+        stats.renderTextureResolved +:= 1;
+      else
+        stats.renderTextureMissing +:= 1;
+        if stats.firstMissingRenderTexture = "" then
+          if textureStem <> "" then
+            stats.firstMissingRenderTexture := materialName <& "=" <& textureStem;
+          else
+            stats.firstMissingRenderTexture := materialName;
+          end if;
+        end if;
+      end if;
+    end for;
+  end func;
+
+const func string: textureStemForMaterial (in compiledStats: stats,
+    in string: materialName) is func
+  result
+    var string: textureStem is "";
+  local
+    var integer: bindingIndex is 1;
+  begin
+    while bindingIndex <= length(stats.materialTextureNames) and
+        textureStem = "" do
+      if stats.materialTextureNames[bindingIndex] = materialName then
+        textureStem := stats.materialTextureStems[bindingIndex];
+      end if;
+      incr(bindingIndex);
+    end while;
+  end func;
+
+const proc: buildFirstCompiledSurfaceSummary (inout compiledStats: stats) is func
+  local
+    var string: materialName is "";
+    var string: textureStem is "";
+    var integer: triangleCount is 0;
+  begin
+    stats.firstCompiledSurfaceSummary := "";
+    stats.firstCompiledDrawCallSummary := "";
+    if length(stats.renderMaterialNames) <> 0 then
+      materialName := stats.renderMaterialNames[1];
+      textureStem := textureStemForMaterial(stats, materialName);
+      if textureStem <> "" then
+        stats.firstCompiledSurfaceSummary := "material=" <& materialName <&
+            ";texture=" <& textureStem <& ";verts=" <&
+            stats.renderVertexTotal <& ";indexes=" <& stats.renderIndexTotal;
+        triangleCount := stats.renderIndexTotal div 3;
+        stats.firstCompiledDrawCallSummary := "material=" <& materialName <&
+            ";texture=" <& textureStem <& ";tris=" <& triangleCount <&
+            ";portal_areas=" <& stats.renderPortalAreas;
+      end if;
+    end if;
+  end func;
+
+const proc: buildFirstModelPairSummary (inout compiledStats: stats) is func
+  begin
+    stats.firstModelPairSummary := "";
+    if stats.firstRenderModelName <> "" and stats.firstCollisionModelName <> "" then
+      stats.firstModelPairSummary := "proc=" <& stats.firstRenderModelName <&
+          ";cm=" <& stats.firstCollisionModelName <& ";match=" <&
+          (stats.firstRenderModelName = stats.firstCollisionModelName);
+    end if;
+  end func;
+
+const proc: buildFirstCollisionPayloadRecord (inout compiledStats: stats) is func
+  begin
+    stats.firstCollisionPayloadRecord := "";
+    if stats.firstCollisionModelName <> "" and stats.collisionModels <> 0 then
+      stats.firstCollisionPayloadRecord := "model=" <&
+          stats.firstCollisionModelName <& ";vertices=" <&
+          stats.collisionVertexTotal <& ";edges=" <& stats.collisionEdgeTotal <&
+          ";polygons=" <& stats.collisionPolygonTotal <& ";brushes=" <&
+          stats.collisionBrushTotal;
+    end if;
+  end func;
+
+const proc: addFirstCollisionPolygonRecord (inout compiledStats: stats,
+    in string: content) is func
+  local
+    var string: contentLower is "";
+    var array string: tokens is 0 times "";
+    var integer: tokenIndex is 1;
+    var boolean: inPolygonPayload is FALSE;
+    var string: materialName is "";
+    var string: contentsName is "";
+    var string: currentMaterialName is "";
+    var string: currentContentsName is "";
+    var string: planeMaterialName is "";
+    var string: planeContentsName is "";
+    var boolean: planeBlocking is FALSE;
+    var integer: planeNx is 0;
+    var integer: planeNy is 0;
+    var integer: planeNz is 0;
+    var integer: planeDist is 0;
+    var integer: startDistance is 0;
+    var integer: endDistance is 0;
+    var integer: fractionPercent is 0;
+    var boolean: crossesPlane is FALSE;
+  begin
+    contentLower := lower(content);
+    tokens := noEmptyStrings(split(replace(replace(replace(contentLower,
+        "\n", " "), "\r", " "), "\t", " "), ' '));
+    while tokenIndex < length(tokens) do
+      if cleanedToken(tokens[tokenIndex]) = "polygons" then
+        inPolygonPayload := TRUE;
+      elsif inPolygonPayload and cleanedToken(tokens[tokenIndex]) = "brushes" then
+        inPolygonPayload := FALSE;
+      elsif inPolygonPayload and cleanedToken(tokens[tokenIndex]) = "material" and
+          tokenIndex < length(tokens) then
+        currentMaterialName := cleanedToken(tokens[succ(tokenIndex)]);
+        if materialName = "" then
+          materialName := currentMaterialName;
+        end if;
+      elsif inPolygonPayload and cleanedToken(tokens[tokenIndex]) = "contents" and
+          tokenIndex < length(tokens) then
+        currentContentsName := cleanedToken(tokens[succ(tokenIndex)]);
+        if contentsName = "" then
+          contentsName := currentContentsName;
+        end if;
+        if currentMaterialName <> "" and currentContentsName <> "" then
+          stats.collisionPolygonMaterials &:= currentMaterialName;
+          stats.collisionPolygonContents &:= currentContentsName;
+          planeMaterialName := currentMaterialName;
+          planeContentsName := currentContentsName;
+          planeBlocking := currentContentsName = "solid" and
+              not materialIsNonsolid(stats, currentMaterialName);
+          currentMaterialName := "";
+          currentContentsName := "";
+        end if;
+      elsif inPolygonPayload and cleanedToken(tokens[tokenIndex]) = "plane" and
+          tokenIndex + 4 <= length(tokens) then
+        stats.collisionPolygonPlaneRecords &:= "normal=" <&
+            cleanedToken(tokens[tokenIndex + 1]) <& " " <&
+            cleanedToken(tokens[tokenIndex + 2]) <& " " <&
+            cleanedToken(tokens[tokenIndex + 3]) <& ";dist=" <&
+            cleanedToken(tokens[tokenIndex + 4]);
+        block
+          planeNx := integer(cleanedToken(tokens[tokenIndex + 1]));
+          planeNy := integer(cleanedToken(tokens[tokenIndex + 2]));
+          planeNz := integer(cleanedToken(tokens[tokenIndex + 3]));
+          planeDist := integer(cleanedToken(tokens[tokenIndex + 4]));
+          startDistance := planeNx * 32 + planeNy * 0 + planeNz * 0 +
+              planeDist;
+          endDistance := planeNx * 96 + planeNy * 0 + planeNz * 0 +
+              planeDist;
+          stats.compiledSegmentTracePlanes +:= 1;
+          if planeBlocking then
+            crossesPlane := (startDistance <= 0 and endDistance >= 0) or
+                (startDistance >= 0 and endDistance <= 0);
+            if crossesPlane and endDistance <> startDistance then
+              fractionPercent := startDistance * 100 div
+                  (startDistance - endDistance);
+              stats.compiledSegmentTraceBlockingHits +:= 1;
+              if stats.compiledSegmentTraceNearestFractionPercent < 0 or
+                  fractionPercent <
+                  stats.compiledSegmentTraceNearestFractionPercent then
+                stats.compiledSegmentTraceNearestFractionPercent :=
+                    fractionPercent;
+              end if;
+              if stats.firstCompiledSegmentHitRecord = "" then
+                stats.firstCompiledSegmentHitRecord := "material=" <&
+                    planeMaterialName <& ";contents=" <& planeContentsName <&
+                    ";fraction_pct=" <& fractionPercent;
+              end if;
+            end if;
+          else
+            stats.compiledSegmentTraceNonblockingSkipped +:= 1;
+          end if;
+        exception
+          catch RANGE_ERROR:
+            noop;
+        end block;
+      end if;
+      incr(tokenIndex);
+    end while;
+    if materialName <> "" and contentsName <> "" then
+      stats.firstCollisionPolygonRecord := "material=" <& materialName <&
+          ";contents=" <& contentsName;
+    end if;
+    if length(stats.collisionPolygonPlaneRecords) <> 0 then
+      stats.firstCollisionPolygonPlaneRecord :=
+          stats.collisionPolygonPlaneRecords[1];
+    end if;
+  end func;
+
+const proc: resolveCollisionPolygonMaterial (inout compiledStats: stats) is func
+  local
+    var array string: tokens is 0 times "";
+    var integer: tokenIndex is 1;
+    var string: token is "";
+    var string: materialName is "";
+    var string: contentsName is "";
+    var integer: polygonIndex is 1;
+    var boolean: materialDeclared is FALSE;
+  begin
+    if stats.firstCollisionPolygonRecord <> "" then
+      tokens := noEmptyStrings(split(replace(stats.firstCollisionPolygonRecord,
+          ";", " "), ' '));
+      while tokenIndex <= length(tokens) do
+        token := cleanedToken(tokens[tokenIndex]);
+        if startsWith(token, "material=") then
+          materialName := token[succ(length("material=")) ..];
+        elsif startsWith(token, "contents=") then
+          contentsName := token[succ(length("contents=")) ..];
+        end if;
+        incr(tokenIndex);
+      end while;
+      stats.firstCollisionPolygonMaterialDeclared :=
+          containsString(stats.materialNames, materialName);
+      stats.firstCollisionPolygonBlocking := contentsName = "solid" and
+          stats.firstCollisionPolygonMaterialDeclared and
+          not materialIsNonsolid(stats, materialName);
+    end if;
+    stats.collisionPolygonsClassified := 0;
+    stats.collisionPolygonsBlocking := 0;
+    stats.collisionPolygonsNonblocking := 0;
+    stats.collisionPolygonPlanes := length(stats.collisionPolygonPlaneRecords);
+    while polygonIndex <= length(stats.collisionPolygonMaterials) and
+        polygonIndex <= length(stats.collisionPolygonContents) do
+      materialDeclared := containsString(stats.materialNames,
+          stats.collisionPolygonMaterials[polygonIndex]);
+      if materialDeclared then
+        stats.collisionPolygonsClassified +:= 1;
+        if stats.collisionPolygonContents[polygonIndex] = "solid" and
+            not materialIsNonsolid(stats,
+            stats.collisionPolygonMaterials[polygonIndex]) then
+          stats.collisionPolygonsBlocking +:= 1;
+        else
+          stats.collisionPolygonsNonblocking +:= 1;
+        end if;
+      end if;
+      incr(polygonIndex);
+    end while;
+  end func;
+
+const func array string: findPk4Archives (in string: basePath) is func
+  result
+    var array string: pk4Files is 0 times "";
+  local
+    var array string: names is 0 times "";
+    var string: name is "";
+  begin
+    if fileType(basePath) = FILE_DIR then
+      names := readDir(basePath);
+      for name range names do
+        if isPk4Name(name) and fileType(joinPath(basePath, name)) = FILE_REGULAR then
+          pk4Files &:= joinPath(basePath, name);
+        end if;
+      end for;
+    end if;
+  end func;
+
+const proc: scanArchive (inout compiledStats: stats, in string: pk4File) is func
+  local
+    var fileSys: zipFs is fileSys.value;
+    var array string: paths is 0 times "";
+    var string: path is "";
+    var string: pathLower is "";
+    var string: contentLower is "";
+  begin
+    zipFs := openZip(pk4File);
+    if zipFs = fileSys.value then
+      logError("could not open pk4 archive: " <& pk4File);
+    else
+      paths := readDir(zipFs, RECURSIVE);
+      for path range paths do
+        pathLower := normalizedAssetPath(path);
+        if endsWith(pathLower, ".mtr") then
+          addMaterialDecls(stats, getFile(zipFs, path));
+          addMaterialTextureBindings(stats, getFile(zipFs, path));
+        end if;
+      end for;
+      for path range paths do
+        pathLower := normalizedAssetPath(path);
+        if isImageAssetPath(pathLower) then
+          stats.imageAssets +:= 1;
+          appendUnique(stats.imageAssetStems, assetStem(pathLower));
+          if stats.firstImageAsset = "" then
+            stats.firstImageAsset := pathLower;
+          end if;
+        end if;
+        if startsWith(pathLower, "maps/") and endsWith(pathLower, ".map") then
+          stats.mapAssets +:= 1;
+          if stats.firstMapAsset = "" then
+            stats.firstMapAsset := pathLower;
+          end if;
+          if pathLower = stats.requestedMapPath then
+            stats.requestedMapFound := TRUE;
+          end if;
+        elsif startsWith(pathLower, "maps/") and endsWith(pathLower, ".proc") then
+          stats.renderAssets +:= 1;
+          if stats.firstRenderAsset = "" then
+            stats.firstRenderAsset := pathLower;
+          end if;
+          if pathLower = stats.requestedRenderPath then
+            stats.requestedRenderFound := TRUE;
+            contentLower := lower(getFile(zipFs, path));
+            stats.firstRenderVersion := versionAfterHeader(getFile(zipFs, path),
+                "PROC");
+            stats.renderModels := countOccurrences(contentLower, "model {");
+            stats.renderSurfaces := countOccurrences(contentLower, "surface");
+            stats.renderPortals := countOccurrences(contentLower,
+                "interareaportals");
+            stats.renderVertexDecls := countOccurrences(contentLower,
+                "numverts");
+            stats.renderIndexDecls := countOccurrences(contentLower,
+                "numindexes");
+            stats.renderVertexTotal := sumIntegersAfterWord(contentLower,
+                "numverts");
+            stats.renderIndexTotal := sumIntegersAfterWord(contentLower,
+                "numindexes");
+            addFirstRenderModelName(stats, getFile(zipFs, path));
+            addFirstRenderSurfaceRecord(stats, getFile(zipFs, path));
+            addFirstRenderPortalRecord(stats, getFile(zipFs, path));
+            addRenderMaterialRefs(stats, getFile(zipFs, path));
+          end if;
+        elsif startsWith(pathLower, "maps/") and endsWith(pathLower, ".cm") then
+          stats.collisionAssets +:= 1;
+          if stats.firstCollisionAsset = "" then
+            stats.firstCollisionAsset := pathLower;
+          end if;
+          if pathLower = stats.requestedCollisionPath then
+            stats.requestedCollisionFound := TRUE;
+            contentLower := lower(getFile(zipFs, path));
+            stats.firstCollisionVersion := versionAfterHeader(getFile(zipFs, path),
+                "CM");
+            stats.collisionModels := countOccurrences(contentLower,
+                "collisionmodel");
+            stats.collisionVertexDecls := countOccurrences(contentLower,
+                "vertices");
+            stats.collisionEdgeDecls := countOccurrences(contentLower,
+                "edges");
+            stats.collisionPolygonDecls := countOccurrences(contentLower,
+                "polygons");
+            stats.collisionBrushDecls := countOccurrences(contentLower,
+                "brushes");
+            stats.collisionVertexTotal := sumIntegersAfterWord(contentLower,
+                "vertices");
+            stats.collisionEdgeTotal := sumIntegersAfterWord(contentLower,
+                "edges");
+            stats.collisionPolygonTotal := sumIntegersAfterWord(contentLower,
+                "polygons");
+            stats.collisionBrushTotal := sumIntegersAfterWord(contentLower,
+                "brushes");
+            addFirstCollisionModelName(stats, getFile(zipFs, path));
+            addFirstCollisionPolygonRecord(stats, getFile(zipFs, path));
+          end if;
+        end if;
+      end for;
+      close(zipFs);
+    end if;
+  end func;
+
+const proc: parseArgs (inout compiledConfig: config) is func
+  local
+    var array string: args is 0 times "";
+    var integer: argIdx is 1;
+  begin
+    args := argv(PROGRAM);
+    while argIdx <= length(args) do
+      if args[argIdx] = "--help" or args[argIdx] = "-h" then
+        config.showHelp := TRUE;
+      elsif args[argIdx] = "--doom3_data_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.dataPath := convDosPath(args[argIdx]);
+      elsif args[argIdx] = "--doom3_base_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.basePath := convDosPath(args[argIdx]);
+      elsif args[argIdx] = "--doom3_start_map" and argIdx < length(args) then
+        incr(argIdx);
+        config.startMap := args[argIdx];
+      elsif args[argIdx] = "+map" and argIdx < length(args) then
+        incr(argIdx);
+        config.startMap := args[argIdx];
+      elsif args[argIdx] = "+set" and argIdx + 2 <= length(args) then
+        if args[argIdx + 1] = "fs_basepath" then
+          config.dataPath := convDosPath(args[argIdx + 2]);
+        elsif args[argIdx + 1] = "fs_game" then
+          config.basePath := convDosPath(args[argIdx + 2]);
+        end if;
+        argIdx +:= 2;
+      end if;
+      incr(argIdx);
+    end while;
+    if config.basePath = "" then
+      config.basePath := joinPath(config.dataPath, DEFAULT_BASE_DIR);
+    end if;
+  end func;
+
+const proc: showUsage is func
+  begin
+    writeln("Usage:");
+    writeln("  s7 doom3_seed7_compiledmap.s7 --doom3_data_path <doom3-root>");
+    writeln("  s7 doom3_seed7_compiledmap.s7 +set fs_basepath <doom3-root> +map <map>");
+    writeln("");
+    writeln("Scans user-owned Doom 3 pk4 files for compiled .proc/.cm map readiness.");
+  end func;
+
+const proc: printStats (in compiledStats: stats) is func
+  begin
+    logInfo("pk4_archives=" <& stats.pk4Archives);
+    logInfo("requested_map=" <& stats.requestedMapPath);
+    logInfo("requested_map_found=" <& stats.requestedMapFound);
+    logInfo("compiled_assets map=" <& stats.mapAssets <&
+        " proc=" <& stats.renderAssets <&
+        " cm=" <& stats.collisionAssets <&
+        " materials=" <& stats.materialDecls <&
+        " images=" <& stats.imageAssets);
+    logInfo("selected_compiled_map proc_found=" <&
+        stats.requestedRenderFound <& " cm_found=" <&
+        stats.requestedCollisionFound);
+    logInfo("selected_proc=" <& stats.requestedRenderPath <&
+        " models=" <& stats.renderModels <&
+        " surfaces=" <& stats.renderSurfaces <&
+        " portals=" <& stats.renderPortals);
+    logInfo("selected_proc_portals areas=" <& stats.renderPortalAreas <&
+        " portals=" <& stats.renderPortals);
+    logInfo("selected_proc_geometry vert_decls=" <& stats.renderVertexDecls <&
+        " index_decls=" <& stats.renderIndexDecls <&
+        " vertices=" <& stats.renderVertexTotal <&
+        " indexes=" <& stats.renderIndexTotal);
+    logInfo("selected_proc_materials refs=" <& stats.renderMaterialRefs <&
+        " unique=" <& length(stats.renderMaterialNames) <&
+        " declared=" <& stats.renderMaterialDeclared <&
+        " missing=" <& stats.renderMaterialMissing);
+    logInfo("selected_proc_textures refs=" <& stats.renderTextureRefs <&
+        " resolved=" <& stats.renderTextureResolved <&
+        " missing=" <& stats.renderTextureMissing);
+    logInfo("compiled_material_collision nonsolid=" <&
+        stats.materialNonsolidDecls);
+    logInfo("selected_cm=" <& stats.requestedCollisionPath <&
+        " collision_models=" <& stats.collisionModels <&
+        " vertex_decls=" <& stats.collisionVertexDecls <&
+        " edge_decls=" <& stats.collisionEdgeDecls <&
+        " polygon_decls=" <& stats.collisionPolygonDecls <&
+        " brush_decls=" <& stats.collisionBrushDecls);
+    logInfo("selected_cm_geometry vertices=" <& stats.collisionVertexTotal <&
+        " edges=" <& stats.collisionEdgeTotal <&
+        " polygons=" <& stats.collisionPolygonTotal <&
+        " brushes=" <& stats.collisionBrushTotal);
+    logInfo("selected_cm_polygons classified=" <&
+        stats.collisionPolygonsClassified <& " blocking=" <&
+        stats.collisionPolygonsBlocking <& " nonblocking=" <&
+        stats.collisionPolygonsNonblocking <& " planes=" <&
+        stats.collisionPolygonPlanes);
+    if stats.firstMapAsset <> "" then
+      logInfo("first_map_asset=" <& stats.firstMapAsset);
+    end if;
+    if stats.firstRenderAsset <> "" then
+      logInfo("first_proc_asset=" <& stats.firstRenderAsset);
+    end if;
+    if stats.firstRenderVersion <> "" then
+      logInfo("first_proc_version=" <& stats.firstRenderVersion);
+    end if;
+    if stats.firstRenderModelName <> "" then
+      logInfo("first_proc_model=" <& stats.firstRenderModelName);
+    end if;
+    if stats.firstCollisionAsset <> "" then
+      logInfo("first_cm_asset=" <& stats.firstCollisionAsset);
+    end if;
+    if stats.firstCollisionVersion <> "" then
+      logInfo("first_cm_version=" <& stats.firstCollisionVersion);
+    end if;
+    if stats.firstCollisionModelName <> "" then
+      logInfo("first_cm_model=" <& stats.firstCollisionModelName);
+    end if;
+    if stats.firstModelPairSummary <> "" then
+      logInfo("compiled_model_pair=" <& stats.firstModelPairSummary);
+    end if;
+    if stats.firstCollisionPayloadRecord <> "" then
+      logInfo("first_cm_collision=" <& stats.firstCollisionPayloadRecord);
+    end if;
+    if stats.firstCollisionPolygonRecord <> "" then
+      logInfo("first_cm_polygon=" <& stats.firstCollisionPolygonRecord);
+      logInfo("cm_polygon_material_declared=" <&
+          stats.firstCollisionPolygonMaterialDeclared);
+      logInfo("cm_polygon_blocking=" <&
+          stats.firstCollisionPolygonBlocking);
+    end if;
+    if stats.firstCollisionPolygonPlaneRecord <> "" then
+      logInfo("first_cm_plane=" <& stats.firstCollisionPolygonPlaneRecord);
+    end if;
+    logInfo("cm_segment_trace planes=" <&
+        stats.compiledSegmentTracePlanes <& " blocking_hits=" <&
+        stats.compiledSegmentTraceBlockingHits <& " nonblocking_skipped=" <&
+        stats.compiledSegmentTraceNonblockingSkipped <&
+        " nearest_fraction_pct=" <&
+        stats.compiledSegmentTraceNearestFractionPercent);
+    if stats.firstCompiledSegmentHitRecord <> "" then
+      logInfo("first_cm_segment_hit=" <&
+          stats.firstCompiledSegmentHitRecord);
+    end if;
+    if stats.firstImageAsset <> "" then
+      logInfo("first_compiled_image_asset=" <& stats.firstImageAsset);
+    end if;
+    if stats.firstMaterialDecl <> "" then
+      logInfo("first_compiled_material_decl=" <& stats.firstMaterialDecl);
+    end if;
+    if stats.firstRenderMaterialRef <> "" then
+      logInfo("first_proc_material_ref=" <& stats.firstRenderMaterialRef);
+    end if;
+    if stats.firstMissingRenderMaterial <> "" then
+      logInfo("first_missing_proc_material=" <& stats.firstMissingRenderMaterial);
+    end if;
+    if stats.firstRenderTextureBinding <> "" then
+      logInfo("first_proc_texture_binding=" <&
+          stats.firstRenderTextureBinding);
+    end if;
+    if stats.firstRenderSurfaceRecord <> "" then
+      logInfo("first_proc_surface=" <& stats.firstRenderSurfaceRecord);
+    end if;
+    if stats.firstRenderPortalRecord <> "" then
+      logInfo("first_proc_portals=" <& stats.firstRenderPortalRecord);
+    end if;
+    if stats.firstRenderPortalDetailRecord <> "" then
+      logInfo("first_proc_portal=" <& stats.firstRenderPortalDetailRecord);
+    end if;
+    if stats.firstVisibilityScopeSummary <> "" then
+      logInfo("first_proc_visibility_scope=" <&
+          stats.firstVisibilityScopeSummary);
+    end if;
+    if stats.firstVisibilityFloodSummary <> "" then
+      logInfo("proc_visibility_flood=" <&
+          stats.firstVisibilityFloodSummary);
+    end if;
+    if stats.firstCompiledSurfaceSummary <> "" then
+      logInfo("first_compiled_surface=" <&
+          stats.firstCompiledSurfaceSummary);
+    end if;
+    if stats.firstCompiledDrawCallSummary <> "" then
+      logInfo("first_compiled_drawcall=" <&
+          stats.firstCompiledDrawCallSummary);
+    end if;
+    if stats.firstMissingRenderTexture <> "" then
+      logInfo("first_missing_proc_texture=" <& stats.firstMissingRenderTexture);
+    end if;
+    logInfo("compiled_map_probe_ready=" <& (stats.requestedMapFound and
+        stats.requestedRenderFound and stats.requestedCollisionFound and
+        stats.renderModels <> 0 and stats.renderSurfaces <> 0 and
+        stats.firstModelPairSummary <> "" and
+        stats.firstRenderModelName = stats.firstCollisionModelName and
+        stats.firstRenderSurfaceRecord <> "" and
+        stats.firstRenderPortalRecord <> "" and
+        stats.firstVisibilityScopeSummary <> "" and
+        stats.firstVisibilityFloodSummary <> "" and
+        stats.firstCompiledDrawCallSummary <> "" and
+        stats.firstCollisionPayloadRecord <> "" and
+        stats.firstCollisionPolygonRecord <> "" and
+        stats.firstCollisionPolygonMaterialDeclared and
+        stats.firstCollisionPolygonBlocking and
+        stats.collisionPolygonsClassified = stats.collisionPolygonTotal and
+        stats.collisionPolygonsBlocking <> 0 and
+        stats.collisionPolygonsNonblocking <> 0 and
+        stats.collisionPolygonPlanes = stats.collisionPolygonTotal and
+        stats.firstCollisionPolygonPlaneRecord <> "" and
+        stats.compiledSegmentTracePlanes = stats.collisionPolygonPlanes and
+        stats.compiledSegmentTraceBlockingHits <> 0 and
+        stats.compiledSegmentTraceNonblockingSkipped <> 0 and
+        stats.compiledSegmentTraceNearestFractionPercent = 50 and
+        stats.firstCompiledSegmentHitRecord <> "" and
+        stats.materialNonsolidDecls <> 0 and
+        stats.renderVertexTotal <> 0 and stats.renderIndexTotal <> 0 and
+        stats.renderMaterialRefs <> 0 and stats.renderMaterialMissing = 0 and
+        stats.renderTextureRefs <> 0 and stats.renderTextureMissing = 0 and
+        stats.collisionModels <> 0 and stats.collisionPolygonTotal <> 0 and
+        stats.collisionBrushTotal <> 0));
+  end func;
+
+const proc: main is func
+  local
+    var compiledConfig: config is compiledConfig.value;
+    var compiledStats: stats is compiledStats.value;
+    var array string: pk4Files is 0 times "";
+    var string: pk4File is "";
+  begin
+    parseArgs(config);
+    if config.showHelp then
+      showUsage;
+    else
+      stats.requestedMapPath := mapNameToAssetPath(config.startMap);
+      stats.requestedRenderPath := compiledSiblingPath(stats.requestedMapPath,
+          ".proc");
+      stats.requestedCollisionPath := compiledSiblingPath(stats.requestedMapPath,
+          ".cm");
+      if fileType(config.basePath) <> FILE_DIR then
+        logError("Doom 3 base directory not found: " <& config.basePath);
+      else
+        pk4Files := sort(findPk4Archives(config.basePath));
+        stats.pk4Archives := length(pk4Files);
+        if length(pk4Files) = 0 then
+          logError("No .pk4 archives found in: " <& config.basePath);
+        else
+          for pk4File range pk4Files do
+            scanArchive(stats, pk4File);
+          end for;
+          resolveRenderMaterialRefs(stats);
+          resolveRenderTextureRefs(stats);
+          buildFirstCompiledSurfaceSummary(stats);
+          buildFirstModelPairSummary(stats);
+          buildFirstCollisionPayloadRecord(stats);
+          resolveCollisionPolygonMaterial(stats);
+          printStats(stats);
+        end if;
+      end if;
+    end if;
+  end func;

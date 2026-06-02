@@ -1,0 +1,1203 @@
+(********************************************************************)
+(*  doom3_seed7_survival.s7                                         *)
+(*                                                                  *)
+(*  Focused Doom 3 / id Tech 4 survival-loop probe for Seed7.       *)
+(*  It scans user-owned pk4 archives for PDA armor state, weapon     *)
+(*  damage, monster health/damage, and selected-map runtime pieces,  *)
+(*  then simulates a deterministic combat loop with armor mitigation.*)
+(*  No commercial data is bundled.                                  *)
+(********************************************************************)
+
+$ include "seed7_05.s7i";
+$ include "osfiles.s7i";
+$ include "zip.s7i";
+
+const string: DEFAULT_DATA_PATH is ".";
+const string: DEFAULT_BASE_DIR is "base";
+const string: DEFAULT_START_MAP is "game/mars_city1";
+const integer: DEFAULT_PLAYER_HEALTH is 100;
+const integer: DEFAULT_PLAYER_ARMOR is 0;
+const integer: DEFAULT_MONSTER_HEALTH is 100;
+const integer: DEFAULT_AMMO_ON_PICKUP is 12;
+const integer: DEFAULT_SHOT_DAMAGE is 25;
+const integer: DEFAULT_MONSTER_DAMAGE is 12;
+const integer: DEFAULT_ARMOR_PROTECTION_PERCENT is 60;
+const integer: DEFAULT_SKILL_LEVEL is 1;
+const integer: ENTITY_DEF_INHERIT_LIMIT is 8;
+const integer: LOOP_TICKS is 6;
+
+var string: globalNextProcPath is "";
+var string: globalNextCmPath is "";
+var boolean: globalNextProcFound is FALSE;
+var boolean: globalNextCmFound is FALSE;
+
+const type: survivalConfig is new struct
+    var string: dataPath is DEFAULT_DATA_PATH;
+    var string: basePath is "";
+    var string: startMap is DEFAULT_START_MAP;
+    var integer: skillLevel is DEFAULT_SKILL_LEVEL;
+    var integer: playerHealth is DEFAULT_PLAYER_HEALTH;
+    var integer: playerArmor is -1;
+    var boolean: showHelp is FALSE;
+  end struct;
+
+const type: survivalStats is new struct
+    var integer: pk4Archives is 0;
+    var string: requestedMapPath is "";
+    var boolean: requestedMapFound is FALSE;
+    var integer: pdaAssets is 0;
+    var integer: armorEntries is 0;
+    var integer: armorProtectionEntries is 0;
+    var integer: entityDefs is 0;
+    var integer: entityDefHealthValues is 0;
+    var integer: entityDefInheritValues is 0;
+    var integer: monsterDamageDefs is 0;
+    var integer: weaponDefs is 0;
+    var integer: projectileDefs is 0;
+    var integer: projectileDamageValues is 0;
+    var integer: mapAssets is 0;
+    var integer: uniqueMapAssets is 0;
+    var integer: mapEntities is 0;
+    var integer: playerStarts is 0;
+    var integer: monsters is 0;
+    var integer: weapons is 0;
+    var integer: ammoPickups is 0;
+    var integer: currentMapNextMapRefs is 0;
+    var string: firstNextMap is "";
+    var string: nextMapPath is "";
+    var boolean: nextMapFound is FALSE;
+    var integer: nextMapPlayerStarts is 0;
+    var integer: playerHealthBefore is DEFAULT_PLAYER_HEALTH;
+    var integer: playerArmorBefore is DEFAULT_PLAYER_ARMOR;
+    var integer: armorProtectionPercent is DEFAULT_ARMOR_PROTECTION_PERCENT;
+    var integer: skillLevel is DEFAULT_SKILL_LEVEL;
+    var string: skillName is "marine";
+    var integer: skillDamagePercent is 100;
+    var integer: nightmareHealthFloor is 0;
+    var integer: ammoBefore is 0;
+    var integer: ammoAfterPickups is 0;
+    var integer: ammoAfterLoop is 0;
+    var integer: monsterHealthBefore is DEFAULT_MONSTER_HEALTH;
+    var integer: monsterHealthAfter is DEFAULT_MONSTER_HEALTH;
+    var integer: shotDamage is DEFAULT_SHOT_DAMAGE;
+    var integer: baseMonsterDamage is DEFAULT_MONSTER_DAMAGE;
+    var integer: monsterDamage is DEFAULT_MONSTER_DAMAGE;
+    var integer: loopTicks is 0;
+    var integer: shotsFired is 0;
+    var integer: monsterHits is 0;
+    var integer: monsterAttacks is 0;
+    var integer: armorAbsorbed is 0;
+    var integer: healthDamage is 0;
+    var integer: playerHealthAfter is DEFAULT_PLAYER_HEALTH;
+    var integer: playerArmorAfter is DEFAULT_PLAYER_ARMOR;
+    var boolean: monsterAliveAfter is TRUE;
+    var boolean: clearReady is FALSE;
+    var string: terminalState is "";
+    var string: transitionState is "";
+    var string: postTerminalAction is "";
+    var string: postTerminalMapPath is "";
+    var boolean: postTerminalPlayerStartReady is FALSE;
+    var integer: postTerminalHealth is 0;
+    var integer: postTerminalArmor is 0;
+    var integer: postTerminalAmmo is 0;
+    var integer: postTerminalMonsterHealth is 0;
+    var string: saveSnapshot is "";
+    var boolean: restoreVerified is FALSE;
+    var integer: restoredHealth is 0;
+    var integer: restoredArmor is 0;
+    var integer: restoredAmmo is 0;
+    var integer: restoredSkill is DEFAULT_SKILL_LEVEL;
+    var integer: restoredMonsterHealth is DEFAULT_MONSTER_HEALTH;
+    var boolean: restoredClearReady is FALSE;
+    var string: restoredTerminalState is "";
+    var string: restoredTransitionState is "";
+    var string: restoredPostTerminalAction is "";
+    var string: restoredPostTerminalMapPath is "";
+    var integer: restoredPostTerminalHealth is 0;
+    var integer: restoredPostTerminalAmmo is 0;
+    var string: firstPdaAsset is "";
+    var string: firstArmorSource is "";
+    var string: firstDamageDef is "";
+    var string: firstProjectileDef is "";
+    var string: firstPlayerStart is "";
+    var string: firstMonsterClass is "";
+    var string: firstWeaponClass is "";
+    var string: firstAmmoClass is "";
+    var string: firstSurvivalPath is "";
+    var array string: entityDefNames is 0 times "";
+    var array string: entityDefParents is 0 times "";
+    var array integer: entityDefHealthValuesByIndex is 0 times 0;
+    var array integer: entityDefDamageValuesByIndex is 0 times 0;
+    var array string: mapPaths is 0 times "";
+    var array string: mapContents is 0 times "";
+  end struct;
+
+const proc: logInfo (in string: msg) is func
+  begin
+    writeln("[survival] " <& msg);
+  end func;
+
+const proc: logError (in string: msg) is func
+  begin
+    writeln("[survival-error] " <& msg);
+  end func;
+
+const func string: joinPath (in string: left, in string: right) is func
+  result
+    var string: joined is "";
+  begin
+    joined := left;
+    if joined <> "" and not endsWith(joined, "/") and not endsWith(joined, "\\") then
+      joined &:= "/";
+    end if;
+    joined &:= right;
+  end func;
+
+const func string: normalizedAssetPath (in string: path) is func
+  result
+    var string: normalized is "";
+  begin
+    normalized := replace(path, "\\", "/");
+    while startsWith(normalized, "/") do
+      normalized := normalized[2 ..];
+    end while;
+    normalized := lower(normalized);
+  end func;
+
+const func boolean: isPk4Name (in string: path) is func
+  result
+    var boolean: isPk4 is FALSE;
+  begin
+    isPk4 := endsWith(lower(path), ".pk4");
+  end func;
+
+const func string: mapNameToAssetPath (in string: mapName) is func
+  result
+    var string: assetPath is "";
+  begin
+    assetPath := normalizedAssetPath(mapName);
+    if not startsWith(assetPath, "maps/") then
+      assetPath := "maps/" <& assetPath;
+    end if;
+    if not endsWith(assetPath, ".map") then
+      assetPath &:= ".map";
+    end if;
+  end func;
+
+const func string: compiledSiblingPath (in string: mapPath,
+    in string: suffix) is func
+  result
+    var string: siblingPath is "";
+  begin
+    if endsWith(mapPath, ".map") then
+      siblingPath := mapPath[.. length(mapPath) - 4] <& suffix;
+    else
+      siblingPath := mapPath <& suffix;
+    end if;
+  end func;
+
+const func string: cleanedToken (in string: token) is func
+  result
+    var string: clean is "";
+  local
+    var integer: idx is 1;
+    var char: ch is ' ';
+  begin
+    clean := token;
+    while idx <= length(clean) do
+      ch := clean[idx];
+      if ch = '"' or ch = '(' or ch = ')' or ch = '{' or ch = '}' or
+          ch = ',' or ch = ';' or ch = ':' then
+        clean := clean[.. pred(idx)] & clean[succ(idx) ..];
+      else
+        incr(idx);
+      end if;
+    end while;
+  end func;
+
+const func string: quotedValueAfter (in string: content, in string: keyName) is func
+  result
+    var string: value is "";
+  local
+    var string: keyText is "";
+    var integer: keyPos is 0;
+    var integer: keyEnd is 0;
+    var integer: valueStart is 0;
+    var integer: valueEnd is 0;
+  begin
+    keyText := "\"" <& keyName <& "\"";
+    keyPos := pos(lower(content), lower(keyText), 1);
+    if keyPos <> 0 then
+      keyEnd := pos(content, "\"", succ(keyPos));
+      if keyEnd <> 0 then
+        valueStart := pos(content, "\"", succ(keyEnd));
+        if valueStart <> 0 then
+          valueEnd := pos(content, "\"", succ(valueStart));
+          if valueEnd <> 0 then
+            value := content[succ(valueStart) .. pred(valueEnd)];
+          end if;
+        end if;
+      end if;
+    end if;
+  end func;
+
+const func integer: intOrDefault (in string: text,
+    in integer: defaultValue) is func
+  result
+    var integer: number is 0;
+  begin
+    number := defaultValue;
+    if text <> "" then
+      block
+        number := integer(text);
+      exception
+        catch RANGE_ERROR:
+          number := defaultValue;
+      end block;
+    end if;
+  end func;
+
+const func string: snapshotValue (in string: snapshot,
+    in string: keyName) is func
+  result
+    var string: value is "";
+  local
+    var string: keyText is "";
+    var integer: keyPos is 0;
+    var integer: valueStart is 0;
+    var integer: valueEnd is 0;
+  begin
+    keyText := keyName <& "=";
+    keyPos := pos(snapshot, keyText, 1);
+    if keyPos <> 0 then
+      valueStart := keyPos + length(keyText);
+      valueEnd := pos(snapshot, ";", valueStart);
+      if valueEnd = 0 then
+        valueEnd := succ(length(snapshot));
+      end if;
+      value := snapshot[valueStart .. pred(valueEnd)];
+    end if;
+  end func;
+
+const func integer: clampedSkillLevel (in integer: rawSkill) is func
+  result
+    var integer: skill is 0;
+  begin
+    skill := rawSkill;
+    if skill < 0 then
+      skill := 0;
+    elsif skill > 3 then
+      skill := 3;
+    end if;
+  end func;
+
+const func string: skillNameForLevel (in integer: skillLevel) is func
+  result
+    var string: skillName is "";
+  begin
+    if skillLevel <= 0 then
+      skillName := "recruit";
+    elsif skillLevel = 1 then
+      skillName := "marine";
+    elsif skillLevel = 2 then
+      skillName := "veteran";
+    else
+      skillName := "nightmare";
+    end if;
+  end func;
+
+const func integer: damagePercentForSkill (in integer: skillLevel) is func
+  result
+    var integer: percent is 100;
+  begin
+    if skillLevel <= 0 then
+      percent := 75;
+    elsif skillLevel = 1 then
+      percent := 100;
+    elsif skillLevel = 2 then
+      percent := 150;
+    else
+      percent := 200;
+    end if;
+  end func;
+
+const func integer: previousCharPos (in string: content,
+    in char: wanted, in integer: startPos) is func
+  result
+    var integer: found is 0;
+  local
+    var integer: idx is 0;
+  begin
+    idx := startPos;
+    while idx >= 1 and found = 0 do
+      if content[idx] = wanted then
+        found := idx;
+      end if;
+      decr(idx);
+    end while;
+  end func;
+
+const func integer: matchingBlockEnd (in string: content,
+    in integer: blockStart) is func
+  result
+    var integer: blockEnd is 0;
+  local
+    var integer: idx is 0;
+    var integer: depth is 0;
+    var char: ch is ' ';
+  begin
+    if blockStart <> 0 then
+      idx := blockStart;
+      while idx <= length(content) and blockEnd = 0 do
+        ch := content[idx];
+        if ch = '{' then
+          incr(depth);
+        elsif ch = '}' then
+          decr(depth);
+          if depth = 0 then
+            blockEnd := idx;
+          end if;
+        end if;
+        incr(idx);
+      end while;
+    end if;
+  end func;
+
+const func boolean: stringInArray (in array string: values,
+    in string: needle) is func
+  result
+    var boolean: found is FALSE;
+  local
+    var string: value is "";
+  begin
+    for value range values do
+      if value = needle then
+        found := TRUE;
+      end if;
+    end for;
+  end func;
+
+const proc: addMapAsset (inout survivalStats: stats, in string: path,
+    in string: content) is func
+  begin
+    stats.mapAssets +:= 1;
+    if not stringInArray(stats.mapPaths, path) then
+      stats.mapPaths &:= path;
+      stats.mapContents &:= content;
+      stats.uniqueMapAssets +:= 1;
+    end if;
+  end func;
+
+const func string: mapContentForPath (in survivalStats: stats,
+    in string: mapPath) is func
+  result
+    var string: content is "";
+  local
+    var integer: idx is 1;
+  begin
+    while idx <= length(stats.mapPaths) and content = "" do
+      if stats.mapPaths[idx] = mapPath then
+        content := stats.mapContents[idx];
+      end if;
+      incr(idx);
+    end while;
+  end func;
+
+const func integer: mapPlayerStartCount (in string: content) is func
+  result
+    var integer: count is 0;
+  local
+    var integer: searchPos is 1;
+    var integer: classPos is 0;
+    var integer: blockStart is 0;
+    var integer: blockEnd is 0;
+    var string: blockText is "";
+  begin
+    classPos := pos(lower(content), "\"classname\"", searchPos);
+    while classPos <> 0 do
+      blockStart := previousCharPos(content, '{', classPos);
+      blockEnd := matchingBlockEnd(content, blockStart);
+      if blockStart <> 0 and blockEnd <> 0 then
+        blockText := content[blockStart .. blockEnd];
+        if lower(quotedValueAfter(blockText, "classname")) =
+            "info_player_start" then
+          count +:= 1;
+        end if;
+      end if;
+      searchPos := classPos + length("\"classname\"");
+      classPos := pos(lower(content), "\"classname\"", searchPos);
+    end while;
+  end func;
+
+const func string: declNameAfter (in string: content,
+    in integer: startPos) is func
+  result
+    var string: declName is "";
+  local
+    var integer: idx is 0;
+    var char: ch is ' ';
+  begin
+    idx := startPos;
+    while idx <= length(content) and declName = "" do
+      ch := content[idx];
+      if ch <> ' ' and ch <> '\t' and ch <> '\n' and ch <> '\r' then
+        while idx <= length(content) and content[idx] <> ' ' and
+            content[idx] <> '\t' and content[idx] <> '\n' and
+            content[idx] <> '\r' and content[idx] <> '{' do
+          declName &:= content[idx];
+          incr(idx);
+        end while;
+      end if;
+      incr(idx);
+    end while;
+  end func;
+
+const func integer: entityDefHealthForClass (
+    in survivalStats: stats, in string: className,
+    in integer: defaultHealth) is func
+  result
+    var integer: health is 0;
+  local
+    var string: currentClass is "";
+    var integer: inheritDepth is 0;
+    var integer: defIndex is 1;
+    var boolean: found is FALSE;
+  begin
+    health := defaultHealth;
+    currentClass := lower(className);
+    while currentClass <> "" and inheritDepth < ENTITY_DEF_INHERIT_LIMIT and
+        not found do
+      defIndex := 1;
+      while defIndex <= length(stats.entityDefNames) and not found do
+        if stats.entityDefNames[defIndex] = currentClass then
+          if stats.entityDefHealthValuesByIndex[defIndex] <> 0 then
+            health := stats.entityDefHealthValuesByIndex[defIndex];
+            found := TRUE;
+          else
+            currentClass := stats.entityDefParents[defIndex];
+          end if;
+        end if;
+        incr(defIndex);
+      end while;
+      incr(inheritDepth);
+    end while;
+  end func;
+
+const func integer: entityDefDamageForClass (
+    in survivalStats: stats, in string: className,
+    in integer: defaultDamage) is func
+  result
+    var integer: damage is 0;
+  local
+    var string: currentClass is "";
+    var integer: inheritDepth is 0;
+    var integer: defIndex is 1;
+    var boolean: found is FALSE;
+  begin
+    damage := defaultDamage;
+    currentClass := lower(className);
+    while currentClass <> "" and inheritDepth < ENTITY_DEF_INHERIT_LIMIT and
+        not found do
+      defIndex := 1;
+      while defIndex <= length(stats.entityDefNames) and not found do
+        if stats.entityDefNames[defIndex] = currentClass then
+          if stats.entityDefDamageValuesByIndex[defIndex] <> 0 then
+            damage := stats.entityDefDamageValuesByIndex[defIndex];
+            found := TRUE;
+          else
+            currentClass := stats.entityDefParents[defIndex];
+          end if;
+        end if;
+        incr(defIndex);
+      end while;
+      incr(inheritDepth);
+    end while;
+  end func;
+
+const proc: inspectPdaContent (inout survivalStats: stats,
+    in string: path, in string: content) is func
+  local
+    var string: armorText is "";
+    var string: protectionText is "";
+  begin
+    stats.pdaAssets +:= 1;
+    if stats.firstPdaAsset = "" then
+      stats.firstPdaAsset := normalizedAssetPath(path);
+    end if;
+    armorText := quotedValueAfter(content, "armor");
+    if armorText <> "" then
+      stats.armorEntries +:= 1;
+      stats.playerArmorBefore := intOrDefault(armorText, stats.playerArmorBefore);
+      if stats.firstArmorSource = "" then
+        stats.firstArmorSource := normalizedAssetPath(path);
+      end if;
+    end if;
+    protectionText := quotedValueAfter(content, "armor_protection");
+    if protectionText <> "" then
+      stats.armorProtectionEntries +:= 1;
+      stats.armorProtectionPercent := intOrDefault(protectionText,
+          stats.armorProtectionPercent);
+    end if;
+  end func;
+
+const proc: inspectDefContent (inout survivalStats: stats,
+    in string: content) is func
+  local
+    var string: contentLower is "";
+    var integer: searchPos is 1;
+    var integer: defPos is 0;
+    var integer: nameStart is 0;
+    var integer: blockStart is 0;
+    var integer: blockEnd is 0;
+    var string: className is "";
+    var string: entityBlock is "";
+    var string: inheritText is "";
+    var integer: healthValue is 0;
+    var integer: damageValue is 0;
+    var integer: projectileDamage is 0;
+  begin
+    contentLower := lower(content);
+    defPos := pos(contentLower, "entitydef", searchPos);
+    while defPos <> 0 do
+      nameStart := defPos + length("entitydef");
+      className := lower(cleanedToken(declNameAfter(content, nameStart)));
+      blockStart := pos(content, "{", nameStart);
+      blockEnd := matchingBlockEnd(content, blockStart);
+      if className <> "" and blockStart <> 0 and blockEnd <> 0 then
+        stats.entityDefs +:= 1;
+        entityBlock := content[blockStart .. blockEnd];
+        inheritText := lower(quotedValueAfter(entityBlock, "inherit"));
+        healthValue := intOrDefault(quotedValueAfter(entityBlock, "health"), 0);
+        damageValue := intOrDefault(quotedValueAfter(entityBlock,
+            "damage_melee"), 0);
+        stats.entityDefNames &:= className;
+        stats.entityDefParents &:= inheritText;
+        stats.entityDefHealthValuesByIndex &:= healthValue;
+        stats.entityDefDamageValuesByIndex &:= damageValue;
+        if inheritText <> "" then
+          stats.entityDefInheritValues +:= 1;
+        end if;
+        if healthValue <> 0 then
+          stats.entityDefHealthValues +:= 1;
+        end if;
+        if damageValue <> 0 then
+          stats.monsterDamageDefs +:= 1;
+          stats.baseMonsterDamage := damageValue;
+          stats.monsterDamage := damageValue;
+          if stats.firstDamageDef = "" then
+            stats.firstDamageDef := className;
+          end if;
+        end if;
+        if startsWith(className, "weapon_") then
+          stats.weaponDefs +:= 1;
+        elsif startsWith(className, "projectile_") then
+          stats.projectileDefs +:= 1;
+          projectileDamage := intOrDefault(quotedValueAfter(entityBlock,
+              "damage"), 0);
+          if projectileDamage <> 0 then
+            stats.projectileDamageValues +:= 1;
+            stats.shotDamage := projectileDamage;
+            if stats.firstProjectileDef = "" then
+              stats.firstProjectileDef := className;
+            end if;
+          end if;
+        end if;
+        searchPos := succ(blockEnd);
+      else
+        searchPos := nameStart;
+      end if;
+      defPos := pos(contentLower, "entitydef", searchPos);
+    end while;
+  end func;
+
+const proc: inspectMapContent (inout survivalStats: stats,
+    in string: content) is func
+  local
+    var integer: searchPos is 1;
+    var integer: classPos is 0;
+    var integer: blockStart is 0;
+    var integer: blockEnd is 0;
+    var string: blockText is "";
+    var string: className is "";
+    var string: entityName is "";
+    var string: nextMapText is "";
+  begin
+    stats.requestedMapFound := TRUE;
+    classPos := pos(lower(content), "\"classname\"", searchPos);
+    while classPos <> 0 do
+      blockStart := previousCharPos(content, '{', classPos);
+      blockEnd := matchingBlockEnd(content, blockStart);
+      if blockStart <> 0 and blockEnd <> 0 then
+        stats.mapEntities +:= 1;
+        blockText := content[blockStart .. blockEnd];
+        className := lower(quotedValueAfter(blockText, "classname"));
+        entityName := quotedValueAfter(blockText, "name");
+        if className = "worldspawn" then
+          nextMapText := quotedValueAfter(blockText, "nextmap");
+          if nextMapText <> "" then
+            stats.currentMapNextMapRefs +:= 1;
+            if stats.firstNextMap = "" then
+              stats.firstNextMap := nextMapText;
+            end if;
+          end if;
+        elsif className = "info_player_start" then
+          stats.playerStarts +:= 1;
+          if stats.firstPlayerStart = "" then
+            stats.firstPlayerStart := entityName;
+          end if;
+        elsif startsWith(className, "monster_") then
+          stats.monsters +:= 1;
+          stats.firstMonsterClass := className;
+        elsif startsWith(className, "weapon_") then
+          stats.weapons +:= 1;
+          stats.firstWeaponClass := className;
+        elsif startsWith(className, "ammo_") then
+          stats.ammoPickups +:= 1;
+          stats.firstAmmoClass := className;
+        end if;
+      end if;
+      searchPos := classPos + length("\"classname\"");
+      classPos := pos(lower(content), "\"classname\"", searchPos);
+    end while;
+  end func;
+
+const proc: simulateSurvivalLoop (inout survivalStats: stats) is func
+  local
+    var integer: loopTick is 0;
+    var integer: armorAbsorb is 0;
+    var integer: healthDamage is 0;
+  begin
+    stats.loopTicks := LOOP_TICKS;
+    stats.ammoAfterPickups := stats.ammoBefore +
+        stats.ammoPickups * DEFAULT_AMMO_ON_PICKUP;
+    if stats.firstMonsterClass <> "" then
+      stats.monsterHealthBefore := entityDefHealthForClass(stats,
+          stats.firstMonsterClass, DEFAULT_MONSTER_HEALTH);
+      stats.baseMonsterDamage := entityDefDamageForClass(stats,
+          stats.firstMonsterClass, DEFAULT_MONSTER_DAMAGE);
+    end if;
+    stats.skillDamagePercent := damagePercentForSkill(stats.skillLevel);
+    stats.skillName := skillNameForLevel(stats.skillLevel);
+    if stats.skillLevel = 3 then
+      stats.nightmareHealthFloor := 25;
+    else
+      stats.nightmareHealthFloor := 0;
+    end if;
+    stats.monsterDamage :=
+        (stats.baseMonsterDamage * stats.skillDamagePercent) div 100;
+    stats.monsterHealthAfter := stats.monsterHealthBefore;
+    stats.playerHealthAfter := stats.playerHealthBefore;
+    stats.playerArmorAfter := stats.playerArmorBefore;
+    for loopTick range 1 to LOOP_TICKS do
+      if stats.ammoAfterPickups - stats.shotsFired > 0 and
+          stats.monsterHealthAfter > 0 then
+        stats.shotsFired +:= 1;
+        stats.monsterHits +:= 1;
+        stats.monsterHealthAfter -:= stats.shotDamage;
+        if stats.monsterHealthAfter > 0 then
+          stats.monsterAttacks +:= 1;
+          armorAbsorb := (stats.monsterDamage *
+              stats.armorProtectionPercent) div 100;
+          if armorAbsorb > stats.playerArmorAfter then
+            armorAbsorb := stats.playerArmorAfter;
+          end if;
+          healthDamage := stats.monsterDamage - armorAbsorb;
+          stats.playerArmorAfter -:= armorAbsorb;
+          stats.playerHealthAfter -:= healthDamage;
+          stats.armorAbsorbed +:= armorAbsorb;
+          stats.healthDamage +:= healthDamage;
+          if stats.playerHealthAfter < 0 then
+            stats.playerHealthAfter := 0;
+          end if;
+        end if;
+      end if;
+    end for;
+    if stats.monsterHealthAfter < 0 then
+      stats.monsterHealthAfter := 0;
+    end if;
+    stats.ammoAfterLoop := stats.ammoAfterPickups - stats.shotsFired;
+    stats.monsterAliveAfter := stats.monsterHealthAfter > 0;
+    stats.clearReady := not stats.monsterAliveAfter and stats.playerHealthAfter > 0;
+    if stats.playerHealthAfter <= 0 then
+      stats.terminalState := "dead";
+    elsif stats.clearReady then
+      stats.terminalState := "clear";
+    else
+      stats.terminalState := "danger";
+    end if;
+    stats.firstSurvivalPath := "spawn>pickup>armor>combat>";
+    if stats.terminalState = "clear" then
+      stats.firstSurvivalPath &:= "clear";
+    elsif stats.terminalState = "dead" then
+      stats.firstSurvivalPath &:= "dead";
+    else
+      stats.firstSurvivalPath &:= "danger";
+    end if;
+  end func;
+
+const proc: resolveNextCompiledAssets (inout survivalStats: stats,
+    in array string: pk4Files) is func
+  local
+    var string: pk4File is "";
+    var fileSys: zipFs is fileSys.value;
+    var array string: paths is 0 times "";
+    var string: path is "";
+    var string: pathLower is "";
+  begin
+    if stats.firstNextMap <> "" then
+      for pk4File range pk4Files do
+        zipFs := openZip(pk4File);
+        if zipFs <> fileSys.value then
+          paths := readDir(zipFs, RECURSIVE);
+          for path range paths do
+            pathLower := normalizedAssetPath(path);
+            if pathLower = globalNextProcPath then
+              globalNextProcFound := TRUE;
+            elsif pathLower = globalNextCmPath then
+              globalNextCmFound := TRUE;
+            end if;
+          end for;
+          close(zipFs);
+        end if;
+      end for;
+    end if;
+  end func;
+
+const proc: prepareSurvivalTransition (inout survivalStats: stats,
+    in array string: pk4Files) is func
+  local
+    var string: nextContent is "";
+  begin
+    if stats.firstNextMap <> "" then
+      stats.nextMapPath := mapNameToAssetPath(stats.firstNextMap);
+      globalNextProcPath := compiledSiblingPath(stats.nextMapPath, ".proc");
+      globalNextCmPath := compiledSiblingPath(stats.nextMapPath, ".cm");
+      nextContent := mapContentForPath(stats, stats.nextMapPath);
+      stats.nextMapFound := nextContent <> "";
+      if stats.nextMapFound then
+        stats.nextMapPlayerStarts := mapPlayerStartCount(nextContent);
+      end if;
+      resolveNextCompiledAssets(stats, pk4Files);
+    end if;
+    if stats.terminalState = "dead" then
+      stats.transitionState := "failed";
+    elsif stats.terminalState = "clear" and stats.nextMapFound and
+        stats.nextMapPlayerStarts <> 0 and globalNextProcFound and
+        globalNextCmFound then
+      stats.transitionState := "ready";
+    elsif stats.terminalState = "clear" then
+      stats.transitionState := "incomplete";
+    else
+      stats.transitionState := "pending";
+    end if;
+  end func;
+
+const proc: preparePostTerminalAction (inout survivalStats: stats) is func
+  begin
+    if stats.terminalState = "clear" then
+      stats.postTerminalAction := "load_next";
+      stats.postTerminalMapPath := stats.nextMapPath;
+      stats.postTerminalPlayerStartReady :=
+          stats.nextMapFound and stats.nextMapPlayerStarts <> 0 and
+          globalNextProcFound and globalNextCmFound;
+      stats.postTerminalHealth := stats.playerHealthAfter;
+      stats.postTerminalArmor := stats.playerArmorAfter;
+      stats.postTerminalAmmo := stats.ammoAfterLoop;
+      stats.postTerminalMonsterHealth := stats.monsterHealthAfter;
+    elsif stats.terminalState = "dead" then
+      stats.postTerminalAction := "restart_current";
+      stats.postTerminalMapPath := stats.requestedMapPath;
+      stats.postTerminalPlayerStartReady := stats.playerStarts <> 0;
+      stats.postTerminalHealth := stats.playerHealthBefore;
+      stats.postTerminalArmor := stats.playerArmorBefore;
+      stats.postTerminalAmmo := stats.ammoBefore;
+      stats.postTerminalMonsterHealth := stats.monsterHealthBefore;
+    else
+      stats.postTerminalAction := "continue";
+      stats.postTerminalMapPath := stats.requestedMapPath;
+      stats.postTerminalPlayerStartReady := stats.playerStarts <> 0;
+      stats.postTerminalHealth := stats.playerHealthAfter;
+      stats.postTerminalArmor := stats.playerArmorAfter;
+      stats.postTerminalAmmo := stats.ammoAfterLoop;
+      stats.postTerminalMonsterHealth := stats.monsterHealthAfter;
+    end if;
+  end func;
+
+const proc: buildAndVerifySurvivalSnapshot (inout survivalStats: stats) is func
+  local
+    var string: healthText is "";
+    var string: armorText is "";
+    var string: ammoText is "";
+    var string: skillText is "";
+    var string: monsterHealthText is "";
+    var string: clearText is "";
+    var string: terminalText is "";
+    var string: transitionText is "";
+    var string: postActionText is "";
+    var string: postMapText is "";
+    var string: postHealthText is "";
+    var string: postAmmoText is "";
+  begin
+    stats.saveSnapshot := "map=" <& stats.requestedMapPath <&
+        ";skill=" <& stats.skillLevel <&
+        ";health=" <& stats.playerHealthAfter <&
+        ";armor=" <& stats.playerArmorAfter <&
+        ";ammo=" <& stats.ammoAfterLoop <&
+        ";monster_health=" <& stats.monsterHealthAfter <&
+        ";monster_alive=" <& stats.monsterAliveAfter <&
+        ";clear=" <& stats.clearReady <&
+        ";terminal=" <& stats.terminalState <&
+        ";next_map=" <& stats.nextMapPath <&
+        ";transition=" <& stats.transitionState <&
+        ";post_action=" <& stats.postTerminalAction <&
+        ";post_map=" <& stats.postTerminalMapPath <&
+        ";post_health=" <& stats.postTerminalHealth <&
+        ";post_ammo=" <& stats.postTerminalAmmo;
+    healthText := snapshotValue(stats.saveSnapshot, "health");
+    armorText := snapshotValue(stats.saveSnapshot, "armor");
+    ammoText := snapshotValue(stats.saveSnapshot, "ammo");
+    skillText := snapshotValue(stats.saveSnapshot, "skill");
+    monsterHealthText := snapshotValue(stats.saveSnapshot, "monster_health");
+    clearText := snapshotValue(stats.saveSnapshot, "clear");
+    terminalText := snapshotValue(stats.saveSnapshot, "terminal");
+    transitionText := snapshotValue(stats.saveSnapshot, "transition");
+    postActionText := snapshotValue(stats.saveSnapshot, "post_action");
+    postMapText := snapshotValue(stats.saveSnapshot, "post_map");
+    postHealthText := snapshotValue(stats.saveSnapshot, "post_health");
+    postAmmoText := snapshotValue(stats.saveSnapshot, "post_ammo");
+    block
+      stats.restoredHealth := integer(healthText);
+      stats.restoredArmor := integer(armorText);
+      stats.restoredAmmo := integer(ammoText);
+      stats.restoredSkill := integer(skillText);
+      stats.restoredMonsterHealth := integer(monsterHealthText);
+      stats.restoredClearReady := clearText = "TRUE";
+      stats.restoredTerminalState := terminalText;
+      stats.restoredTransitionState := transitionText;
+      stats.restoredPostTerminalAction := postActionText;
+      stats.restoredPostTerminalMapPath := postMapText;
+      stats.restoredPostTerminalHealth := integer(postHealthText);
+      stats.restoredPostTerminalAmmo := integer(postAmmoText);
+      stats.restoreVerified :=
+          stats.restoredHealth = stats.playerHealthAfter and
+          stats.restoredArmor = stats.playerArmorAfter and
+          stats.restoredAmmo = stats.ammoAfterLoop and
+          stats.restoredSkill = stats.skillLevel and
+          stats.restoredMonsterHealth = stats.monsterHealthAfter and
+          stats.restoredClearReady = stats.clearReady and
+          stats.restoredTerminalState = stats.terminalState and
+          stats.restoredTransitionState = stats.transitionState and
+          stats.restoredPostTerminalAction = stats.postTerminalAction and
+          stats.restoredPostTerminalMapPath = stats.postTerminalMapPath and
+          stats.restoredPostTerminalHealth = stats.postTerminalHealth and
+          stats.restoredPostTerminalAmmo = stats.postTerminalAmmo;
+    exception
+      catch RANGE_ERROR:
+        stats.restoreVerified := FALSE;
+    end block;
+  end func;
+
+const func string: hudBar (in integer: value, in integer: maxValue) is func
+  result
+    var string: bar is "";
+  local
+    var integer: filled is 0;
+    var integer: idx is 1;
+  begin
+    if maxValue > 0 then
+      filled := value * 10 div maxValue;
+    end if;
+    if filled < 0 then
+      filled := 0;
+    elsif filled > 10 then
+      filled := 10;
+    end if;
+    for idx range 1 to 10 do
+      if idx <= filled then
+        bar &:= "#";
+      else
+        bar &:= ".";
+      end if;
+    end for;
+  end func;
+
+const func array string: findPk4Archives (in string: basePath) is func
+  result
+    var array string: pk4Files is 0 times "";
+  local
+    var array string: names is 0 times "";
+    var string: name is "";
+  begin
+    if fileType(basePath) = FILE_DIR then
+      names := readDir(basePath);
+      for name range names do
+        if isPk4Name(name) and fileType(joinPath(basePath, name)) = FILE_REGULAR then
+          pk4Files &:= joinPath(basePath, name);
+        end if;
+      end for;
+    end if;
+  end func;
+
+const proc: scanArchive (inout survivalStats: stats,
+    in string: pk4File, in string: targetMapPath) is func
+  local
+    var fileSys: zipFs is fileSys.value;
+    var array string: paths is 0 times "";
+    var string: path is "";
+    var string: pathLower is "";
+  begin
+    zipFs := openZip(pk4File);
+    if zipFs = fileSys.value then
+      logError("could not open pk4 archive: " <& pk4File);
+    else
+      paths := readDir(zipFs, RECURSIVE);
+      for path range paths do
+        pathLower := normalizedAssetPath(path);
+        if startsWith(pathLower, "maps/") and endsWith(pathLower, ".map") then
+          addMapAsset(stats, pathLower, getFile(zipFs, path));
+        end if;
+        if endsWith(pathLower, ".pda") then
+          inspectPdaContent(stats, pathLower, getFile(zipFs, path));
+        elsif endsWith(pathLower, ".def") or endsWith(pathLower, ".decl") then
+          inspectDefContent(stats, getFile(zipFs, path));
+        elsif not stats.requestedMapFound and pathLower = targetMapPath then
+          inspectMapContent(stats, getFile(zipFs, path));
+        end if;
+      end for;
+      close(zipFs);
+    end if;
+  end func;
+
+const proc: parseArgs (inout survivalConfig: config) is func
+  local
+    var array string: args is 0 times "";
+    var integer: argIdx is 1;
+  begin
+    args := argv(PROGRAM);
+    while argIdx <= length(args) do
+      if args[argIdx] = "--help" or args[argIdx] = "-h" then
+        config.showHelp := TRUE;
+      elsif args[argIdx] = "--doom3_data_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.dataPath := convDosPath(args[argIdx]);
+      elsif args[argIdx] = "--doom3_base_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.basePath := convDosPath(args[argIdx]);
+      elsif args[argIdx] = "--doom3_start_map" and argIdx < length(args) then
+        incr(argIdx);
+        config.startMap := args[argIdx];
+      elsif args[argIdx] = "--doom3_skill" and argIdx < length(args) then
+        incr(argIdx);
+        config.skillLevel := clampedSkillLevel(intOrDefault(args[argIdx],
+            DEFAULT_SKILL_LEVEL));
+      elsif args[argIdx] = "--doom3_player_health" and argIdx < length(args) then
+        incr(argIdx);
+        config.playerHealth := intOrDefault(args[argIdx], DEFAULT_PLAYER_HEALTH);
+      elsif args[argIdx] = "--doom3_player_armor" and argIdx < length(args) then
+        incr(argIdx);
+        config.playerArmor := intOrDefault(args[argIdx], DEFAULT_PLAYER_ARMOR);
+      elsif args[argIdx] = "+map" and argIdx < length(args) then
+        incr(argIdx);
+        config.startMap := args[argIdx];
+      elsif args[argIdx] = "+set" and argIdx + 2 <= length(args) then
+        if args[argIdx + 1] = "fs_basepath" then
+          config.dataPath := convDosPath(args[argIdx + 2]);
+        elsif args[argIdx + 1] = "fs_game" then
+          config.basePath := convDosPath(args[argIdx + 2]);
+        elsif args[argIdx + 1] = "g_skill" then
+          config.skillLevel := clampedSkillLevel(intOrDefault(args[argIdx + 2],
+              DEFAULT_SKILL_LEVEL));
+        elsif args[argIdx + 1] = "g_playerHealth" then
+          config.playerHealth := intOrDefault(args[argIdx + 2],
+              DEFAULT_PLAYER_HEALTH);
+        elsif args[argIdx + 1] = "g_playerArmor" then
+          config.playerArmor := intOrDefault(args[argIdx + 2],
+              DEFAULT_PLAYER_ARMOR);
+        end if;
+        argIdx +:= 2;
+      end if;
+      incr(argIdx);
+    end while;
+    if config.basePath = "" then
+      config.basePath := joinPath(config.dataPath, DEFAULT_BASE_DIR);
+    end if;
+  end func;
+
+const proc: showUsage is func
+  begin
+    writeln("Usage:");
+    writeln("  s7 doom3_seed7_survival.s7 --doom3_data_path <doom3-root> [--doom3_skill <0-3>]");
+    writeln("  s7 doom3_seed7_survival.s7 [--doom3_player_health <n>] [--doom3_player_armor <n>]");
+    writeln("  s7 doom3_seed7_survival.s7 +set fs_basepath <doom3-root> +set g_skill 3 +map <map>");
+    writeln("");
+    writeln("Scans user-owned Doom 3 pk4 files for armor-aware survival-loop readiness.");
+  end func;
+
+const proc: printStats (in survivalStats: stats) is func
+  begin
+    logInfo("pk4_archives=" <& stats.pk4Archives);
+    logInfo("requested_map=" <& stats.requestedMapPath);
+    logInfo("requested_map_found=" <& stats.requestedMapFound);
+    logInfo("survival_pda assets=" <& stats.pdaAssets <&
+        " armor_entries=" <& stats.armorEntries <&
+        " protection_entries=" <& stats.armorProtectionEntries);
+    logInfo("survival_defs entity_defs=" <& stats.entityDefs <&
+        " health=" <& stats.entityDefHealthValues <&
+        " inherit=" <& stats.entityDefInheritValues <&
+        " melee_damage=" <& stats.monsterDamageDefs);
+    logInfo("survival_weapon_defs weapons=" <& stats.weaponDefs <&
+        " projectiles=" <& stats.projectileDefs <&
+        " projectile_damage=" <& stats.projectileDamageValues);
+    logInfo("survival_map_catalog assets=" <& stats.mapAssets <&
+        " unique=" <& stats.uniqueMapAssets);
+    logInfo("survival_map entities=" <& stats.mapEntities <&
+        " player_starts=" <& stats.playerStarts <&
+        " monsters=" <& stats.monsters <&
+        " weapons=" <& stats.weapons <&
+        " ammo=" <& stats.ammoPickups);
+    logInfo("survival_nextmap refs=" <& stats.currentMapNextMapRefs <&
+        " path=" <& stats.nextMapPath <&
+        " found=" <& stats.nextMapFound <&
+        " player_starts=" <& stats.nextMapPlayerStarts);
+    logInfo("survival_compiled_next proc=" <& globalNextProcFound <&
+        " cm=" <& globalNextCmFound <&
+        " proc_path=" <& globalNextProcPath <&
+        " cm_path=" <& globalNextCmPath);
+    logInfo("survival_skill level=" <& stats.skillLevel <&
+        " name=" <& stats.skillName <&
+        " damage_percent=" <& stats.skillDamagePercent <&
+        " nightmare_health_floor=" <& stats.nightmareHealthFloor);
+    logInfo("survival_state health_before=" <& stats.playerHealthBefore <&
+        " armor_before=" <& stats.playerArmorBefore <&
+        " armor_protection=" <& stats.armorProtectionPercent <&
+        " ammo_after_pickups=" <& stats.ammoAfterPickups);
+    logInfo("survival_combat ticks=" <& stats.loopTicks <&
+        " shots=" <& stats.shotsFired <&
+        " hits=" <& stats.monsterHits <&
+        " monster_attacks=" <& stats.monsterAttacks);
+    logInfo("survival_damage shot=" <& stats.shotDamage <&
+        " monster_base=" <& stats.baseMonsterDamage <&
+        " monster_scaled=" <& stats.monsterDamage <&
+        " armor_absorbed=" <& stats.armorAbsorbed <&
+        " health_damage=" <& stats.healthDamage);
+    logInfo("survival_result health_after=" <& stats.playerHealthAfter <&
+        " armor_after=" <& stats.playerArmorAfter <&
+        " ammo_after=" <& stats.ammoAfterLoop <&
+        " monster_health_after=" <& stats.monsterHealthAfter <&
+        " monster_alive=" <& stats.monsterAliveAfter <&
+        " clear_ready=" <& stats.clearReady <&
+        " terminal=" <& stats.terminalState);
+    logInfo("survival_transition_state=" <& stats.transitionState);
+    logInfo("survival_post_terminal action=" <& stats.postTerminalAction <&
+        " target=" <& stats.postTerminalMapPath <&
+        " player_start_ready=" <& stats.postTerminalPlayerStartReady <&
+        " health=" <& stats.postTerminalHealth <&
+        " armor=" <& stats.postTerminalArmor <&
+        " ammo=" <& stats.postTerminalAmmo <&
+        " monster_health=" <& stats.postTerminalMonsterHealth);
+    logInfo("survival_save_snapshot=" <& stats.saveSnapshot);
+    logInfo("survival_restore verified=" <& stats.restoreVerified <&
+        " health=" <& stats.restoredHealth <&
+        " armor=" <& stats.restoredArmor <&
+        " ammo=" <& stats.restoredAmmo <&
+        " skill=" <& stats.restoredSkill <&
+        " monster_health=" <& stats.restoredMonsterHealth <&
+        " clear=" <& stats.restoredClearReady <&
+        " terminal=" <& stats.restoredTerminalState <&
+        " transition=" <& stats.restoredTransitionState <&
+        " post_action=" <& stats.restoredPostTerminalAction <&
+        " post_map=" <& stats.restoredPostTerminalMapPath);
+    logInfo("hud_health_value=" <& stats.playerHealthAfter);
+    logInfo("hud_health_bar=" <& hudBar(stats.playerHealthAfter,
+        stats.playerHealthBefore));
+    logInfo("hud_armor_value=" <& stats.playerArmorAfter);
+    logInfo("hud_armor_bar=" <& hudBar(stats.playerArmorAfter,
+        stats.playerArmorBefore));
+    if stats.firstPdaAsset <> "" then
+      logInfo("first_survival_pda_asset=" <& stats.firstPdaAsset);
+    end if;
+    if stats.firstArmorSource <> "" then
+      logInfo("first_survival_armor_source=" <& stats.firstArmorSource);
+    end if;
+    if stats.firstDamageDef <> "" then
+      logInfo("first_survival_damage_def=" <& stats.firstDamageDef);
+    end if;
+    if stats.firstProjectileDef <> "" then
+      logInfo("first_survival_projectile_def=" <& stats.firstProjectileDef);
+    end if;
+    if stats.firstPlayerStart <> "" then
+      logInfo("first_survival_player_start=" <& stats.firstPlayerStart);
+    end if;
+    if stats.firstMonsterClass <> "" then
+      logInfo("first_survival_monster_class=" <& stats.firstMonsterClass);
+    end if;
+    if stats.firstWeaponClass <> "" then
+      logInfo("first_survival_weapon_class=" <& stats.firstWeaponClass);
+    end if;
+    if stats.firstAmmoClass <> "" then
+      logInfo("first_survival_ammo_class=" <& stats.firstAmmoClass);
+    end if;
+    logInfo("first_survival_path=" <& stats.firstSurvivalPath);
+    logInfo("survival_probe_ready=" <& (stats.pk4Archives <> 0 and
+        stats.requestedMapFound and stats.armorEntries <> 0 and
+        stats.armorProtectionEntries <> 0 and stats.monsterDamageDefs <> 0 and
+        stats.projectileDamageValues <> 0 and stats.playerStarts <> 0 and
+        stats.monsters <> 0 and stats.weapons <> 0 and stats.ammoPickups <> 0 and
+        stats.healthDamage <> 0 and
+        ((stats.terminalState = "clear" and stats.armorAbsorbed <> 0) or
+        stats.terminalState = "dead") and
+        ((stats.terminalState = "clear" and stats.transitionState = "ready") or
+        (stats.terminalState = "dead" and stats.transitionState = "failed")) and
+        ((stats.terminalState = "clear" and
+        stats.postTerminalAction = "load_next" and
+        stats.postTerminalPlayerStartReady) or
+        (stats.terminalState = "dead" and
+        stats.postTerminalAction = "restart_current" and
+        stats.postTerminalPlayerStartReady)) and
+        stats.restoreVerified));
+  end func;
+
+const proc: main is func
+  local
+    var survivalConfig: config is survivalConfig.value;
+    var survivalStats: stats is survivalStats.value;
+    var array string: pk4Files is 0 times "";
+    var string: pk4File is "";
+  begin
+    parseArgs(config);
+    if config.showHelp then
+      showUsage;
+    else
+      stats.skillLevel := config.skillLevel;
+      stats.playerHealthBefore := config.playerHealth;
+      if config.playerArmor >= 0 then
+        stats.playerArmorBefore := config.playerArmor;
+      end if;
+      stats.requestedMapPath := mapNameToAssetPath(config.startMap);
+      globalNextProcPath := "";
+      globalNextCmPath := "";
+      globalNextProcFound := FALSE;
+      globalNextCmFound := FALSE;
+      if fileType(config.basePath) <> FILE_DIR then
+        logError("Doom 3 base directory not found: " <& config.basePath);
+      else
+        pk4Files := sort(findPk4Archives(config.basePath));
+        stats.pk4Archives := length(pk4Files);
+        if length(pk4Files) = 0 then
+          logError("No .pk4 archives found in: " <& config.basePath);
+        else
+          for pk4File range pk4Files do
+            scanArchive(stats, pk4File, stats.requestedMapPath);
+          end for;
+          if config.playerArmor >= 0 then
+            stats.playerArmorBefore := config.playerArmor;
+          end if;
+          simulateSurvivalLoop(stats);
+          prepareSurvivalTransition(stats, pk4Files);
+          preparePostTerminalAction(stats);
+          buildAndVerifySurvivalSnapshot(stats);
+          printStats(stats);
+        end if;
+      end if;
+    end if;
+  end func;

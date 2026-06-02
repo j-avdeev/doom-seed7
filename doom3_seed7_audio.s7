@@ -1,0 +1,353 @@
+(********************************************************************)
+(*  doom3_seed7_audio.s7                                           *)
+(*                                                                  *)
+(*  Focused Doom 3 / id Tech 4 audio metadata probe for Seed7.      *)
+(*  It reads user-owned pk4 archives, recognizes sound samples,      *)
+(*  parses first-pass WAV headers, recognizes OGG containers, and    *)
+(*  reports metadata needed before a real mixer/spatial audio layer. *)
+(********************************************************************)
+
+$ include "seed7_05.s7i";
+$ include "osfiles.s7i";
+$ include "zip.s7i";
+
+const string: DEFAULT_DATA_PATH is ".";
+const string: DEFAULT_BASE_DIR is "base";
+
+const type: audioConfig is new struct
+    var string: dataPath is DEFAULT_DATA_PATH;
+    var string: basePath is "";
+    var boolean: showHelp is FALSE;
+  end struct;
+
+const type: audioStats is new struct
+    var integer: pk4Archives is 0;
+    var integer: soundAssets is 0;
+    var integer: wavAssets is 0;
+    var integer: oggAssets is 0;
+    var integer: parsedHeaders is 0;
+    var integer: parsedWavHeaders is 0;
+    var integer: recognizedOggHeaders is 0;
+    var integer: invalidHeaders is 0;
+    var integer: pcmSamples is 0;
+    var integer: nonPcmSamples is 0;
+    var integer: monoSamples is 0;
+    var integer: stereoSamples is 0;
+    var integer: totalDurationMsec is 0;
+    var string: firstSoundAsset is "";
+    var string: firstParsedSample is "";
+    var string: firstWavSample is "";
+    var string: firstOggSample is "";
+    var string: firstInvalidSample is "";
+    var string: firstSampleSummary is "";
+  end struct;
+
+const proc: logInfo (in string: msg) is func
+  begin
+    writeln("[audio] " <& msg);
+  end func;
+
+const proc: logError (in string: msg) is func
+  begin
+    writeln("[audio-error] " <& msg);
+  end func;
+
+const func string: joinPath (in string: leftPath, in string: rightPath) is func
+  result
+    var string: joined is "";
+  begin
+    if leftPath = "" then
+      joined := rightPath;
+    elsif endsWith(leftPath, "/") or endsWith(leftPath, "\\") then
+      joined := leftPath <& rightPath;
+    else
+      joined := leftPath <& "/" <& rightPath;
+    end if;
+  end func;
+
+const func boolean: isPk4Name (in string: fileName) is
+    return endsWith(lower(fileName), ".pk4");
+
+const func string: normalizedAssetPath (in string: filePath) is
+    return replace(lower(filePath), "\\", "/");
+
+const func boolean: isSoundAssetPath (in string: assetPath) is func
+  result
+    var boolean: isSound is FALSE;
+  local
+    var string: lowerPath is "";
+  begin
+    lowerPath := lower(assetPath);
+    isSound := startsWith(lowerPath, "sound/") and
+        (endsWith(lowerPath, ".wav") or endsWith(lowerPath, ".ogg"));
+  end func;
+
+const func integer: byteAt (in string: bytes, in integer: index) is func
+  result
+    var integer: value is 0;
+  begin
+    if index >= 1 and index <= length(bytes) then
+      value := ord(bytes[index]);
+    end if;
+  end func;
+
+const func integer: le16At (in string: bytes, in integer: index) is
+    return byteAt(bytes, index) + byteAt(bytes, succ(index)) * 256;
+
+const func integer: le32At (in string: bytes, in integer: index) is
+    return byteAt(bytes, index) + byteAt(bytes, succ(index)) * 256 +
+        byteAt(bytes, index + 2) * 65536 + byteAt(bytes, index + 3) * 16777216;
+
+const proc: markInvalidSample (inout audioStats: stats,
+    in string: assetPath) is func
+  begin
+    stats.invalidHeaders +:= 1;
+    if stats.firstInvalidSample = "" then
+      stats.firstInvalidSample := assetPath;
+    end if;
+  end func;
+
+const proc: inspectWavHeader (inout audioStats: stats,
+    in string: assetPath, in string: bytes) is func
+  local
+    var integer: fmtSize is 0;
+    var integer: audioFormat is 0;
+    var integer: channels is 0;
+    var integer: sampleRate is 0;
+    var integer: byteRate is 0;
+    var integer: bitsPerSample is 0;
+    var integer: dataSize is 0;
+    var integer: durationMsec is 0;
+  begin
+    if length(bytes) >= 44 and bytes[1 .. 4] = "RIFF" and
+        bytes[9 .. 12] = "WAVE" and bytes[13 .. 16] = "fmt " then
+      fmtSize := le32At(bytes, 17);
+      audioFormat := le16At(bytes, 21);
+      channels := le16At(bytes, 23);
+      sampleRate := le32At(bytes, 25);
+      byteRate := le32At(bytes, 29);
+      bitsPerSample := le16At(bytes, 35);
+      if bytes[37 .. 40] = "data" then
+        dataSize := le32At(bytes, 41);
+      end if;
+      if fmtSize >= 16 and channels > 0 and sampleRate > 0 and
+          byteRate > 0 and dataSize >= 0 then
+        durationMsec := dataSize * 1000 div byteRate;
+        stats.parsedHeaders +:= 1;
+        stats.parsedWavHeaders +:= 1;
+        stats.totalDurationMsec +:= durationMsec;
+        if audioFormat = 1 then
+          stats.pcmSamples +:= 1;
+        else
+          stats.nonPcmSamples +:= 1;
+        end if;
+        if channels = 1 then
+          stats.monoSamples +:= 1;
+        elsif channels = 2 then
+          stats.stereoSamples +:= 1;
+        end if;
+        if stats.firstParsedSample = "" then
+          stats.firstParsedSample := assetPath;
+        end if;
+        if stats.firstWavSample = "" then
+          stats.firstWavSample := assetPath;
+        end if;
+        if stats.firstSampleSummary = "" then
+          stats.firstSampleSummary := assetPath <& ";format=wav;channels=" <&
+              channels <& ";rate=" <& sampleRate <& ";bits=" <&
+              bitsPerSample <& ";duration_ms=" <& durationMsec;
+        end if;
+      else
+        markInvalidSample(stats, assetPath);
+      end if;
+    else
+      markInvalidSample(stats, assetPath);
+    end if;
+  end func;
+
+const proc: inspectOggHeader (inout audioStats: stats,
+    in string: assetPath, in string: bytes) is func
+  begin
+    if length(bytes) >= 4 and bytes[1 .. 4] = "OggS" then
+      stats.parsedHeaders +:= 1;
+      stats.recognizedOggHeaders +:= 1;
+      if stats.firstParsedSample = "" then
+        stats.firstParsedSample := assetPath;
+      end if;
+      if stats.firstOggSample = "" then
+        stats.firstOggSample := assetPath;
+      end if;
+      if stats.firstSampleSummary = "" then
+        stats.firstSampleSummary := assetPath <& ";format=ogg";
+      end if;
+    else
+      markInvalidSample(stats, assetPath);
+    end if;
+  end func;
+
+const proc: catalogSound (inout audioStats: stats,
+    in string: assetPath, in string: bytes) is func
+  local
+    var string: pathLower is "";
+  begin
+    pathLower := normalizedAssetPath(assetPath);
+    stats.soundAssets +:= 1;
+    if stats.firstSoundAsset = "" then
+      stats.firstSoundAsset := pathLower;
+    end if;
+    if endsWith(pathLower, ".wav") then
+      stats.wavAssets +:= 1;
+      inspectWavHeader(stats, pathLower, bytes);
+    elsif endsWith(pathLower, ".ogg") then
+      stats.oggAssets +:= 1;
+      inspectOggHeader(stats, pathLower, bytes);
+    end if;
+  end func;
+
+const proc: scanArchive (inout audioStats: stats,
+    in string: pk4File) is func
+  local
+    var fileSys: zipFs is fileSys.value;
+    var array string: paths is 0 times "";
+    var string: path is "";
+    var string: pathLower is "";
+  begin
+    zipFs := openZip(pk4File);
+    if zipFs = fileSys.value then
+      logError("could not open pk4 archive: " <& pk4File);
+    else
+      paths := readDir(zipFs, RECURSIVE);
+      for path range paths do
+        pathLower := normalizedAssetPath(path);
+        if isSoundAssetPath(pathLower) then
+          catalogSound(stats, pathLower, getFile(zipFs, path));
+        end if;
+      end for;
+    end if;
+  end func;
+
+const func array string: findPk4Archives (in string: basePath) is func
+  result
+    var array string: pk4Files is 0 times "";
+  local
+    var array string: names is 0 times "";
+    var string: name is "";
+  begin
+    if fileType(basePath) = FILE_DIR then
+      names := readDir(basePath);
+      for name range names do
+        if isPk4Name(name) and fileType(joinPath(basePath, name)) = FILE_REGULAR then
+          pk4Files &:= joinPath(basePath, name);
+        end if;
+      end for;
+    end if;
+  end func;
+
+const proc: sortStrings (inout array string: values) is func
+  local
+    var integer: leftIdx is 1;
+    var integer: rightIdx is 1;
+    var string: temp is "";
+  begin
+    for leftIdx range 1 to length(values) do
+      for rightIdx range succ(leftIdx) to length(values) do
+        if values[rightIdx] < values[leftIdx] then
+          temp := values[leftIdx];
+          values[leftIdx] := values[rightIdx];
+          values[rightIdx] := temp;
+        end if;
+      end for;
+    end for;
+  end func;
+
+const proc: parseArgs (inout audioConfig: config) is func
+  local
+    var integer: idx is 1;
+    var string: arg is "";
+  begin
+    while idx <= length(argv(PROGRAM)) do
+      arg := argv(PROGRAM)[idx];
+      if arg = "--help" or arg = "-h" then
+        config.showHelp := TRUE;
+      elsif arg = "--doom3_data_path" and idx < length(argv(PROGRAM)) then
+        config.dataPath := convDosPath(argv(PROGRAM)[succ(idx)]);
+        incr(idx);
+      elsif arg = "--doom3_base_path" and idx < length(argv(PROGRAM)) then
+        config.basePath := convDosPath(argv(PROGRAM)[succ(idx)]);
+        incr(idx);
+      elsif arg = "+set" and idx + 2 <= length(argv(PROGRAM)) then
+        if argv(PROGRAM)[succ(idx)] = "fs_basepath" then
+          config.dataPath := convDosPath(argv(PROGRAM)[idx + 2]);
+        elsif argv(PROGRAM)[succ(idx)] = "fs_game" then
+          config.basePath := convDosPath(argv(PROGRAM)[idx + 2]);
+        end if;
+        idx +:= 2;
+      end if;
+      incr(idx);
+    end while;
+    if config.basePath = "" then
+      config.basePath := joinPath(config.dataPath, DEFAULT_BASE_DIR);
+    end if;
+  end func;
+
+const proc: showUsage is func
+  begin
+    writeln("Usage:");
+    writeln("  s7 doom3_seed7_audio.s7 --doom3_data_path <doom3-root>");
+    writeln("  s7 doom3_seed7_audio.s7 +set fs_basepath <doom3-root>");
+    writeln;
+    writeln("Scans user-owned Doom 3 pk4 files for audio metadata readiness.");
+  end func;
+
+const proc: printStats (in audioStats: stats) is func
+  begin
+    logInfo("pk4_archives=" <& stats.pk4Archives);
+    logInfo("audio_assets total=" <& stats.soundAssets <& " wav=" <&
+        stats.wavAssets <& " ogg=" <& stats.oggAssets);
+    logInfo("audio_headers parsed=" <& stats.parsedHeaders <&
+        " wav=" <& stats.parsedWavHeaders <& " ogg=" <&
+        stats.recognizedOggHeaders <& " invalid=" <& stats.invalidHeaders);
+    logInfo("audio_mix_plan pcm=" <& stats.pcmSamples <& " non_pcm=" <&
+        stats.nonPcmSamples <& " mono=" <& stats.monoSamples <&
+        " stereo=" <& stats.stereoSamples <& " total_duration_ms=" <&
+        stats.totalDurationMsec);
+    if stats.firstSoundAsset <> "" then logInfo("first_sound_asset=" <& stats.firstSoundAsset); end if;
+    if stats.firstParsedSample <> "" then logInfo("first_parsed_sample=" <& stats.firstParsedSample); end if;
+    if stats.firstWavSample <> "" then logInfo("first_wav_sample=" <& stats.firstWavSample); end if;
+    if stats.firstOggSample <> "" then logInfo("first_ogg_sample=" <& stats.firstOggSample); end if;
+    if stats.firstInvalidSample <> "" then logInfo("first_invalid_sample=" <& stats.firstInvalidSample); end if;
+    if stats.firstSampleSummary <> "" then logInfo("first_sample_summary=" <& stats.firstSampleSummary); end if;
+    logInfo("audio_probe_ready=" <& (stats.pk4Archives <> 0 and
+        stats.soundAssets <> 0 and stats.parsedHeaders <> 0 and
+        stats.parsedWavHeaders <> 0));
+  end func;
+
+const proc: main is func
+  local
+    var audioConfig: config is audioConfig.value;
+    var audioStats: stats is audioStats.value;
+    var array string: pk4Files is 0 times "";
+    var string: pk4File is "";
+  begin
+    parseArgs(config);
+    if config.showHelp then
+      showUsage;
+    else
+      if fileType(config.basePath) <> FILE_DIR then
+        logError("Doom 3 base directory not found: " <& config.basePath);
+        logError("Expected a legal install path containing base/*.pk4");
+      else
+        pk4Files := findPk4Archives(config.basePath);
+        sortStrings(pk4Files);
+        stats.pk4Archives := length(pk4Files);
+        if length(pk4Files) = 0 then
+          logError("No .pk4 archives found in: " <& config.basePath);
+        else
+          for pk4File range pk4Files do
+            scanArchive(stats, pk4File);
+          end for;
+          printStats(stats);
+        end if;
+      end if;
+    end if;
+  end func;

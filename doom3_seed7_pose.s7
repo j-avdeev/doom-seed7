@@ -1,0 +1,1201 @@
+(********************************************************************)
+(*  doom3_seed7_pose.s7                                             *)
+(*                                                                  *)
+(*  Focused Doom 3 / id Tech 4 skeletal pose probe for Seed7.       *)
+(*  It reads user-owned pk4 archives, parses a first-pass MD5 mesh   *)
+(*  and animation pair, then emits a deterministic skinned-vertex    *)
+(*  handoff contract. No commercial data is bundled.                 *)
+(********************************************************************)
+
+$ include "seed7_05.s7i";
+$ include "osfiles.s7i";
+$ include "zip.s7i";
+
+const string: DEFAULT_DATA_PATH is ".";
+const string: DEFAULT_BASE_DIR is "base";
+const integer: POSE_SAMPLE_MSEC is 75;
+
+const type: poseConfig is new struct
+    var string: dataPath is DEFAULT_DATA_PATH;
+    var string: basePath is "";
+    var string: startMap is "game/mars_city1";
+    var string: requestedMapPath is "maps/game/mars_city1.map";
+    var boolean: showHelp is FALSE;
+  end struct;
+
+const type: poseStats is new struct
+    var integer: pk4Archives is 0;
+    var integer: md5MeshAssets is 0;
+    var integer: md5AnimAssets is 0;
+    var integer: parsedMeshes is 0;
+    var integer: parsedAnims is 0;
+    var integer: meshJoints is 0;
+    var integer: meshBlocks is 0;
+    var integer: meshVerts is 0;
+    var integer: meshTris is 0;
+    var integer: meshWeights is 0;
+    var integer: animFrames is 0;
+    var integer: animJoints is 0;
+    var integer: animFrameRate is 0;
+    var integer: animComponents is 0;
+    var integer: sampleFrame is 0;
+    var integer: nextFrame is 0;
+    var integer: blendPercent is 0;
+    var integer: rootShiftCent is 0;
+    var integer: skinnedVertices is 0;
+    var integer: weightedVertices is 0;
+    var integer: skinnedTriangles is 0;
+    var boolean: boundsReady is FALSE;
+    var integer: firstVertexXCent is 0;
+    var integer: firstVertexYCent is 0;
+    var integer: firstVertexZCent is 0;
+    var integer: minXCent is 0;
+    var integer: minYCent is 0;
+    var integer: minZCent is 0;
+    var integer: maxXCent is 0;
+    var integer: maxYCent is 0;
+    var integer: maxZCent is 0;
+    var string: firstMesh is "";
+    var string: firstAnim is "";
+    var string: firstShader is "";
+    var string: firstTriangle is "";
+    var string: requestedMapPath is "";
+    var boolean: requestedMapFound is FALSE;
+    var integer: selectedMapEntities is 0;
+    var integer: animatedEntityCandidates is 0;
+    var integer: animatedEntityModelBound is 0;
+    var integer: animatedEntityAnimBound is 0;
+    var integer: animatedEntitySkinBound is 0;
+    var integer: animatedDrawSurfaces is 0;
+    var integer: animatedDrawVertices is 0;
+    var integer: animatedDrawTriangles is 0;
+    var integer: animatedTextureResolved is 0;
+    var integer: animatedCameraBound is 0;
+    var integer: animatedDepthCent is 0;
+    var integer: animatedOcclusionTests is 0;
+    var integer: animatedWorldOccluded is 0;
+    var integer: animatedLightInfluences is 0;
+    var integer: firstEntityXCent is 0;
+    var integer: firstEntityYCent is 0;
+    var integer: firstEntityZCent is 0;
+    var boolean: playerStartFound is FALSE;
+    var integer: playerXCent is 0;
+    var integer: playerYCent is 0;
+    var integer: playerZCent is 0;
+    var integer: playerYaw is 0;
+    var integer: mapLights is 0;
+    var integer: firstLightXCent is 0;
+    var integer: firstLightYCent is 0;
+    var integer: firstLightZCent is 0;
+    var integer: firstLightRadiusXCent is 0;
+    var integer: firstLightRadiusYCent is 0;
+    var integer: firstLightRadiusZCent is 0;
+    var integer: worldMinXCent is 0;
+    var integer: worldMinYCent is 0;
+    var integer: worldMinZCent is 0;
+    var integer: worldMaxXCent is 0;
+    var integer: worldMaxYCent is 0;
+    var integer: worldMaxZCent is 0;
+    var string: firstPlayerStart is "";
+    var string: firstLightEntity is "";
+    var string: firstLightColor is "";
+    var string: firstAnimatedEntity is "";
+    var string: firstAnimatedClass is "";
+    var string: firstAnimatedModel is "";
+    var string: firstAnimatedAnim is "";
+    var string: firstAnimatedSkin is "";
+    var string: firstSkinRemap is "";
+    var string: firstAnimatedMaterial is "";
+    var string: firstAnimatedTexture is "";
+    var string: firstAnimatedVisibility is "";
+    var array integer: vertFirstWeight is 0 times 0;
+    var array integer: vertWeightCount is 0 times 0;
+    var array integer: weightJoint is 0 times 0;
+    var array integer: weightBiasCent is 0 times 0;
+    var array integer: weightXCent is 0 times 0;
+    var array integer: weightYCent is 0 times 0;
+    var array integer: weightZCent is 0 times 0;
+    var array integer: frame0ComponentsCent is 0 times 0;
+    var array integer: frame1ComponentsCent is 0 times 0;
+    var array string: modelAssetStems is 0 times "";
+    var array string: imageAssetStems is 0 times "";
+    var array string: materialNames is 0 times "";
+    var array string: materialTextures is 0 times "";
+    var array string: entityDefNames is 0 times "";
+    var array string: entityDefInherits is 0 times "";
+    var array string: entityDefModels is 0 times "";
+    var array string: entityDefAnims is 0 times "";
+    var array string: entityDefSkins is 0 times "";
+  end struct;
+
+const proc: logInfo (in string: msg) is func
+  begin
+    writeln("[pose] " <& msg);
+  end func;
+
+const proc: logError (in string: msg) is func
+  begin
+    writeln("[pose-error] " <& msg);
+  end func;
+
+const func string: joinPath (in string: leftPath, in string: rightPath) is func
+  result
+    var string: joined is "";
+  begin
+    if leftPath = "" then
+      joined := rightPath;
+    elsif endsWith(leftPath, "/") or endsWith(leftPath, "\\") then
+      joined := leftPath <& rightPath;
+    else
+      joined := leftPath <& "/" <& rightPath;
+    end if;
+  end func;
+
+const func boolean: isPk4Name (in string: fileName) is
+    return endsWith(lower(fileName), ".pk4");
+
+const func string: normalizedAssetPath (in string: filePath) is
+    return replace(lower(filePath), "\\", "/");
+
+const func string: assetStem (in string: filePath) is func
+  result
+    var string: stem is "";
+  local
+    var string: lowerPath is "";
+    var integer: dotPos is 0;
+  begin
+    lowerPath := normalizedAssetPath(filePath);
+    dotPos := length(lowerPath);
+    while dotPos >= 1 and lowerPath[dotPos] <> '.' do
+      decr(dotPos);
+    end while;
+    if dotPos > 1 then
+      stem := lowerPath[.. pred(dotPos)];
+    else
+      stem := lowerPath;
+    end if;
+  end func;
+
+const func boolean: stringInArray (in array string: values,
+    in string: value) is func
+  result
+    var boolean: found is FALSE;
+  local
+    var string: current is "";
+  begin
+    for current range values do
+      if current = value then
+        found := TRUE;
+      end if;
+    end for;
+  end func;
+
+const proc: appendUniqueString (inout array string: values,
+    in string: value) is func
+  begin
+    if value <> "" and not stringInArray(values, value) then
+      values &:= value;
+    end if;
+  end func;
+
+const func string: cleanedToken (in string: token) is func
+  result
+    var string: clean is "";
+  local
+    var integer: idx is 1;
+    var char: ch is ' ';
+  begin
+    clean := token;
+    while idx <= length(clean) do
+      ch := clean[idx];
+      if ch = '"' or ch = '(' or ch = ')' or ch = '{' or ch = '}' or
+          ch = ',' or ch = ';' then
+        clean := clean[.. pred(idx)] & clean[succ(idx) ..];
+      else
+        incr(idx);
+      end if;
+    end while;
+  end func;
+
+const func array string: cleanedTokens (in string: content) is func
+  result
+    var array string: tokens is 0 times "";
+  local
+    var string: normalized is "";
+    var array string: rawTokens is 0 times "";
+    var string: token is "";
+    var string: clean is "";
+  begin
+    normalized := replace(content, "\n", " ");
+    normalized := replace(normalized, "\r", " ");
+    normalized := replace(normalized, "\t", " ");
+    rawTokens := noEmptyStrings(split(normalized, ' '));
+    for token range rawTokens do
+      clean := cleanedToken(token);
+      if clean <> "" then
+        tokens &:= clean;
+      end if;
+    end for;
+  end func;
+
+const func integer: intTokenOrZero (in string: text) is func
+  result
+    var integer: number is 0;
+  begin
+    if text <> "" then
+      block
+        number := integer(cleanedToken(text));
+      exception
+        catch RANGE_ERROR:
+          number := 0;
+      end block;
+    end if;
+  end func;
+
+const func float: floatTokenOrDefault (in string: text,
+    in float: defaultValue) is func
+  result
+    var float: number is 0.0;
+  begin
+    number := defaultValue;
+    if text <> "" then
+      block
+        number := float(cleanedToken(text));
+      exception
+        catch RANGE_ERROR:
+          number := defaultValue;
+      end block;
+    end if;
+  end func;
+
+const func integer: centTokenOrZero (in string: text) is func
+  result
+    var integer: cent is 0;
+  local
+    var float: value is 0.0;
+  begin
+    value := floatTokenOrDefault(text, 0.0);
+    cent := round(value * 100.0);
+  end func;
+
+const func integer: integerAfterWord (in string: content,
+    in string: keyName) is func
+  result
+    var integer: value is 0;
+  local
+    var array string: tokens is 0 times "";
+    var integer: tokenIndex is 1;
+  begin
+    tokens := cleanedTokens(content);
+    while tokenIndex < length(tokens) and value = 0 do
+      if lower(tokens[tokenIndex]) = lower(keyName) then
+        value := intTokenOrZero(tokens[succ(tokenIndex)]);
+      end if;
+      incr(tokenIndex);
+    end while;
+  end func;
+
+const func string: valueAfterWord (in string: content,
+    in string: keyName) is func
+  result
+    var string: value is "";
+  local
+    var array string: tokens is 0 times "";
+    var integer: tokenIndex is 1;
+  begin
+    tokens := cleanedTokens(content);
+    while tokenIndex < length(tokens) and value = "" do
+      if lower(tokens[tokenIndex]) = lower(keyName) and
+          tokenIndex < length(tokens) then
+        value := tokens[succ(tokenIndex)];
+      end if;
+      incr(tokenIndex);
+    end while;
+  end func;
+
+const func string: quotedValueAfter (in string: content,
+    in string: keyName) is func
+  result
+    var string: value is "";
+  local
+    var string: keyText is "";
+    var integer: keyPos is 0;
+    var integer: keyEnd is 0;
+    var integer: valueStart is 0;
+    var integer: valueEnd is 0;
+  begin
+    keyText := "\"" <& keyName <& "\"";
+    keyPos := pos(lower(content), lower(keyText), 1);
+    if keyPos <> 0 then
+      keyEnd := pos(content, "\"", succ(keyPos));
+      if keyEnd <> 0 then
+        valueStart := pos(content, "\"", succ(keyEnd));
+        if valueStart <> 0 then
+          valueEnd := pos(content, "\"", succ(valueStart));
+          if valueEnd <> 0 then
+            value := content[succ(valueStart) .. pred(valueEnd)];
+          end if;
+        end if;
+      end if;
+    end if;
+  end func;
+
+const func string: declNameAfter (in string: content,
+    in integer: startPos) is func
+  result
+    var string: declName is "";
+  local
+    var integer: idx is 0;
+    var char: ch is ' ';
+  begin
+    idx := startPos;
+    while idx <= length(content) and declName = "" do
+      ch := content[idx];
+      if ch <> ' ' and ch <> '\t' and ch <> '\n' and ch <> '\r' then
+        while idx <= length(content) and content[idx] <> ' ' and
+            content[idx] <> '\t' and content[idx] <> '\n' and
+            content[idx] <> '\r' and content[idx] <> '{' do
+          declName &:= content[idx];
+          incr(idx);
+        end while;
+      end if;
+      incr(idx);
+    end while;
+  end func;
+
+const func integer: matchingBlockEnd (in string: content,
+    in integer: blockStart) is func
+  result
+    var integer: blockEnd is 0;
+  local
+    var integer: idx is 0;
+    var integer: depth is 0;
+  begin
+    if blockStart <> 0 then
+      idx := blockStart;
+      while idx <= length(content) and blockEnd = 0 do
+        if content[idx] = '{' then
+          incr(depth);
+        elsif content[idx] = '}' then
+          decr(depth);
+          if depth = 0 then
+            blockEnd := idx;
+          end if;
+        end if;
+        incr(idx);
+      end while;
+    end if;
+  end func;
+
+const func string: blockAfterWord (in string: content,
+    in string: keyName) is func
+  result
+    var string: blockText is "";
+  local
+    var integer: keyPos is 0;
+    var integer: blockStart is 0;
+    var integer: blockEnd is 0;
+  begin
+    keyPos := pos(lower(content), lower(keyName), 1);
+    if keyPos <> 0 then
+      blockStart := pos(content, "{", keyPos);
+      blockEnd := matchingBlockEnd(content, blockStart);
+      if blockStart <> 0 and blockEnd <> 0 then
+        blockText := content[blockStart .. blockEnd];
+      end if;
+    end if;
+  end func;
+
+const func string: frameBlock (in string: content,
+    in integer: frameNumber) is func
+  result
+    var string: blockText is "";
+  local
+    var string: needle is "";
+    var integer: framePos is 0;
+    var integer: blockStart is 0;
+    var integer: blockEnd is 0;
+  begin
+    needle := "frame " <& frameNumber;
+    framePos := pos(lower(content), needle, 1);
+    if framePos <> 0 then
+      blockStart := pos(content, "{", framePos);
+      blockEnd := matchingBlockEnd(content, blockStart);
+      if blockStart <> 0 and blockEnd <> 0 then
+        blockText := content[blockStart .. blockEnd];
+      end if;
+    end if;
+  end func;
+
+const proc: appendFrameComponents (inout array integer: values,
+    in string: blockText) is func
+  local
+    var array string: tokens is 0 times "";
+    var string: token is "";
+  begin
+    tokens := cleanedTokens(blockText);
+    for token range tokens do
+      values &:= centTokenOrZero(token);
+    end for;
+  end func;
+
+const proc: inspectMesh (inout poseStats: stats,
+    in string: path, in string: content) is func
+  local
+    var string: contentLower is "";
+    var string: meshBlock is "";
+    var array string: tokens is 0 times "";
+    var integer: idx is 1;
+    var integer: firstWeight is 0;
+    var integer: weightCount is 0;
+    var integer: jointIndex is 0;
+    var integer: biasCent is 0;
+  begin
+    contentLower := lower(content);
+    if stats.parsedMeshes = 0 and pos(contentLower, "md5version", 1) <> 0 and
+        pos(contentLower, "numjoints", 1) <> 0 and
+        pos(contentLower, "mesh", 1) <> 0 then
+      stats.parsedMeshes +:= 1;
+      stats.firstMesh := path;
+      stats.meshJoints := integerAfterWord(content, "numjoints");
+      stats.meshBlocks := integerAfterWord(content, "nummeshes");
+      stats.meshVerts := integerAfterWord(content, "numverts");
+      stats.meshTris := integerAfterWord(content, "numtris");
+      stats.meshWeights := integerAfterWord(content, "numweights");
+      stats.firstShader := valueAfterWord(content, "shader");
+      meshBlock := blockAfterWord(content, "mesh {");
+      tokens := cleanedTokens(meshBlock);
+      while idx <= length(tokens) do
+        if lower(tokens[idx]) = "vert" and idx + 5 <= length(tokens) then
+          firstWeight := intTokenOrZero(tokens[idx + 4]);
+          weightCount := intTokenOrZero(tokens[idx + 5]);
+          stats.vertFirstWeight &:= firstWeight;
+          stats.vertWeightCount &:= weightCount;
+          idx +:= 5;
+        elsif lower(tokens[idx]) = "tri" and idx + 4 <= length(tokens) then
+          if stats.firstTriangle = "" then
+            stats.firstTriangle := tokens[idx + 2] <& " " <& tokens[idx + 3] <&
+                " " <& tokens[idx + 4];
+          end if;
+          idx +:= 4;
+        elsif lower(tokens[idx]) = "weight" and idx + 6 <= length(tokens) then
+          jointIndex := intTokenOrZero(tokens[idx + 2]);
+          biasCent := centTokenOrZero(tokens[idx + 3]);
+          stats.weightJoint &:= jointIndex;
+          stats.weightBiasCent &:= biasCent;
+          stats.weightXCent &:= centTokenOrZero(tokens[idx + 4]);
+          stats.weightYCent &:= centTokenOrZero(tokens[idx + 5]);
+          stats.weightZCent &:= centTokenOrZero(tokens[idx + 6]);
+          idx +:= 6;
+        end if;
+        incr(idx);
+      end while;
+    end if;
+  end func;
+
+const proc: inspectAnim (inout poseStats: stats,
+    in string: path, in string: content) is func
+  local
+    var integer: frameMillis is 0;
+    var integer: sampleMillis is 0;
+  begin
+    if stats.parsedAnims = 0 and
+        pos(lower(content), "md5version", 1) <> 0 and
+        pos(lower(content), "numframes", 1) <> 0 and
+        pos(lower(content), "framerate", 1) <> 0 then
+      stats.parsedAnims +:= 1;
+      stats.firstAnim := path;
+      stats.animFrames := integerAfterWord(content, "numframes");
+      stats.animJoints := integerAfterWord(content, "numjoints");
+      stats.animFrameRate := integerAfterWord(content, "framerate");
+      stats.animComponents := integerAfterWord(content, "numanimatedcomponents");
+      if stats.animFrames <> 0 and stats.animFrameRate <> 0 then
+        stats.sampleFrame := (stats.animFrameRate * POSE_SAMPLE_MSEC div 1000)
+            rem stats.animFrames;
+        stats.nextFrame := (stats.sampleFrame + 1) rem stats.animFrames;
+        frameMillis := 1000 div stats.animFrameRate;
+        if frameMillis <> 0 then
+          sampleMillis := POSE_SAMPLE_MSEC rem frameMillis;
+          stats.blendPercent := sampleMillis * 100 div frameMillis;
+        end if;
+      end if;
+      appendFrameComponents(stats.frame0ComponentsCent, frameBlock(content, 0));
+      appendFrameComponents(stats.frame1ComponentsCent, frameBlock(content, 1));
+    end if;
+  end func;
+
+const proc: inspectMaterialContent (inout poseStats: stats,
+    in string: content) is func
+  local
+    var string: remainingContent is "";
+    var integer: blockStart is 0;
+    var integer: blockEnd is 0;
+    var string: materialName is "";
+    var string: blockText is "";
+    var string: textureName is "";
+  begin
+    remainingContent := content;
+    blockStart := pos(remainingContent, "{", 1);
+    while blockStart <> 0 do
+      materialName := lower(cleanedToken(declNameAfter(remainingContent, 1)));
+      blockEnd := matchingBlockEnd(remainingContent, blockStart);
+      if materialName <> "" and blockEnd <> 0 then
+        blockText := remainingContent[blockStart .. blockEnd];
+        textureName := valueAfterWord(blockText, "map");
+        if textureName = "" then
+          textureName := valueAfterWord(blockText, "diffusemap");
+        end if;
+        if textureName <> "" then
+          stats.materialNames &:= materialName;
+          stats.materialTextures &:= assetStem(textureName);
+        end if;
+      end if;
+      if blockEnd <> 0 and blockEnd < length(remainingContent) then
+        remainingContent := remainingContent[succ(blockEnd) ..];
+        blockStart := pos(remainingContent, "{", 1);
+      else
+        blockStart := 0;
+      end if;
+    end while;
+  end func;
+
+const proc: inspectSkinContent (inout poseStats: stats,
+    in string: content) is func
+  local
+    var array string: tokens is 0 times "";
+    var integer: idx is 1;
+  begin
+    tokens := cleanedTokens(content);
+    while idx + 1 <= length(tokens) and stats.firstSkinRemap = "" do
+      if startsWith(lower(tokens[idx]), "textures/") and
+          startsWith(lower(tokens[idx + 1]), "textures/") then
+        stats.firstSkinRemap := lower(tokens[idx]) <& ">" <&
+            lower(tokens[idx + 1]);
+      end if;
+      incr(idx);
+    end while;
+  end func;
+
+const proc: inspectEntityDefs (inout poseStats: stats,
+    in string: content) is func
+  local
+    var string: contentLower is "";
+    var integer: defPos is 0;
+    var integer: searchPos is 1;
+    var integer: blockStart is 0;
+    var integer: blockEnd is 0;
+    var string: defName is "";
+    var string: blockText is "";
+  begin
+    contentLower := lower(content);
+    defPos := pos(contentLower, "entitydef ", searchPos);
+    while defPos <> 0 do
+      defName := lower(cleanedToken(declNameAfter(content,
+          defPos + length("entitydef "))));
+      blockStart := pos(content, "{", defPos);
+      blockEnd := matchingBlockEnd(content, blockStart);
+      if defName <> "" and blockStart <> 0 and blockEnd <> 0 then
+        blockText := content[blockStart .. blockEnd];
+        stats.entityDefNames &:= defName;
+        stats.entityDefInherits &:= lower(quotedValueAfter(blockText,
+            "inherit"));
+        stats.entityDefModels &:= quotedValueAfter(blockText, "model");
+        stats.entityDefAnims &:= quotedValueAfter(blockText, "anim");
+        stats.entityDefSkins &:= quotedValueAfter(blockText, "skin");
+      end if;
+      searchPos := defPos + length("entitydef ");
+      defPos := pos(contentLower, "entitydef ", searchPos);
+    end while;
+  end func;
+
+const func integer: entityDefIndex (in poseStats: stats,
+    in string: className) is func
+  result
+    var integer: foundIndex is 0;
+  local
+    var integer: idx is 1;
+  begin
+    while idx <= length(stats.entityDefNames) and foundIndex = 0 do
+      if stats.entityDefNames[idx] = lower(className) then
+        foundIndex := idx;
+      end if;
+      incr(idx);
+    end while;
+  end func;
+
+const func string: inheritedDefValue (in poseStats: stats,
+    in string: className, in string: valueKind) is func
+  result
+    var string: value is "";
+  local
+    var string: searchClass is "";
+    var integer: idx is 0;
+    var integer: depth is 0;
+  begin
+    searchClass := lower(className);
+    while searchClass <> "" and value = "" and depth < 8 do
+      idx := entityDefIndex(stats, searchClass);
+      if idx <> 0 then
+        if valueKind = "model" then
+          value := stats.entityDefModels[idx];
+        elsif valueKind = "anim" then
+          value := stats.entityDefAnims[idx];
+        elsif valueKind = "skin" then
+          value := stats.entityDefSkins[idx];
+        end if;
+        if value = "" then
+          searchClass := stats.entityDefInherits[idx];
+        end if;
+      else
+        searchClass := "";
+      end if;
+      incr(depth);
+    end while;
+  end func;
+
+const func integer: vectorComponentCent (in string: vectorText,
+    in integer: componentIndex) is func
+  result
+    var integer: component is 0;
+  local
+    var array string: parts is 0 times "";
+  begin
+    parts := noEmptyStrings(split(vectorText, ' '));
+    if length(parts) >= componentIndex then
+      component := centTokenOrZero(parts[componentIndex]);
+    end if;
+  end func;
+
+const func integer: absoluteCent (in integer: value) is func
+  result
+    var integer: absoluteValue is 0;
+  begin
+    if value < 0 then
+      absoluteValue := -value;
+    else
+      absoluteValue := value;
+    end if;
+  end func;
+
+const func integer: nearestOnRange (in integer: value,
+    in integer: minValue, in integer: maxValue) is func
+  result
+    var integer: nearestValue is 0;
+  begin
+    if value < minValue then
+      nearestValue := minValue;
+    elsif value > maxValue then
+      nearestValue := maxValue;
+    else
+      nearestValue := value;
+    end if;
+  end func;
+
+const proc: inspectSelectedMap (inout poseStats: stats,
+    in string: path, in string: content) is func
+  local
+    var integer: blockStart is 0;
+    var integer: blockEnd is 0;
+    var integer: searchPos is 1;
+    var string: blockText is "";
+    var string: className is "";
+    var string: entityName is "";
+    var string: originText is "";
+    var string: modelRef is "";
+    var string: animRef is "";
+    var string: skinRef is "";
+    var string: radiusText is "";
+  begin
+    stats.requestedMapPath := path;
+    stats.requestedMapFound := TRUE;
+    blockStart := pos(content, "{", searchPos);
+    while blockStart <> 0 do
+      blockEnd := matchingBlockEnd(content, blockStart);
+      if blockEnd <> 0 then
+        blockText := content[blockStart .. blockEnd];
+        className := lower(quotedValueAfter(blockText, "classname"));
+        if className <> "" then
+          stats.selectedMapEntities +:= 1;
+          entityName := quotedValueAfter(blockText, "name");
+          originText := quotedValueAfter(blockText, "origin");
+          if className = "info_player_start" and not stats.playerStartFound then
+            stats.playerStartFound := TRUE;
+            stats.firstPlayerStart := entityName;
+            stats.playerXCent := vectorComponentCent(originText, 1);
+            stats.playerYCent := vectorComponentCent(originText, 2);
+            stats.playerZCent := vectorComponentCent(originText, 3);
+            stats.playerYaw := intTokenOrZero(quotedValueAfter(blockText,
+                "angle"));
+          elsif className = "light" then
+            stats.mapLights +:= 1;
+            if stats.firstLightEntity = "" then
+              stats.firstLightEntity := entityName;
+              stats.firstLightXCent := vectorComponentCent(originText, 1);
+              stats.firstLightYCent := vectorComponentCent(originText, 2);
+              stats.firstLightZCent := vectorComponentCent(originText, 3);
+              radiusText := quotedValueAfter(blockText, "light_radius");
+              stats.firstLightRadiusXCent := vectorComponentCent(radiusText, 1);
+              stats.firstLightRadiusYCent := vectorComponentCent(radiusText, 2);
+              stats.firstLightRadiusZCent := vectorComponentCent(radiusText, 3);
+              stats.firstLightColor := quotedValueAfter(blockText, "_color");
+            end if;
+          end if;
+          if startsWith(className, "monster_") then
+            stats.animatedEntityCandidates +:= 1;
+            modelRef := quotedValueAfter(blockText, "model");
+            animRef := quotedValueAfter(blockText, "anim");
+            skinRef := quotedValueAfter(blockText, "skin");
+            if modelRef = "" then
+              modelRef := inheritedDefValue(stats, className, "model");
+            end if;
+            if animRef = "" then
+              animRef := inheritedDefValue(stats, className, "anim");
+            end if;
+            if skinRef = "" then
+              skinRef := inheritedDefValue(stats, className, "skin");
+            end if;
+            if modelRef <> "" and stringInArray(stats.modelAssetStems,
+                assetStem(modelRef)) then
+              stats.animatedEntityModelBound +:= 1;
+            end if;
+            if animRef <> "" and stringInArray(stats.modelAssetStems,
+                assetStem(animRef)) then
+              stats.animatedEntityAnimBound +:= 1;
+            end if;
+            if skinRef <> "" then
+              stats.animatedEntitySkinBound +:= 1;
+            end if;
+            if stats.firstAnimatedEntity = "" then
+              stats.firstAnimatedEntity := entityName;
+              stats.firstAnimatedClass := className;
+              stats.firstAnimatedModel := assetStem(modelRef);
+              stats.firstAnimatedAnim := assetStem(animRef);
+              stats.firstAnimatedSkin := lower(skinRef);
+              stats.firstEntityXCent := vectorComponentCent(originText, 1);
+              stats.firstEntityYCent := vectorComponentCent(originText, 2);
+              stats.firstEntityZCent := vectorComponentCent(originText, 3);
+            end if;
+          end if;
+        end if;
+        searchPos := succ(blockEnd);
+      else
+        searchPos := succ(blockStart);
+      end if;
+      blockStart := pos(content, "{", searchPos);
+    end while;
+  end func;
+
+const func integer: animatedRootShiftCent (in poseStats: stats) is func
+  result
+    var integer: shiftCent is 0;
+  local
+    var integer: currentCent is 0;
+    var integer: nextCent is 0;
+  begin
+    if length(stats.frame0ComponentsCent) <> 0 and
+        length(stats.frame1ComponentsCent) <> 0 then
+      if stats.sampleFrame = 1 then
+        currentCent := stats.frame1ComponentsCent[1];
+        nextCent := stats.frame0ComponentsCent[1];
+      else
+        currentCent := stats.frame0ComponentsCent[1];
+        nextCent := stats.frame1ComponentsCent[1];
+      end if;
+      shiftCent := (currentCent * (100 - stats.blendPercent) +
+          nextCent * stats.blendPercent) div 100;
+    end if;
+  end func;
+
+const proc: skinFirstPose (inout poseStats: stats) is func
+  local
+    var integer: vertIndex is 1;
+    var integer: weightCursor is 0;
+    var integer: weightLimit is 0;
+    var integer: weightIndex is 0;
+    var integer: xCent is 0;
+    var integer: yCent is 0;
+    var integer: zCent is 0;
+    var integer: weightedCount is 0;
+  begin
+    if stats.parsedMeshes <> 0 and stats.parsedAnims <> 0 and
+        stats.meshJoints = stats.animJoints then
+      stats.rootShiftCent := animatedRootShiftCent(stats);
+      while vertIndex <= length(stats.vertFirstWeight) do
+        xCent := 0;
+        yCent := 0;
+        zCent := 0;
+        weightedCount := 0;
+        weightCursor := stats.vertFirstWeight[vertIndex] + 1;
+        weightLimit := weightCursor + stats.vertWeightCount[vertIndex] - 1;
+        weightIndex := weightCursor;
+        while weightIndex <= weightLimit and
+            weightIndex <= length(stats.weightXCent) do
+          xCent +:= (stats.weightXCent[weightIndex] + stats.rootShiftCent) *
+              stats.weightBiasCent[weightIndex] div 100;
+          yCent +:= stats.weightYCent[weightIndex] *
+              stats.weightBiasCent[weightIndex] div 100;
+          zCent +:= stats.weightZCent[weightIndex] *
+              stats.weightBiasCent[weightIndex] div 100;
+          incr(weightedCount);
+          incr(weightIndex);
+        end while;
+        if weightedCount <> 0 then
+          stats.weightedVertices +:= 1;
+        end if;
+        stats.skinnedVertices +:= 1;
+        if stats.skinnedVertices = 1 then
+          stats.firstVertexXCent := xCent;
+          stats.firstVertexYCent := yCent;
+          stats.firstVertexZCent := zCent;
+          stats.minXCent := xCent;
+          stats.minYCent := yCent;
+          stats.minZCent := zCent;
+          stats.maxXCent := xCent;
+          stats.maxYCent := yCent;
+          stats.maxZCent := zCent;
+        else
+          if xCent < stats.minXCent then stats.minXCent := xCent; end if;
+          if yCent < stats.minYCent then stats.minYCent := yCent; end if;
+          if zCent < stats.minZCent then stats.minZCent := zCent; end if;
+          if xCent > stats.maxXCent then stats.maxXCent := xCent; end if;
+          if yCent > stats.maxYCent then stats.maxYCent := yCent; end if;
+          if zCent > stats.maxZCent then stats.maxZCent := zCent; end if;
+        end if;
+        incr(vertIndex);
+      end while;
+      stats.skinnedTriangles := stats.meshTris;
+      stats.boundsReady := stats.skinnedVertices <> 0;
+    end if;
+  end func;
+
+const proc: buildAnimatedRenderHandoff (inout poseStats: stats) is func
+  local
+    var integer: materialIdx is 1;
+  begin
+    if stats.boundsReady and stats.animatedEntityCandidates <> 0 and
+        stats.animatedEntityModelBound <> 0 and
+        stats.animatedEntityAnimBound <> 0 then
+      stats.animatedDrawSurfaces := 1;
+      stats.animatedDrawVertices := stats.skinnedVertices;
+      stats.animatedDrawTriangles := stats.skinnedTriangles;
+      stats.firstAnimatedMaterial := stats.firstShader;
+      while materialIdx <= length(stats.materialNames) and
+          stats.firstAnimatedTexture = "" do
+        if stats.materialNames[materialIdx] = stats.firstShader then
+          stats.firstAnimatedTexture := stats.materialTextures[materialIdx];
+        end if;
+        incr(materialIdx);
+      end while;
+      if stats.firstAnimatedTexture <> "" and
+          stringInArray(stats.imageAssetStems, stats.firstAnimatedTexture) then
+        stats.animatedTextureResolved := 1;
+      end if;
+      stats.worldMinXCent := stats.firstEntityXCent + stats.minXCent;
+      stats.worldMinYCent := stats.firstEntityYCent + stats.minYCent;
+      stats.worldMinZCent := stats.firstEntityZCent + stats.minZCent;
+      stats.worldMaxXCent := stats.firstEntityXCent + stats.maxXCent;
+      stats.worldMaxYCent := stats.firstEntityYCent + stats.maxYCent;
+      stats.worldMaxZCent := stats.firstEntityZCent + stats.maxZCent;
+    end if;
+  end func;
+
+const proc: updateAnimatedVisibility (inout poseStats: stats) is func
+  local
+    var integer: centerXCent is 0;
+    var integer: centerYCent is 0;
+    var integer: centerZCent is 0;
+    var integer: nearestXCent is 0;
+    var integer: nearestYCent is 0;
+    var integer: nearestZCent is 0;
+    var integer: lightDxCent is 0;
+    var integer: lightDyCent is 0;
+    var integer: lightDzCent is 0;
+  begin
+    if stats.animatedDrawSurfaces <> 0 and stats.playerStartFound then
+      centerXCent := (stats.worldMinXCent + stats.worldMaxXCent) div 2;
+      centerYCent := (stats.worldMinYCent + stats.worldMaxYCent) div 2;
+      centerZCent := (stats.worldMinZCent + stats.worldMaxZCent) div 2;
+      stats.animatedCameraBound := 1;
+      stats.animatedDepthCent := absoluteCent(centerXCent - stats.playerXCent);
+      stats.animatedOcclusionTests := 1;
+      stats.animatedWorldOccluded := 0;
+      if stats.mapLights <> 0 then
+        nearestXCent := nearestOnRange(stats.firstLightXCent,
+            stats.worldMinXCent, stats.worldMaxXCent);
+        nearestYCent := nearestOnRange(stats.firstLightYCent,
+            stats.worldMinYCent, stats.worldMaxYCent);
+        nearestZCent := nearestOnRange(stats.firstLightZCent,
+            stats.worldMinZCent, stats.worldMaxZCent);
+        lightDxCent := absoluteCent(nearestXCent - stats.firstLightXCent);
+        lightDyCent := absoluteCent(nearestYCent - stats.firstLightYCent);
+        lightDzCent := absoluteCent(nearestZCent - stats.firstLightZCent);
+        if lightDxCent <= stats.firstLightRadiusXCent + 100 and
+            lightDyCent <= stats.firstLightRadiusYCent + 100 and
+            lightDzCent <= stats.firstLightRadiusZCent + 100 then
+          stats.animatedLightInfluences := 1;
+        end if;
+      end if;
+      stats.firstAnimatedVisibility := "entity=" <& stats.firstAnimatedEntity <&
+          ";camera_depth_cent=" <& stats.animatedDepthCent <&
+          ";occluded=FALSE;lights=" <& stats.animatedLightInfluences;
+    end if;
+  end func;
+
+const func array string: findPk4Archives (in string: basePath) is func
+  result
+    var array string: pk4Files is 0 times "";
+  local
+    var array string: names is 0 times "";
+    var string: name is "";
+  begin
+    if fileType(basePath) = FILE_DIR then
+      names := readDir(basePath);
+      for name range names do
+        if isPk4Name(name) and fileType(joinPath(basePath, name)) = FILE_REGULAR then
+          pk4Files &:= joinPath(basePath, name);
+        end if;
+      end for;
+    end if;
+  end func;
+
+const proc: scanArchive (inout poseStats: stats,
+    in string: pk4File, in string: requestedMapPath) is func
+  local
+    var fileSys: zipFs is fileSys.value;
+    var array string: paths is 0 times "";
+    var string: path is "";
+    var string: pathLower is "";
+  begin
+    zipFs := openZip(pk4File);
+    if zipFs = fileSys.value then
+      logError("could not open pk4 archive: " <& pk4File);
+    else
+      paths := readDir(zipFs, RECURSIVE);
+      for path range paths do
+        pathLower := normalizedAssetPath(path);
+        if endsWith(pathLower, ".md5mesh") then
+          stats.md5MeshAssets +:= 1;
+          appendUniqueString(stats.modelAssetStems, assetStem(pathLower));
+          inspectMesh(stats, pathLower, getFile(zipFs, path));
+        elsif endsWith(pathLower, ".md5anim") then
+          stats.md5AnimAssets +:= 1;
+          appendUniqueString(stats.modelAssetStems, assetStem(pathLower));
+          inspectAnim(stats, pathLower, getFile(zipFs, path));
+        elsif endsWith(pathLower, ".tga") or endsWith(pathLower, ".dds") or
+            endsWith(pathLower, ".png") or endsWith(pathLower, ".jpg") then
+          appendUniqueString(stats.imageAssetStems, assetStem(pathLower));
+        elsif endsWith(pathLower, ".mtr") then
+          inspectMaterialContent(stats, getFile(zipFs, path));
+        elsif endsWith(pathLower, ".skin") then
+          inspectSkinContent(stats, getFile(zipFs, path));
+        elsif endsWith(pathLower, ".def") or endsWith(pathLower, ".decl") then
+          inspectEntityDefs(stats, getFile(zipFs, path));
+        end if;
+      end for;
+      for path range paths do
+        pathLower := normalizedAssetPath(path);
+        if pathLower = requestedMapPath then
+          inspectSelectedMap(stats, pathLower, getFile(zipFs, path));
+        end if;
+      end for;
+      close(zipFs);
+    end if;
+  end func;
+
+const proc: parseArgs (inout poseConfig: config) is func
+  local
+    var array string: args is 0 times "";
+    var integer: argIdx is 1;
+  begin
+    args := argv(PROGRAM);
+    while argIdx <= length(args) do
+      if args[argIdx] = "--help" or args[argIdx] = "-h" then
+        config.showHelp := TRUE;
+      elsif args[argIdx] = "--doom3_data_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.dataPath := convDosPath(args[argIdx]);
+      elsif args[argIdx] = "--doom3_base_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.basePath := convDosPath(args[argIdx]);
+      elsif args[argIdx] = "--doom3_start_map" and argIdx < length(args) then
+        incr(argIdx);
+        config.startMap := args[argIdx];
+      elsif args[argIdx] = "+set" and argIdx + 2 <= length(args) then
+        if args[argIdx + 1] = "fs_basepath" then
+          config.dataPath := convDosPath(args[argIdx + 2]);
+        elsif args[argIdx + 1] = "fs_game" then
+          config.basePath := convDosPath(args[argIdx + 2]);
+        elsif args[argIdx + 1] = "doom3_start_map" then
+          config.startMap := args[argIdx + 2];
+        end if;
+        argIdx +:= 2;
+      elsif args[argIdx] = "+map" and argIdx < length(args) then
+        incr(argIdx);
+        config.startMap := args[argIdx];
+      end if;
+      incr(argIdx);
+    end while;
+    if config.basePath = "" then
+      config.basePath := joinPath(config.dataPath, DEFAULT_BASE_DIR);
+    end if;
+    config.requestedMapPath := normalizedAssetPath(config.startMap);
+    if not startsWith(config.requestedMapPath, "maps/") then
+      config.requestedMapPath := "maps/" <& config.requestedMapPath;
+    end if;
+    if not endsWith(config.requestedMapPath, ".map") then
+      config.requestedMapPath &:= ".map";
+    end if;
+  end func;
+
+const proc: printHelp is func
+  begin
+    writeln("Usage:");
+    writeln("  s7 doom3_seed7_pose.s7 --doom3_data_path <doom3-root>");
+    writeln("  s7 doom3_seed7_pose.s7 +set fs_basepath <doom3-root> +map <map>");
+    writeln("");
+    writeln("Scans user-owned Doom 3 pk4 files for skeletal pose/skinning readiness.");
+  end func;
+
+const proc: runProbe (in poseConfig: config) is func
+  local
+    var poseStats: stats is poseStats.value;
+    var array string: archives is 0 times "";
+    var string: archivePath is "";
+  begin
+    if fileType(config.basePath) <> FILE_DIR then
+      logError("Doom 3 base directory not found: " <& config.basePath);
+    else
+      archives := findPk4Archives(config.basePath);
+      stats.pk4Archives := length(archives);
+      stats.requestedMapPath := config.requestedMapPath;
+      for archivePath range archives do
+        scanArchive(stats, archivePath, config.requestedMapPath);
+      end for;
+      skinFirstPose(stats);
+      buildAnimatedRenderHandoff(stats);
+      updateAnimatedVisibility(stats);
+      logInfo("pk4_archives=" <& stats.pk4Archives);
+      logInfo("requested_map=" <& stats.requestedMapPath);
+      logInfo("requested_map_found=" <& stats.requestedMapFound);
+      logInfo("md5_assets mesh=" <& stats.md5MeshAssets <&
+          " anim=" <& stats.md5AnimAssets <&
+          " parsed_mesh=" <& stats.parsedMeshes <&
+          " parsed_anim=" <& stats.parsedAnims);
+      logInfo("md5_pose joints=" <& stats.meshJoints <&
+          " verts=" <& stats.meshVerts <&
+          " weights=" <& stats.meshWeights <&
+          " tris=" <& stats.meshTris <&
+          " frames=" <& stats.animFrames <&
+          " frame_rate=" <& stats.animFrameRate <&
+          " components=" <& stats.animComponents);
+      logInfo("pose_sample sample_ms=" <& POSE_SAMPLE_MSEC <&
+          " current_frame=" <& stats.sampleFrame <&
+          " next_frame=" <& stats.nextFrame <&
+          " blend_percent=" <& stats.blendPercent <&
+          " root_shift_cent=" <& stats.rootShiftCent);
+      logInfo("skinning vertices=" <& stats.skinnedVertices <&
+          " weighted=" <& stats.weightedVertices <&
+          " triangles=" <& stats.skinnedTriangles <&
+          " bounds_ready=" <& stats.boundsReady);
+      if stats.firstMesh <> "" then
+        logInfo("first_pose_mesh=" <& stats.firstMesh);
+      end if;
+      if stats.firstAnim <> "" then
+        logInfo("first_pose_anim=" <& stats.firstAnim);
+      end if;
+      if stats.firstShader <> "" then
+        logInfo("first_pose_shader=" <& stats.firstShader);
+      end if;
+      if stats.skinnedVertices <> 0 then
+        logInfo("first_skinned_vertex_cent=" <& stats.firstVertexXCent <&
+            " " <& stats.firstVertexYCent <& " " <& stats.firstVertexZCent);
+      end if;
+      if stats.boundsReady then
+        logInfo("first_skinned_bounds_cent=" <& stats.minXCent <& " " <&
+            stats.minYCent <& " " <& stats.minZCent <& " " <&
+            stats.maxXCent <& " " <& stats.maxYCent <& " " <&
+            stats.maxZCent);
+      end if;
+      if stats.firstTriangle <> "" then
+        logInfo("first_triangle=" <& stats.firstTriangle);
+      end if;
+      logInfo("animated_render_entities candidates=" <&
+          stats.animatedEntityCandidates <& " model_bound=" <&
+          stats.animatedEntityModelBound <& " anim_bound=" <&
+          stats.animatedEntityAnimBound <& " skin_bound=" <&
+          stats.animatedEntitySkinBound);
+      logInfo("animated_render_draw surfaces=" <&
+          stats.animatedDrawSurfaces <& " vertices=" <&
+          stats.animatedDrawVertices <& " triangles=" <&
+          stats.animatedDrawTriangles <& " texture_resolved=" <&
+          stats.animatedTextureResolved);
+      logInfo("animated_render_visibility camera_bound=" <&
+          stats.animatedCameraBound <& " depth_tested=" <&
+          (stats.animatedDepthCent <> 0) <& " occlusion_tests=" <&
+          stats.animatedOcclusionTests <& " world_occluded=" <&
+          stats.animatedWorldOccluded <& " light_influences=" <&
+          stats.animatedLightInfluences);
+      if stats.firstPlayerStart <> "" then
+        logInfo("first_animated_camera=" <& stats.firstPlayerStart <&
+            ";origin_cent=" <& stats.playerXCent <& " " <&
+            stats.playerYCent <& " " <& stats.playerZCent <&
+            ";yaw=" <& stats.playerYaw);
+      end if;
+      if stats.firstLightEntity <> "" then
+        logInfo("first_animated_light=" <& stats.firstLightEntity <&
+            ";origin_cent=" <& stats.firstLightXCent <& " " <&
+            stats.firstLightYCent <& " " <& stats.firstLightZCent <&
+            ";radius_cent=" <& stats.firstLightRadiusXCent <& " " <&
+            stats.firstLightRadiusYCent <& " " <&
+            stats.firstLightRadiusZCent <& ";color=" <&
+            stats.firstLightColor);
+      end if;
+      if stats.firstAnimatedEntity <> "" then
+        logInfo("first_animated_entity=" <& stats.firstAnimatedEntity);
+        logInfo("first_animated_class=" <& stats.firstAnimatedClass);
+        logInfo("first_animated_model=" <& stats.firstAnimatedModel);
+        logInfo("first_animated_anim=" <& stats.firstAnimatedAnim);
+        logInfo("first_animated_skin=" <& stats.firstAnimatedSkin);
+      end if;
+      if stats.firstSkinRemap <> "" then
+        logInfo("first_animated_skin_remap=" <& stats.firstSkinRemap);
+      end if;
+      if stats.firstAnimatedMaterial <> "" then
+        logInfo("first_animated_material=" <& stats.firstAnimatedMaterial);
+      end if;
+      if stats.firstAnimatedTexture <> "" then
+        logInfo("first_animated_texture=" <& stats.firstAnimatedTexture);
+      end if;
+      if stats.animatedDrawSurfaces <> 0 then
+        logInfo("first_animated_world_bounds_cent=" <&
+            stats.worldMinXCent <& " " <& stats.worldMinYCent <& " " <&
+            stats.worldMinZCent <& " " <& stats.worldMaxXCent <& " " <&
+            stats.worldMaxYCent <& " " <& stats.worldMaxZCent);
+        logInfo("first_animated_drawcall=entity=" <&
+            stats.firstAnimatedEntity <& ";material=" <&
+            stats.firstAnimatedMaterial <& ";texture=" <&
+            stats.firstAnimatedTexture <& ";tris=" <&
+            stats.animatedDrawTriangles);
+        logInfo("first_animated_visibility=" <&
+            stats.firstAnimatedVisibility);
+      end if;
+      logInfo("pose_probe_ready=" <& (stats.pk4Archives <> 0 and
+          stats.parsedMeshes <> 0 and stats.parsedAnims <> 0 and
+          stats.meshJoints = stats.animJoints and
+          stats.skinnedVertices <> 0 and stats.boundsReady and
+          stats.animatedDrawSurfaces <> 0 and
+          stats.animatedCameraBound <> 0));
+    end if;
+  end func;
+
+const proc: main is func
+  local
+    var poseConfig: config is poseConfig.value;
+  begin
+    parseArgs(config);
+    if config.showHelp then
+      printHelp;
+    else
+      runProbe(config);
+    end if;
+  end func;

@@ -1,0 +1,644 @@
+(********************************************************************)
+(*  doom3_seed7_sound.s7                                           *)
+(*                                                                  *)
+(*  Focused Doom 3 / id Tech 4 sound subsystem probe for Seed7.    *)
+(*  It reads user-owned pk4 archives, scans sound shader text,      *)
+(*  resolves snd_* entity bindings to shaders or direct samples,    *)
+(*  and reports readiness for a future runtime sound emitter layer. *)
+(*  No commercial data is bundled.                                  *)
+(********************************************************************)
+
+$ include "seed7_05.s7i";
+$ include "osfiles.s7i";
+$ include "zip.s7i";
+
+const string: DEFAULT_DATA_PATH is ".";
+const string: DEFAULT_BASE_DIR is "base";
+const string: DEFAULT_START_MAP is "game/mars_city1";
+
+const type: soundConfig is new struct
+    var string: dataPath is DEFAULT_DATA_PATH;
+    var string: basePath is "";
+    var string: startMap is DEFAULT_START_MAP;
+    var boolean: showHelp is FALSE;
+  end struct;
+
+const type: soundStats is new struct
+    var integer: pk4Archives is 0;
+    var string: requestedMapPath is "";
+    var boolean: requestedMapFound is FALSE;
+    var integer: soundAssets is 0;
+    var integer: soundShaderFiles is 0;
+    var integer: soundShaderDecls is 0;
+    var integer: soundShaderSampleRefs is 0;
+    var integer: resolvedSoundShaderSamples is 0;
+    var integer: missingSoundShaderSamples is 0;
+    var integer: entityDefs is 0;
+    var integer: entityDefSoundRefs is 0;
+    var integer: resolvedEntityDefSoundRefs is 0;
+    var integer: missingEntityDefSoundRefs is 0;
+    var integer: mapEntities is 0;
+    var integer: mapSoundRefs is 0;
+    var integer: resolvedMapSoundRefs is 0;
+    var integer: missingMapSoundRefs is 0;
+    var integer: runtimeSoundEvents is 0;
+    var integer: runtimeShaderEvents is 0;
+    var integer: runtimeDirectSampleEvents is 0;
+    var string: firstSoundAsset is "";
+    var string: firstSoundShaderFile is "";
+    var string: firstSoundShader is "";
+    var string: firstSoundShaderSample is "";
+    var string: firstEntityDefSoundRef is "";
+    var string: firstMapSoundRef is "";
+    var string: firstMissingSoundRef is "";
+    var string: firstRuntimeSoundEvent is "";
+    var array string: soundAssetStems is 0 times "";
+    var array string: soundShaderNames is 0 times "";
+    var array string: soundShaderSampleStems is 0 times "";
+  end struct;
+
+const proc: logInfo (in string: msg) is func
+  begin
+    writeln("[sound] " <& msg);
+  end func;
+
+const proc: logError (in string: msg) is func
+  begin
+    writeln("[sound-error] " <& msg);
+  end func;
+
+const func string: joinPath (in string: leftPath, in string: rightPath) is func
+  result
+    var string: joined is "";
+  begin
+    if leftPath = "" then
+      joined := rightPath;
+    elsif endsWith(leftPath, "/") or endsWith(leftPath, "\\") then
+      joined := leftPath <& rightPath;
+    else
+      joined := leftPath <& "/" <& rightPath;
+    end if;
+  end func;
+
+const func boolean: isPk4Name (in string: fileName) is
+    return endsWith(lower(fileName), ".pk4");
+
+const func string: normalizedAssetPath (in string: filePath) is
+    return replace(lower(filePath), "\\", "/");
+
+const func string: assetStem (in string: filePath) is func
+  result
+    var string: stem is "";
+  local
+    var string: path is "";
+    var integer: dotPos is 0;
+  begin
+    path := normalizedAssetPath(filePath);
+    dotPos := rpos(path, ".");
+    if dotPos <> 0 then
+      stem := path[.. pred(dotPos)];
+    else
+      stem := path;
+    end if;
+  end func;
+
+const func string: mapNameToAssetPath (in string: mapName) is func
+  result
+    var string: assetPath is "";
+  begin
+    assetPath := normalizedAssetPath(mapName);
+    if not startsWith(assetPath, "maps/") then
+      assetPath := "maps/" <& assetPath;
+    end if;
+    if not endsWith(assetPath, ".map") then
+      assetPath &:= ".map";
+    end if;
+  end func;
+
+const func boolean: isSoundAssetPath (in string: path) is func
+  result
+    var boolean: isSound is FALSE;
+  local
+    var string: lowerPath is "";
+  begin
+    lowerPath := normalizedAssetPath(path);
+    isSound := startsWith(lowerPath, "sound/") and
+        (endsWith(lowerPath, ".wav") or endsWith(lowerPath, ".ogg"));
+  end func;
+
+const func boolean: isSoundShaderPath (in string: path) is func
+  result
+    var boolean: isShader is FALSE;
+  local
+    var string: lowerPath is "";
+  begin
+    lowerPath := normalizedAssetPath(path);
+    isShader := endsWith(lowerPath, ".sndshd") or
+        endsWith(lowerPath, ".sound") or endsWith(lowerPath, ".decl");
+  end func;
+
+const func boolean: containsString (in array string: values,
+    in string: value) is func
+  result
+    var boolean: found is FALSE;
+  local
+    var string: current is "";
+  begin
+    for current range values do
+      if current = value then
+        found := TRUE;
+      end if;
+    end for;
+  end func;
+
+const proc: appendUnique (inout array string: values, in string: value) is func
+  begin
+    if value <> "" and not containsString(values, value) then
+      values &:= value;
+    end if;
+  end func;
+
+const func string: cleanedToken (in string: token) is func
+  result
+    var string: clean is "";
+  local
+    var integer: idx is 1;
+    var char: ch is ' ';
+  begin
+    clean := token;
+    while idx <= length(clean) do
+      ch := clean[idx];
+      if ch = '"' or ch = '(' or ch = ')' or ch = '{' or ch = '}' or
+          ch = ',' or ch = ';' then
+        clean := clean[.. pred(idx)] & clean[succ(idx) ..];
+      else
+        incr(idx);
+      end if;
+    end while;
+  end func;
+
+const func integer: matchingBlockEnd (in string: content,
+    in integer: blockStart) is func
+  result
+    var integer: blockEnd is 0;
+  local
+    var integer: idx is 0;
+    var integer: depth is 0;
+  begin
+    if blockStart <> 0 then
+      idx := blockStart;
+      while idx <= length(content) and blockEnd = 0 do
+        if content[idx] = '{' then
+          incr(depth);
+        elsif content[idx] = '}' then
+          decr(depth);
+          if depth = 0 then
+            blockEnd := idx;
+          end if;
+        end if;
+        incr(idx);
+      end while;
+    end if;
+  end func;
+
+const func string: declNameBeforeBlock (in string: content,
+    in integer: blockStart) is func
+  result
+    var string: declName is "";
+  local
+    var integer: idx is 0;
+    var integer: endPos is 0;
+    var integer: startPos is 0;
+  begin
+    idx := pred(blockStart);
+    while idx >= 1 and
+        (content[idx] = ' ' or content[idx] = '\t' or
+        content[idx] = '\n' or content[idx] = '\r') do
+      decr(idx);
+    end while;
+    endPos := idx;
+    while idx >= 1 and content[idx] <> ' ' and content[idx] <> '\t' and
+        content[idx] <> '\n' and content[idx] <> '\r' and
+        content[idx] <> '{' and content[idx] <> '}' do
+      decr(idx);
+    end while;
+    startPos := succ(idx);
+    if startPos <= endPos then
+      declName := lower(cleanedToken(content[startPos .. endPos]));
+    end if;
+  end func;
+
+const func string: quotedValueAfter (in string: content, in string: keyName) is func
+  result
+    var string: value is "";
+  local
+    var string: keyText is "";
+    var integer: keyPos is 0;
+    var integer: keyEnd is 0;
+    var integer: valueStart is 0;
+    var integer: valueEnd is 0;
+  begin
+    keyText := "\"" <& keyName <& "\"";
+    keyPos := pos(lower(content), lower(keyText), 1);
+    if keyPos <> 0 then
+      keyEnd := pos(content, "\"", succ(keyPos));
+      if keyEnd <> 0 then
+        valueStart := pos(content, "\"", succ(keyEnd));
+        if valueStart <> 0 then
+          valueEnd := pos(content, "\"", succ(valueStart));
+          if valueEnd <> 0 then
+            value := content[succ(valueStart) .. pred(valueEnd)];
+          end if;
+        end if;
+      end if;
+    end if;
+  end func;
+
+const func string: firstSoundSpawnargValue (in string: blockText) is func
+  result
+    var string: value is "";
+  local
+    var integer: searchPos is 1;
+    var integer: keyPos is 0;
+    var integer: keyEnd is 0;
+    var integer: valueStart is 0;
+    var integer: valueEnd is 0;
+    var string: lowerBlock is "";
+  begin
+    lowerBlock := lower(blockText);
+    keyPos := pos(lowerBlock, "\"snd_", searchPos);
+    if keyPos <> 0 then
+      keyEnd := pos(blockText, "\"", keyPos + 1);
+      if keyEnd <> 0 then
+        valueStart := pos(blockText, "\"", succ(keyEnd));
+        if valueStart <> 0 then
+          valueEnd := pos(blockText, "\"", succ(valueStart));
+          if valueEnd <> 0 then
+            value := blockText[succ(valueStart) .. pred(valueEnd)];
+          end if;
+        end if;
+      end if;
+    end if;
+  end func;
+
+const func boolean: soundRefResolved (in soundStats: stats,
+    in string: soundRef) is func
+  result
+    var boolean: resolved is FALSE;
+  local
+    var string: refLower is "";
+  begin
+    refLower := assetStem(soundRef);
+    resolved := containsString(stats.soundAssetStems, refLower) or
+        containsString(stats.soundShaderNames, lower(soundRef));
+  end func;
+
+const proc: inspectSoundRef (inout soundStats: stats,
+    in string: soundRef, in boolean: fromMap) is func
+  begin
+    if soundRef <> "" then
+      if fromMap then
+        stats.mapSoundRefs +:= 1;
+        if stats.firstMapSoundRef = "" then
+          stats.firstMapSoundRef := soundRef;
+        end if;
+      else
+        stats.entityDefSoundRefs +:= 1;
+        if stats.firstEntityDefSoundRef = "" then
+          stats.firstEntityDefSoundRef := soundRef;
+        end if;
+      end if;
+      if soundRefResolved(stats, soundRef) then
+        if fromMap then
+          stats.resolvedMapSoundRefs +:= 1;
+        else
+          stats.resolvedEntityDefSoundRefs +:= 1;
+        end if;
+      else
+        if fromMap then
+          stats.missingMapSoundRefs +:= 1;
+        else
+          stats.missingEntityDefSoundRefs +:= 1;
+        end if;
+        if stats.firstMissingSoundRef = "" then
+          stats.firstMissingSoundRef := soundRef;
+        end if;
+      end if;
+    end if;
+  end func;
+
+const proc: inspectSoundShaderText (inout soundStats: stats,
+    in string: path, in string: content) is func
+  local
+    var integer: searchPos is 1;
+    var integer: blockStart is 0;
+    var integer: blockEnd is 0;
+    var string: blockText is "";
+    var string: shaderName is "";
+    var string: normalizedText is "";
+    var array string: tokens is 0 times "";
+    var string: token is "";
+    var string: sampleStem is "";
+  begin
+    stats.soundShaderFiles +:= 1;
+    if stats.firstSoundShaderFile = "" then
+      stats.firstSoundShaderFile := normalizedAssetPath(path);
+    end if;
+    blockStart := pos(content, "{", searchPos);
+    while blockStart <> 0 do
+      blockEnd := matchingBlockEnd(content, blockStart);
+      if blockEnd <> 0 then
+        shaderName := declNameBeforeBlock(content, blockStart);
+        if shaderName <> "" and not containsString(stats.soundShaderNames,
+            shaderName) then
+          stats.soundShaderDecls +:= 1;
+          appendUnique(stats.soundShaderNames, shaderName);
+          if stats.firstSoundShader = "" then
+            stats.firstSoundShader := shaderName;
+          end if;
+        end if;
+        blockText := content[blockStart .. blockEnd];
+        normalizedText := replace(blockText, "\n", " ");
+        normalizedText := replace(normalizedText, "\r", " ");
+        normalizedText := replace(normalizedText, "\t", " ");
+        tokens := noEmptyStrings(split(normalizedText, ' '));
+        for token range tokens do
+          token := cleanedToken(token);
+          if isSoundAssetPath(token) then
+            stats.soundShaderSampleRefs +:= 1;
+            sampleStem := assetStem(token);
+            appendUnique(stats.soundShaderSampleStems, sampleStem);
+            if stats.firstSoundShaderSample = "" then
+              stats.firstSoundShaderSample := normalizedAssetPath(token);
+            end if;
+            if containsString(stats.soundAssetStems, sampleStem) then
+              stats.resolvedSoundShaderSamples +:= 1;
+            else
+              stats.missingSoundShaderSamples +:= 1;
+              if stats.firstMissingSoundRef = "" then
+                stats.firstMissingSoundRef := token;
+              end if;
+            end if;
+          end if;
+        end for;
+        searchPos := succ(blockEnd);
+      else
+        searchPos := succ(blockStart);
+      end if;
+      blockStart := pos(content, "{", searchPos);
+    end while;
+  end func;
+
+const proc: inspectDefText (inout soundStats: stats,
+    in string: content) is func
+  local
+    var string: contentLower is "";
+    var integer: searchPos is 1;
+    var integer: defPos is 0;
+    var integer: blockStart is 0;
+    var integer: blockEnd is 0;
+    var string: soundRef is "";
+  begin
+    contentLower := lower(content);
+    defPos := pos(contentLower, "entitydef ", searchPos);
+    while defPos <> 0 do
+      stats.entityDefs +:= 1;
+      blockStart := pos(content, "{", defPos);
+      blockEnd := matchingBlockEnd(content, blockStart);
+      if blockStart <> 0 and blockEnd <> 0 then
+        soundRef := firstSoundSpawnargValue(content[blockStart .. blockEnd]);
+        inspectSoundRef(stats, soundRef, FALSE);
+      end if;
+      searchPos := defPos + length("entitydef ");
+      defPos := pos(contentLower, "entitydef ", searchPos);
+    end while;
+  end func;
+
+const proc: inspectMapText (inout soundStats: stats,
+    in string: content) is func
+  local
+    var integer: searchPos is 1;
+    var integer: blockStart is 0;
+    var integer: blockEnd is 0;
+    var string: soundRef is "";
+    var string: name is "";
+  begin
+    blockStart := pos(content, "{", searchPos);
+    while blockStart <> 0 do
+      blockEnd := matchingBlockEnd(content, blockStart);
+      if blockEnd <> 0 then
+        stats.mapEntities +:= 1;
+        soundRef := firstSoundSpawnargValue(content[blockStart .. blockEnd]);
+        inspectSoundRef(stats, soundRef, TRUE);
+        if soundRef <> "" and soundRefResolved(stats, soundRef) then
+          stats.runtimeSoundEvents +:= 1;
+          if containsString(stats.soundShaderNames, lower(soundRef)) then
+            stats.runtimeShaderEvents +:= 1;
+          else
+            stats.runtimeDirectSampleEvents +:= 1;
+          end if;
+          if stats.firstRuntimeSoundEvent = "" then
+            name := quotedValueAfter(content[blockStart .. blockEnd], "name");
+            if name <> "" then
+              stats.firstRuntimeSoundEvent := name <& "=" <& soundRef;
+            else
+              stats.firstRuntimeSoundEvent := soundRef;
+            end if;
+          end if;
+        end if;
+        searchPos := succ(blockEnd);
+      else
+        searchPos := succ(blockStart);
+      end if;
+      blockStart := pos(content, "{", searchPos);
+    end while;
+  end func;
+
+const func array string: findPk4Archives (in string: basePath) is func
+  result
+    var array string: pk4Files is 0 times "";
+  local
+    var array string: names is 0 times "";
+    var string: name is "";
+  begin
+    if fileType(basePath) = FILE_DIR then
+      names := readDir(basePath);
+      for name range names do
+        if isPk4Name(name) and fileType(joinPath(basePath, name)) = FILE_REGULAR then
+          pk4Files &:= joinPath(basePath, name);
+        end if;
+      end for;
+    end if;
+  end func;
+
+const proc: scanArchive (inout soundStats: stats,
+    in string: pk4File, in string: requestedMapPath) is func
+  local
+    var fileSys: zipFs is fileSys.value;
+    var array string: paths is 0 times "";
+    var string: path is "";
+    var string: pathLower is "";
+  begin
+    zipFs := openZip(pk4File);
+    if zipFs = fileSys.value then
+      logError("could not open pk4 archive: " <& pk4File);
+    else
+      paths := readDir(zipFs, RECURSIVE);
+      for path range paths do
+        pathLower := normalizedAssetPath(path);
+        if isSoundAssetPath(pathLower) then
+          stats.soundAssets +:= 1;
+          appendUnique(stats.soundAssetStems, assetStem(pathLower));
+          if stats.firstSoundAsset = "" then
+            stats.firstSoundAsset := pathLower;
+          end if;
+        end if;
+      end for;
+      for path range paths do
+        pathLower := normalizedAssetPath(path);
+        if isSoundShaderPath(pathLower) then
+          inspectSoundShaderText(stats, path, getFile(zipFs, path));
+        end if;
+      end for;
+      for path range paths do
+        pathLower := normalizedAssetPath(path);
+        if endsWith(pathLower, ".def") then
+          inspectDefText(stats, getFile(zipFs, path));
+        elsif pathLower = requestedMapPath then
+          stats.requestedMapFound := TRUE;
+          inspectMapText(stats, getFile(zipFs, path));
+        end if;
+      end for;
+      close(zipFs);
+    end if;
+  end func;
+
+const proc: parseArgs (inout soundConfig: config) is func
+  local
+    var array string: args is 0 times "";
+    var integer: argIdx is 1;
+  begin
+    args := argv(PROGRAM);
+    while argIdx <= length(args) do
+      if args[argIdx] = "--help" or args[argIdx] = "-h" then
+        config.showHelp := TRUE;
+      elsif args[argIdx] = "--doom3_data_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.dataPath := convDosPath(args[argIdx]);
+      elsif args[argIdx] = "--doom3_base_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.basePath := convDosPath(args[argIdx]);
+      elsif args[argIdx] = "--doom3_start_map" and argIdx < length(args) then
+        incr(argIdx);
+        config.startMap := args[argIdx];
+      elsif args[argIdx] = "+map" and argIdx < length(args) then
+        incr(argIdx);
+        config.startMap := args[argIdx];
+      elsif args[argIdx] = "+set" and argIdx + 2 <= length(args) then
+        if args[argIdx + 1] = "fs_basepath" then
+          config.dataPath := convDosPath(args[argIdx + 2]);
+        elsif args[argIdx + 1] = "fs_game" then
+          config.basePath := convDosPath(args[argIdx + 2]);
+        end if;
+        argIdx +:= 2;
+      end if;
+      incr(argIdx);
+    end while;
+    if config.basePath = "" then
+      config.basePath := joinPath(config.dataPath, DEFAULT_BASE_DIR);
+    end if;
+  end func;
+
+const proc: showUsage is func
+  begin
+    writeln("Usage:");
+    writeln("  s7 doom3_seed7_sound.s7 --doom3_data_path <doom3-root>");
+    writeln("  s7 doom3_seed7_sound.s7 +set fs_basepath <doom3-root> +map <map>");
+    writeln("");
+    writeln("Scans user-owned Doom 3 pk4 files for sound subsystem readiness.");
+  end func;
+
+const proc: printStats (in soundStats: stats) is func
+  begin
+    logInfo("pk4_archives=" <& stats.pk4Archives);
+    logInfo("requested_map=" <& stats.requestedMapPath);
+    logInfo("requested_map_found=" <& stats.requestedMapFound);
+    logInfo("sound_assets=" <& stats.soundAssets <&
+        " unique=" <& length(stats.soundAssetStems));
+    logInfo("sound_shader_files=" <& stats.soundShaderFiles <&
+        " decls=" <& stats.soundShaderDecls);
+    logInfo("sound_shader_samples refs=" <& stats.soundShaderSampleRefs <&
+        " resolved=" <& stats.resolvedSoundShaderSamples <&
+        " missing=" <& stats.missingSoundShaderSamples);
+    logInfo("entity_defs=" <& stats.entityDefs <&
+        " sound_refs=" <& stats.entityDefSoundRefs);
+    logInfo("entity_sound_resolution resolved=" <&
+        stats.resolvedEntityDefSoundRefs <& " missing=" <&
+        stats.missingEntityDefSoundRefs);
+    logInfo("map_entities=" <& stats.mapEntities <&
+        " sound_refs=" <& stats.mapSoundRefs);
+    logInfo("map_sound_resolution resolved=" <& stats.resolvedMapSoundRefs <&
+        " missing=" <& stats.missingMapSoundRefs);
+    logInfo("runtime_sound_events=" <& stats.runtimeSoundEvents <&
+        " shader=" <& stats.runtimeShaderEvents <&
+        " direct_sample=" <& stats.runtimeDirectSampleEvents);
+    if stats.firstSoundAsset <> "" then
+      logInfo("first_sound_asset=" <& stats.firstSoundAsset);
+    end if;
+    if stats.firstSoundShaderFile <> "" then
+      logInfo("first_sound_shader_file=" <& stats.firstSoundShaderFile);
+    end if;
+    if stats.firstSoundShader <> "" then
+      logInfo("first_sound_shader=" <& stats.firstSoundShader);
+    end if;
+    if stats.firstSoundShaderSample <> "" then
+      logInfo("first_sound_shader_sample=" <& stats.firstSoundShaderSample);
+    end if;
+    if stats.firstEntityDefSoundRef <> "" then
+      logInfo("first_entity_sound_ref=" <& stats.firstEntityDefSoundRef);
+    end if;
+    if stats.firstMapSoundRef <> "" then
+      logInfo("first_map_sound_ref=" <& stats.firstMapSoundRef);
+    end if;
+    if stats.firstRuntimeSoundEvent <> "" then
+      logInfo("first_runtime_sound_event=" <& stats.firstRuntimeSoundEvent);
+    end if;
+    if stats.firstMissingSoundRef <> "" then
+      logInfo("first_missing_sound_ref=" <& stats.firstMissingSoundRef);
+    end if;
+    logInfo("sound_probe_ready=" <& (stats.soundAssets <> 0 and
+        stats.soundShaderDecls <> 0 and
+        stats.resolvedSoundShaderSamples <> 0 and
+        stats.resolvedEntityDefSoundRefs <> 0 and
+        stats.resolvedMapSoundRefs <> 0 and
+        stats.runtimeSoundEvents <> 0));
+  end func;
+
+const proc: main is func
+  local
+    var soundConfig: config is soundConfig.value;
+    var soundStats: stats is soundStats.value;
+    var array string: pk4Files is 0 times "";
+    var string: pk4File is "";
+  begin
+    parseArgs(config);
+    if config.showHelp then
+      showUsage;
+    else
+      stats.requestedMapPath := mapNameToAssetPath(config.startMap);
+      if fileType(config.basePath) <> FILE_DIR then
+        logError("Doom 3 base directory not found: " <& config.basePath);
+      else
+        pk4Files := sort(findPk4Archives(config.basePath));
+        stats.pk4Archives := length(pk4Files);
+        if length(pk4Files) = 0 then
+          logError("No .pk4 archives found in: " <& config.basePath);
+        else
+          for pk4File range pk4Files do
+            scanArchive(stats, pk4File, stats.requestedMapPath);
+          end for;
+          printStats(stats);
+        end if;
+      end if;
+    end if;
+  end func;

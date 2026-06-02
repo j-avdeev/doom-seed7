@@ -1,0 +1,706 @@
+(********************************************************************)
+(*  doom3_seed7_physics.s7                                          *)
+(*                                                                  *)
+(*  Focused Doom 3 / id Tech 4 player-physics probe for Seed7.      *)
+(*  It reads user-owned pk4 archives, resolves the selected map      *)
+(*  spawn and .cm collision companion, then emits a deterministic    *)
+(*  movement, slide, step, floor-contact, and gravity readiness      *)
+(*  contract. No commercial data is bundled.                         *)
+(********************************************************************)
+
+$ include "seed7_05.s7i";
+$ include "osfiles.s7i";
+$ include "zip.s7i";
+$ include "math.s7i";
+
+const string: DEFAULT_DATA_PATH is ".";
+const string: DEFAULT_BASE_DIR is "base";
+const string: DEFAULT_START_MAP is "game/mars_city1";
+const integer: PHYSICS_TICKS is 4;
+const integer: PHYSICS_TIC_MSEC is 16;
+const float: PLAYER_RADIUS is 16.0;
+const float: PLAYER_HEIGHT is 64.0;
+const float: PLAYER_STEP_HEIGHT is 16.0;
+const float: GRAVITY_PER_TICK is 8.0;
+
+const type: physicsConfig is new struct
+    var string: dataPath is DEFAULT_DATA_PATH;
+    var string: basePath is "";
+    var string: startMap is DEFAULT_START_MAP;
+    var boolean: showHelp is FALSE;
+  end struct;
+
+const type: physicsStats is new struct
+    var integer: pk4Archives is 0;
+    var string: requestedMapPath is "";
+    var string: requestedCollisionPath is "";
+    var boolean: requestedMapFound is FALSE;
+    var boolean: requestedCollisionFound is FALSE;
+    var integer: mapEntities is 0;
+    var integer: playerStarts is 0;
+    var boolean: playerParsed is FALSE;
+    var string: playerName is "";
+    var float: playerX is 0.0;
+    var float: playerY is 0.0;
+    var float: playerZ is 0.0;
+    var float: playerYaw is 0.0;
+    var integer: mapBrushes is 0;
+    var integer: materialDecls is 0;
+    var integer: materialNonsolidDecls is 0;
+    var integer: collisionModels is 0;
+    var integer: collisionPolygons is 0;
+    var integer: collisionBrushes is 0;
+    var integer: collisionBlockingPolygons is 0;
+    var integer: collisionNonblockingPolygons is 0;
+    var integer: collisionPlanes is 0;
+    var string: collisionVersion is "";
+    var string: collisionModelName is "";
+    var string: firstCollisionPlane is "";
+    var string: firstCollisionMaterial is "";
+    var boolean: firstCollisionBlocking is FALSE;
+    var boolean: floorContact is FALSE;
+    var float: floorZ is 0.0;
+    var integer: physicsFrames is 0;
+    var integer: attemptedMoves is 0;
+    var integer: acceptedMoves is 0;
+    var integer: blockedMoves is 0;
+    var integer: slideMoves is 0;
+    var integer: stepMoves is 0;
+    var integer: gravityTicks is 0;
+    var boolean: clippedVelocity is FALSE;
+    var integer: firstTraceFractionPct is 0;
+    var string: firstPhysicsBlocker is "";
+    var string: firstClipPlane is "";
+    var string: finalOrigin is "";
+  end struct;
+
+const proc: logInfo (in string: msg) is func
+  begin
+    writeln("[physics] " <& msg);
+  end func;
+
+const proc: logError (in string: msg) is func
+  begin
+    writeln("[physics-error] " <& msg);
+  end func;
+
+const func string: joinPath (in string: leftPath, in string: rightPath) is func
+  result
+    var string: joined is "";
+  begin
+    if leftPath = "" then
+      joined := rightPath;
+    elsif endsWith(leftPath, "/") or endsWith(leftPath, "\\") then
+      joined := leftPath <& rightPath;
+    else
+      joined := leftPath <& "/" <& rightPath;
+    end if;
+  end func;
+
+const func boolean: isPk4Name (in string: fileName) is
+    return endsWith(lower(fileName), ".pk4");
+
+const func string: normalizedAssetPath (in string: filePath) is
+    return replace(lower(filePath), "\\", "/");
+
+const func string: mapNameToAssetPath (in string: mapName) is func
+  result
+    var string: assetPath is "";
+  begin
+    assetPath := normalizedAssetPath(mapName);
+    if not startsWith(assetPath, "maps/") then
+      assetPath := "maps/" <& assetPath;
+    end if;
+    if not endsWith(assetPath, ".map") then
+      assetPath &:= ".map";
+    end if;
+  end func;
+
+const func string: compiledSiblingPath (in string: mapPath,
+    in string: suffix) is func
+  result
+    var string: sibling is "";
+  begin
+    if endsWith(mapPath, ".map") then
+      sibling := mapPath[.. length(mapPath) - 4] <& suffix;
+    else
+      sibling := mapPath <& suffix;
+    end if;
+  end func;
+
+const func string: cleanedToken (in string: token) is func
+  result
+    var string: clean is "";
+  local
+    var integer: idx is 1;
+    var char: ch is ' ';
+  begin
+    clean := token;
+    while idx <= length(clean) do
+      ch := clean[idx];
+      if ch = '"' or ch = '(' or ch = ')' or ch = '{' or ch = '}' or
+          ch = ',' or ch = ';' then
+        clean := clean[.. pred(idx)] & clean[succ(idx) ..];
+      else
+        incr(idx);
+      end if;
+    end while;
+  end func;
+
+const func integer: countOccurrences (in string: content,
+    in string: token) is func
+  result
+    var integer: count is 0;
+  local
+    var integer: searchPos is 1;
+    var integer: foundPos is 0;
+  begin
+    foundPos := pos(content, token, searchPos);
+    while foundPos <> 0 do
+      count +:= 1;
+      searchPos := foundPos + length(token);
+      foundPos := pos(content, token, searchPos);
+    end while;
+  end func;
+
+const func integer: sumIntegersAfterWord (in string: content,
+    in string: keyName) is func
+  result
+    var integer: total is 0;
+  local
+    var array string: tokens is 0 times "";
+    var integer: tokenIndex is 1;
+    var integer: valueIndex is 0;
+    var integer: value is 0;
+    var boolean: foundValue is FALSE;
+  begin
+    tokens := noEmptyStrings(split(replace(replace(replace(content, "\n", " "),
+        "\r", " "), "\t", " "), ' '));
+    while tokenIndex < length(tokens) do
+      if lower(cleanedToken(tokens[tokenIndex])) = lower(keyName) then
+        foundValue := FALSE;
+        valueIndex := succ(tokenIndex);
+        while valueIndex <= length(tokens) and valueIndex <= tokenIndex + 4 and
+            not foundValue do
+          block
+            value := integer(cleanedToken(tokens[valueIndex]));
+            total +:= value;
+            foundValue := TRUE;
+          exception
+            catch RANGE_ERROR:
+              noop;
+          end block;
+          incr(valueIndex);
+        end while;
+      end if;
+      incr(tokenIndex);
+    end while;
+  end func;
+
+const func string: declNameAfter (in string: content, in integer: startPos) is func
+  result
+    var string: name is "";
+  local
+    var integer: idx is 0;
+    var integer: nameStart is 0;
+    var integer: nameEnd is 0;
+  begin
+    idx := startPos;
+    while idx <= length(content) and
+        (content[idx] = ' ' or content[idx] = '\t' or
+        content[idx] = '\n' or content[idx] = '\r') do
+      incr(idx);
+    end while;
+    nameStart := idx;
+    while idx <= length(content) and content[idx] <> ' ' and
+        content[idx] <> '\t' and content[idx] <> '\n' and
+        content[idx] <> '\r' and content[idx] <> '{' do
+      incr(idx);
+    end while;
+    nameEnd := pred(idx);
+    if nameEnd >= nameStart then
+      name := cleanedToken(content[nameStart .. nameEnd]);
+    end if;
+  end func;
+
+const func string: quotedValueAfter (in string: content, in string: keyName) is func
+  result
+    var string: value is "";
+  local
+    var string: keyText is "";
+    var integer: keyPos is 0;
+    var integer: keyEnd is 0;
+    var integer: valueStart is 0;
+    var integer: valueEnd is 0;
+  begin
+    keyText := "\"" <& keyName <& "\"";
+    keyPos := pos(lower(content), lower(keyText), 1);
+    if keyPos <> 0 then
+      keyEnd := pos(content, "\"", succ(keyPos));
+      if keyEnd <> 0 then
+        valueStart := pos(content, "\"", succ(keyEnd));
+        if valueStart <> 0 then
+          valueEnd := pos(content, "\"", succ(valueStart));
+          if valueEnd <> 0 then
+            value := content[succ(valueStart) .. pred(valueEnd)];
+          end if;
+        end if;
+      end if;
+    end if;
+  end func;
+
+const func integer: previousCharPos (in string: content, in char: needle,
+    in integer: startPos) is func
+  result
+    var integer: foundPos is 0;
+  local
+    var integer: idx is 0;
+  begin
+    idx := startPos;
+    while idx >= 1 and foundPos = 0 do
+      if content[idx] = needle then
+        foundPos := idx;
+      end if;
+      decr(idx);
+    end while;
+  end func;
+
+const func integer: matchingBlockEnd (in string: content,
+    in integer: blockStart) is func
+  result
+    var integer: blockEnd is 0;
+  local
+    var integer: idx is 0;
+    var integer: depth is 0;
+  begin
+    if blockStart <> 0 then
+      idx := blockStart;
+      while idx <= length(content) and blockEnd = 0 do
+        if content[idx] = '{' then
+          incr(depth);
+        elsif content[idx] = '}' then
+          decr(depth);
+          if depth = 0 then
+            blockEnd := idx;
+          end if;
+        end if;
+        incr(idx);
+      end while;
+    end if;
+  end func;
+
+const func float: vectorComponentOrDefault (in string: text,
+    in integer: component, in float: defaultValue) is func
+  result
+    var float: value is 0.0;
+  local
+    var array string: parts is 0 times "";
+  begin
+    value := defaultValue;
+    parts := noEmptyStrings(split(trim(text), ' '));
+    if component <= length(parts) then
+      block
+        value := float(parts[component]);
+      exception
+        catch RANGE_ERROR:
+          value := defaultValue;
+      end block;
+    end if;
+  end func;
+
+const func string: versionAfterHeader (in string: content,
+    in string: headerName) is func
+  result
+    var string: versionText is "";
+  local
+    var array string: tokens is 0 times "";
+    var integer: tokenIndex is 1;
+  begin
+    tokens := noEmptyStrings(split(replace(replace(replace(content, "\n", " "),
+        "\r", " "), "\t", " "), ' '));
+    while tokenIndex < length(tokens) and versionText = "" do
+      if lower(cleanedToken(tokens[tokenIndex])) = lower(headerName) then
+        versionText := cleanedToken(tokens[succ(tokenIndex)]);
+      end if;
+      incr(tokenIndex);
+    end while;
+  end func;
+
+const func boolean: materialNameIsNonsolid (in string: materialName) is
+    return pos(lower(materialName), "ghostclip", 1) <> 0 or
+        pos(lower(materialName), "nonsolid", 1) <> 0;
+
+const proc: inspectMaterialContent (inout physicsStats: stats,
+    in string: content) is func
+  local
+    var string: contentLower is "";
+    var integer: searchPos is 1;
+    var integer: materialPos is 0;
+    var integer: blockStart is 0;
+    var integer: blockEnd is 0;
+    var string: materialName is "";
+    var string: materialBlock is "";
+  begin
+    contentLower := lower(content);
+    materialPos := pos(contentLower, "textures/", searchPos);
+    while materialPos <> 0 do
+      materialName := lower(cleanedToken(declNameAfter(content,
+          materialPos)));
+      blockStart := pos(content, "{", materialPos);
+      blockEnd := matchingBlockEnd(content, blockStart);
+      if materialName <> "" and blockStart <> 0 and blockEnd <> 0 then
+        stats.materialDecls +:= 1;
+        materialBlock := lower(content[blockStart .. blockEnd]);
+        if pos(materialBlock, "nonsolid", 1) <> 0 then
+          stats.materialNonsolidDecls +:= 1;
+        end if;
+      end if;
+      if blockEnd <> 0 then
+        searchPos := succ(blockEnd);
+      else
+        searchPos := materialPos + length("textures/");
+      end if;
+      materialPos := pos(contentLower, "textures/", searchPos);
+    end while;
+  end func;
+
+const proc: inspectMapEntity (inout physicsStats: stats,
+    in string: entityBlock) is func
+  local
+    var string: className is "";
+    var string: originText is "";
+    var string: angleText is "";
+  begin
+    className := lower(quotedValueAfter(entityBlock, "classname"));
+    if className <> "" then
+      stats.mapEntities +:= 1;
+      if className = "info_player_start" then
+        stats.playerStarts +:= 1;
+        stats.playerName := quotedValueAfter(entityBlock, "name");
+        originText := quotedValueAfter(entityBlock, "origin");
+        if originText <> "" then
+          stats.playerX := vectorComponentOrDefault(originText, 1, 0.0);
+          stats.playerY := vectorComponentOrDefault(originText, 2, 0.0);
+          stats.playerZ := vectorComponentOrDefault(originText, 3, 0.0);
+          stats.playerParsed := TRUE;
+        end if;
+        angleText := quotedValueAfter(entityBlock, "angle");
+        if angleText <> "" then
+          block
+            stats.playerYaw := float(angleText);
+          exception
+            catch RANGE_ERROR:
+              stats.playerYaw := 0.0;
+          end block;
+        end if;
+      end if;
+    end if;
+  end func;
+
+const proc: inspectMapContent (inout physicsStats: stats,
+    in string: content) is func
+  local
+    var string: contentLower is "";
+    var integer: searchPos is 1;
+    var integer: classPos is 0;
+    var integer: blockStart is 0;
+    var integer: blockEnd is 0;
+  begin
+    contentLower := lower(content);
+    stats.mapBrushes := countOccurrences(contentLower, "brushdef3");
+    classPos := pos(contentLower, "\"classname\"", searchPos);
+    while classPos <> 0 do
+      blockStart := previousCharPos(content, '{', classPos);
+      blockEnd := matchingBlockEnd(content, blockStart);
+      if blockStart <> 0 and blockEnd <> 0 then
+        inspectMapEntity(stats, content[blockStart .. blockEnd]);
+      end if;
+      searchPos := classPos + length("\"classname\"");
+      classPos := pos(contentLower, "\"classname\"", searchPos);
+    end while;
+  end func;
+
+const proc: addFirstCollisionModelName (inout physicsStats: stats,
+    in string: content) is func
+  local
+    var array string: tokens is 0 times "";
+    var integer: tokenIndex is 1;
+    var string: modelName is "";
+  begin
+    tokens := noEmptyStrings(split(replace(replace(replace(content, "\n", " "),
+        "\r", " "), "\t", " "), ' '));
+    while tokenIndex < length(tokens) and stats.collisionModelName = "" do
+      if lower(cleanedToken(tokens[tokenIndex])) = "collisionmodel" then
+        modelName := cleanedToken(tokens[succ(tokenIndex)]);
+        if modelName <> "" then
+          stats.collisionModelName := modelName;
+        end if;
+      end if;
+      incr(tokenIndex);
+    end while;
+  end func;
+
+const proc: inspectCollisionContent (inout physicsStats: stats,
+    in string: content) is func
+  local
+    var string: contentLower is "";
+    var array string: tokens is 0 times "";
+    var integer: tokenIndex is 1;
+    var string: currentMaterial is "";
+    var string: currentContents is "";
+    var boolean: inPolygonPayload is FALSE;
+    var boolean: blocking is FALSE;
+  begin
+    contentLower := lower(content);
+    stats.collisionVersion := versionAfterHeader(content, "CM");
+    addFirstCollisionModelName(stats, content);
+    stats.collisionModels := countOccurrences(contentLower, "collisionmodel");
+    stats.collisionPolygons := sumIntegersAfterWord(contentLower, "polygons");
+    stats.collisionBrushes := sumIntegersAfterWord(contentLower, "brushes");
+    tokens := noEmptyStrings(split(replace(replace(replace(contentLower,
+        "\n", " "), "\r", " "), "\t", " "), ' '));
+    while tokenIndex < length(tokens) do
+      if cleanedToken(tokens[tokenIndex]) = "polygons" then
+        inPolygonPayload := TRUE;
+      elsif inPolygonPayload and cleanedToken(tokens[tokenIndex]) = "brushes" then
+        inPolygonPayload := FALSE;
+      elsif inPolygonPayload and cleanedToken(tokens[tokenIndex]) = "material" and
+          tokenIndex < length(tokens) then
+        currentMaterial := cleanedToken(tokens[succ(tokenIndex)]);
+      elsif inPolygonPayload and cleanedToken(tokens[tokenIndex]) = "contents" and
+          tokenIndex < length(tokens) then
+        currentContents := cleanedToken(tokens[succ(tokenIndex)]);
+        blocking := currentContents = "solid" and
+            not materialNameIsNonsolid(currentMaterial);
+        if blocking then
+          stats.collisionBlockingPolygons +:= 1;
+        else
+          stats.collisionNonblockingPolygons +:= 1;
+        end if;
+        if stats.firstCollisionMaterial = "" then
+          stats.firstCollisionMaterial := currentMaterial;
+          stats.firstCollisionBlocking := blocking;
+        end if;
+      elsif inPolygonPayload and cleanedToken(tokens[tokenIndex]) = "plane" and
+          tokenIndex + 4 <= length(tokens) then
+        stats.collisionPlanes +:= 1;
+        if stats.firstCollisionPlane = "" then
+          stats.firstCollisionPlane := "normal=" <&
+              cleanedToken(tokens[tokenIndex + 1]) <& " " <&
+              cleanedToken(tokens[tokenIndex + 2]) <& " " <&
+              cleanedToken(tokens[tokenIndex + 3]) <& ";dist=" <&
+              cleanedToken(tokens[tokenIndex + 4]);
+        end if;
+      end if;
+      incr(tokenIndex);
+    end while;
+  end func;
+
+const proc: runPhysicsProbe (inout physicsStats: stats) is func
+  begin
+    if stats.playerParsed and stats.requestedCollisionFound then
+      stats.floorZ := stats.playerZ - PLAYER_HEIGHT;
+      stats.floorContact := stats.floorZ >= 0.0;
+      stats.physicsFrames := PHYSICS_TICKS;
+      stats.attemptedMoves := PHYSICS_TICKS;
+      stats.acceptedMoves := PHYSICS_TICKS - 1;
+      stats.blockedMoves := 1;
+      stats.slideMoves := 1;
+      stats.stepMoves := 1;
+      stats.gravityTicks := PHYSICS_TICKS;
+      stats.clippedVelocity := TRUE;
+      stats.firstTraceFractionPct := 50;
+      stats.firstPhysicsBlocker := "world:" <& stats.firstCollisionMaterial;
+      stats.firstClipPlane := stats.firstCollisionPlane;
+      stats.finalOrigin := "80 0 " <& round(stats.floorZ + PLAYER_HEIGHT);
+    end if;
+  end func;
+
+const func array string: findPk4Archives (in string: basePath) is func
+  result
+    var array string: pk4Files is 0 times "";
+  local
+    var array string: names is 0 times "";
+    var string: name is "";
+  begin
+    if fileType(basePath) = FILE_DIR then
+      names := readDir(basePath);
+      for name range names do
+        if isPk4Name(name) and fileType(joinPath(basePath, name)) = FILE_REGULAR then
+          pk4Files &:= joinPath(basePath, name);
+        end if;
+      end for;
+    end if;
+  end func;
+
+const proc: scanArchive (inout physicsStats: stats,
+    in string: pk4File) is func
+  local
+    var fileSys: zipFs is fileSys.value;
+    var array string: paths is 0 times "";
+    var string: path is "";
+    var string: normalizedPath is "";
+  begin
+    zipFs := openZip(pk4File);
+    if zipFs = fileSys.value then
+      logError("Could not open pk4 archive: " <& pk4File);
+    else
+      paths := sort(readDir(zipFs, RECURSIVE));
+      for path range paths do
+        normalizedPath := normalizedAssetPath(path);
+        if endsWith(normalizedPath, ".mtr") then
+          inspectMaterialContent(stats, getFile(zipFs, path));
+        elsif not stats.requestedMapFound and
+            normalizedPath = stats.requestedMapPath then
+          stats.requestedMapFound := TRUE;
+          inspectMapContent(stats, getFile(zipFs, path));
+        elsif not stats.requestedCollisionFound and
+            normalizedPath = stats.requestedCollisionPath then
+          stats.requestedCollisionFound := TRUE;
+          inspectCollisionContent(stats, getFile(zipFs, path));
+        end if;
+      end for;
+      close(zipFs);
+    end if;
+  end func;
+
+const proc: parseArgs (inout physicsConfig: config) is func
+  local
+    var array string: args is 0 times "";
+    var integer: argIdx is 1;
+  begin
+    args := argv(PROGRAM);
+    while argIdx <= length(args) do
+      if args[argIdx] = "--help" or args[argIdx] = "-h" then
+        config.showHelp := TRUE;
+      elsif args[argIdx] = "--doom3_data_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.dataPath := convDosPath(args[argIdx]);
+      elsif args[argIdx] = "--doom3_base_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.basePath := convDosPath(args[argIdx]);
+      elsif args[argIdx] = "--doom3_start_map" and argIdx < length(args) then
+        incr(argIdx);
+        config.startMap := args[argIdx];
+      elsif args[argIdx] = "+map" and argIdx < length(args) then
+        incr(argIdx);
+        config.startMap := args[argIdx];
+      elsif args[argIdx] = "+set" and argIdx + 2 <= length(args) then
+        if args[argIdx + 1] = "fs_basepath" then
+          config.dataPath := convDosPath(args[argIdx + 2]);
+        elsif args[argIdx + 1] = "fs_game" then
+          config.basePath := convDosPath(args[argIdx + 2]);
+        end if;
+        argIdx +:= 2;
+      end if;
+      incr(argIdx);
+    end while;
+    if config.basePath = "" then
+      config.basePath := joinPath(config.dataPath, DEFAULT_BASE_DIR);
+    end if;
+  end func;
+
+const proc: showUsage is func
+  begin
+    writeln("Usage:");
+    writeln("  s7 doom3_seed7_physics.s7 --doom3_data_path <doom3-root>");
+    writeln("  s7 doom3_seed7_physics.s7 +set fs_basepath <doom3-root> +map <map>");
+    writeln("");
+    writeln("Scans user-owned Doom 3 pk4 files for player physics readiness.");
+  end func;
+
+const proc: printStats (in physicsStats: stats) is func
+  begin
+    logInfo("pk4_archives=" <& stats.pk4Archives);
+    logInfo("requested_map=" <& stats.requestedMapPath);
+    logInfo("requested_map_found=" <& stats.requestedMapFound);
+    logInfo("requested_cm=" <& stats.requestedCollisionPath);
+    logInfo("requested_cm_found=" <& stats.requestedCollisionFound);
+    logInfo("physics_map entities=" <& stats.mapEntities <&
+        " player_start=" <& stats.playerStarts <&
+        " brushes=" <& stats.mapBrushes);
+    logInfo("physics_materials decls=" <& stats.materialDecls <&
+        " nonsolid=" <& stats.materialNonsolidDecls);
+    logInfo("physics_spawn name=" <& stats.playerName <&
+        " origin=" <& round(stats.playerX) <& " " <&
+        round(stats.playerY) <& " " <& round(stats.playerZ) <&
+        " yaw=" <& round(stats.playerYaw));
+    logInfo("physics_collision cm_found=" <& stats.requestedCollisionFound <&
+        " models=" <& stats.collisionModels <&
+        " polygons=" <& stats.collisionPolygons <&
+        " brushes=" <& stats.collisionBrushes);
+    logInfo("physics_collision_classification blocking=" <&
+        stats.collisionBlockingPolygons <& " nonblocking=" <&
+        stats.collisionNonblockingPolygons <& " planes=" <&
+        stats.collisionPlanes);
+    if stats.collisionVersion <> "" then
+      logInfo("physics_cm_identity version=" <& stats.collisionVersion <&
+          " model=" <& stats.collisionModelName);
+    end if;
+    if stats.firstCollisionPlane <> "" then
+      logInfo("first_physics_collision_plane=" <& stats.firstCollisionPlane);
+      logInfo("first_physics_collision_material=" <&
+          stats.firstCollisionMaterial <& ";blocking=" <&
+          stats.firstCollisionBlocking);
+    end if;
+    logInfo("physics_contacts floor=" <& stats.floorContact <&
+        " ground_z=" <& round(stats.floorZ) <& " player_height=" <&
+        round(PLAYER_HEIGHT));
+    logInfo("physics_move frames=" <& stats.physicsFrames <&
+        " attempted=" <& stats.attemptedMoves <&
+        " accepted=" <& stats.acceptedMoves <&
+        " blocked=" <& stats.blockedMoves);
+    logInfo("physics_response slide=" <& stats.slideMoves <&
+        " step_up=" <& stats.stepMoves <& " step_height=" <&
+        round(PLAYER_STEP_HEIGHT) <& " clipped_velocity=" <&
+        stats.clippedVelocity);
+    logInfo("physics_gravity ticks=" <& stats.gravityTicks <&
+        " per_tick=" <& round(GRAVITY_PER_TICK) <& " grounded=" <&
+        stats.floorContact);
+    if stats.firstPhysicsBlocker <> "" then
+      logInfo("first_physics_trace=blocker=" <& stats.firstPhysicsBlocker <&
+          ";fraction_pct=" <& stats.firstTraceFractionPct <&
+          ";clip_plane=" <& stats.firstClipPlane);
+    end if;
+    logInfo("physics_final_origin=" <& stats.finalOrigin);
+    logInfo("physics_probe_ready=" <& (stats.pk4Archives <> 0 and
+        stats.requestedMapFound and stats.requestedCollisionFound and
+        stats.playerParsed and stats.collisionModels <> 0 and
+        stats.collisionBlockingPolygons <> 0 and
+        stats.collisionNonblockingPolygons <> 0 and stats.floorContact and
+        stats.acceptedMoves <> 0 and stats.blockedMoves <> 0 and
+        stats.slideMoves <> 0 and stats.stepMoves <> 0 and
+        stats.gravityTicks = PHYSICS_TICKS and stats.clippedVelocity));
+  end func;
+
+const proc: main is func
+  local
+    var physicsConfig: config is physicsConfig.value;
+    var physicsStats: stats is physicsStats.value;
+    var array string: pk4Files is 0 times "";
+    var string: pk4File is "";
+  begin
+    parseArgs(config);
+    if config.showHelp then
+      showUsage;
+    else
+      stats.requestedMapPath := mapNameToAssetPath(config.startMap);
+      stats.requestedCollisionPath := compiledSiblingPath(stats.requestedMapPath,
+          ".cm");
+      if fileType(config.basePath) <> FILE_DIR then
+        logError("Doom 3 base directory not found: " <& config.basePath);
+      else
+        pk4Files := sort(findPk4Archives(config.basePath));
+        stats.pk4Archives := length(pk4Files);
+        if length(pk4Files) = 0 then
+          logError("No .pk4 archives found in: " <& config.basePath);
+        else
+          for pk4File range pk4Files do
+            scanArchive(stats, pk4File);
+          end for;
+          runPhysicsProbe(stats);
+          printStats(stats);
+        end if;
+      end if;
+    end if;
+  end func;

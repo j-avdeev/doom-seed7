@@ -4,4 +4,5 @@ best_release.json
 sf.html
 *.exe
 *.log
-
+*.pk4
+!fixtures/base/pak000.pk4

@@ -1,0 +1,975 @@
+(********************************************************************)
+(*  doom3_seed7_ai.s7                                              *)
+(*                                                                  *)
+(*  Focused Doom 3 / id Tech 4 monster AI subsystem probe for      *)
+(*  Seed7. It reads user-owned pk4 archives, resolves monster       *)
+(*  entityDef data through inheritance, checks script/anim/sound    *)
+(*  bindings, and simulates a tiny deterministic idle-alert-attack  *)
+(*  state transition. No commercial data is bundled.                *)
+(********************************************************************)
+
+$ include "seed7_05.s7i";
+$ include "osfiles.s7i";
+$ include "zip.s7i";
+
+const string: DEFAULT_DATA_PATH is ".";
+const string: DEFAULT_BASE_DIR is "base";
+const string: DEFAULT_START_MAP is "game/mars_city1";
+const integer: DEFAULT_PLAYER_HEALTH is 100;
+const integer: DEFAULT_MONSTER_HEALTH is 100;
+const integer: ENTITY_DEF_INHERIT_LIMIT is 8;
+
+const type: aiConfig is new struct
+    var string: dataPath is DEFAULT_DATA_PATH;
+    var string: basePath is "";
+    var string: startMap is DEFAULT_START_MAP;
+    var boolean: showHelp is FALSE;
+  end struct;
+
+const type: aiStats is new struct
+    var integer: pk4Archives is 0;
+    var string: requestedMapPath is "";
+    var boolean: requestedMapFound is FALSE;
+    var string: requestedAasPath is "";
+    var boolean: requestedAasFound is FALSE;
+    var integer: entityDefs is 0;
+    var integer: monsterDefs is 0;
+    var integer: monsterInheritValues is 0;
+    var integer: monsterHealthValues is 0;
+    var integer: monsterSpawnclassValues is 0;
+    var integer: monsterAnimRefs is 0;
+    var integer: monsterSoundRefs is 0;
+    var integer: monsterScriptObjects is 0;
+    var integer: monsterMeleeRangeValues is 0;
+    var integer: monsterMeleeDamageValues is 0;
+    var integer: mapEntities is 0;
+    var integer: mapMonsters is 0;
+    var boolean: playerStartFound is FALSE;
+    var boolean: monsterSpawnFound is FALSE;
+    var boolean: resolvedMonsterAnim is FALSE;
+    var boolean: resolvedMonsterSound is FALSE;
+    var boolean: resolvedMonsterScriptObject is FALSE;
+    var boolean: resolvedMonsterSpawnclass is FALSE;
+    var boolean: navPathFound is FALSE;
+    var boolean: monsterInRange is FALSE;
+    var integer: aiStateTransitions is 0;
+    var integer: aiAttacks is 0;
+    var integer: playerHealthAfterAi is DEFAULT_PLAYER_HEALTH;
+    var integer: aasVersion is 0;
+    var integer: aasSettings is 0;
+    var integer: aasAreas is 0;
+    var integer: aasReachabilities is 0;
+    var integer: monsterArea is 0;
+    var integer: playerArea is 0;
+    var integer: navPathSteps is 0;
+    var integer: navPathCost is 0;
+    var string: firstMonsterDef is "";
+    var string: firstMonsterClass is "";
+    var string: firstMonsterSpawn is "";
+    var string: firstMonsterAnim is "";
+    var string: firstMonsterSound is "";
+    var string: firstMonsterScriptObject is "";
+    var string: firstMonsterSpawnclass is "";
+    var string: firstAasAsset is "";
+    var string: firstAasAgentClass is "";
+    var string: firstNavPath is "";
+    var string: firstAiStatePath is "";
+    var float: playerX is 0.0;
+    var float: playerY is 0.0;
+    var float: playerZ is 0.0;
+    var float: monsterX is 0.0;
+    var float: monsterY is 0.0;
+    var float: monsterZ is 0.0;
+    var float: navStepX is 0.0;
+    var float: navStepY is 0.0;
+    var integer: resolvedMonsterHealth is DEFAULT_MONSTER_HEALTH;
+    var integer: resolvedMeleeRange is 0;
+    var integer: resolvedMeleeDamage is 0;
+    var array string: entityDefNames is 0 times "";
+    var array string: entityDefParents is 0 times "";
+    var array integer: entityDefHealth is 0 times 0;
+    var array string: entityDefSpawnclasses is 0 times "";
+    var array string: entityDefAnims is 0 times "";
+    var array string: entityDefSounds is 0 times "";
+    var array string: entityDefScriptObjects is 0 times "";
+    var array integer: entityDefMeleeRanges is 0 times 0;
+    var array integer: entityDefMeleeDamages is 0 times 0;
+    var array string: animAssetStems is 0 times "";
+    var array string: soundAssetStems is 0 times "";
+    var array string: scriptObjectNames is 0 times "";
+    var array integer: areaIds is 0 times 0;
+    var array float: areaX is 0 times 0.0;
+    var array float: areaY is 0 times 0.0;
+    var array float: areaZ is 0 times 0.0;
+    var array integer: reachFrom is 0 times 0;
+    var array integer: reachTo is 0 times 0;
+    var array integer: reachCost is 0 times 0;
+  end struct;
+
+const proc: logInfo (in string: msg) is func
+  begin
+    writeln("[ai] " <& msg);
+  end func;
+
+const proc: logError (in string: msg) is func
+  begin
+    writeln("[ai-error] " <& msg);
+  end func;
+
+const func string: joinPath (in string: leftPath, in string: rightPath) is func
+  result
+    var string: joined is "";
+  begin
+    if leftPath = "" then
+      joined := rightPath;
+    elsif endsWith(leftPath, "/") or endsWith(leftPath, "\\") then
+      joined := leftPath <& rightPath;
+    else
+      joined := leftPath <& "/" <& rightPath;
+    end if;
+  end func;
+
+const func boolean: isPk4Name (in string: fileName) is
+    return endsWith(lower(fileName), ".pk4");
+
+const func string: normalizedAssetPath (in string: filePath) is
+    return replace(lower(filePath), "\\", "/");
+
+const func string: assetStem (in string: filePath) is func
+  result
+    var string: stem is "";
+  local
+    var string: path is "";
+    var integer: dotPos is 0;
+  begin
+    path := normalizedAssetPath(filePath);
+    dotPos := rpos(path, ".");
+    if dotPos <> 0 then
+      stem := path[.. pred(dotPos)];
+    else
+      stem := path;
+    end if;
+  end func;
+
+const func string: mapNameToAssetPath (in string: mapName) is func
+  result
+    var string: assetPath is "";
+  begin
+    assetPath := normalizedAssetPath(mapName);
+    if not startsWith(assetPath, "maps/") then
+      assetPath := "maps/" <& assetPath;
+    end if;
+    if not endsWith(assetPath, ".map") then
+      assetPath &:= ".map";
+    end if;
+  end func;
+
+const func string: companionAasPath (in string: mapPath) is func
+  result
+    var string: aasPath is "";
+  begin
+    aasPath := mapPath;
+    if endsWith(aasPath, ".map") then
+      aasPath := aasPath[.. length(aasPath) - 4] <& ".aas";
+    else
+      aasPath &:= ".aas";
+    end if;
+  end func;
+
+const func boolean: containsString (in array string: values,
+    in string: value) is func
+  result
+    var boolean: found is FALSE;
+  local
+    var string: current is "";
+  begin
+    for current range values do
+      if current = value then
+        found := TRUE;
+      end if;
+    end for;
+  end func;
+
+const proc: appendUnique (inout array string: values, in string: value) is func
+  begin
+    if value <> "" and not containsString(values, value) then
+      values &:= value;
+    end if;
+  end func;
+
+const func integer: indexOfString (in array string: values,
+    in string: value) is func
+  result
+    var integer: foundIndex is 0;
+  local
+    var integer: idx is 1;
+  begin
+    while idx <= length(values) and foundIndex = 0 do
+      if values[idx] = value then
+        foundIndex := idx;
+      end if;
+      incr(idx);
+    end while;
+  end func;
+
+const func string: cleanedToken (in string: token) is func
+  result
+    var string: clean is "";
+  local
+    var integer: idx is 1;
+    var char: ch is ' ';
+  begin
+    clean := token;
+    while idx <= length(clean) do
+      ch := clean[idx];
+      if ch = '"' or ch = '(' or ch = ')' or ch = '{' or ch = '}' or
+          ch = ',' or ch = ';' then
+        clean := clean[.. pred(idx)] & clean[succ(idx) ..];
+      else
+        incr(idx);
+      end if;
+    end while;
+  end func;
+
+const func string: normalizedTokenText (in string: content) is func
+  result
+    var string: text is "";
+  begin
+    text := replace(content, "\n", " ");
+    text := replace(text, "\r", " ");
+    text := replace(text, "\t", " ");
+  end func;
+
+const func integer: intTokenOrZero (in string: text) is func
+  result
+    var integer: number is 0;
+  begin
+    if text <> "" then
+      block
+        number := integer(trim(cleanedToken(text)));
+      exception
+        catch RANGE_ERROR:
+          number := 0;
+      end block;
+    end if;
+  end func;
+
+const func float: floatTokenOrDefault (in string: text,
+    in float: defaultValue) is func
+  result
+    var float: number is 0.0;
+  begin
+    number := defaultValue;
+    if text <> "" then
+      block
+        number := float(trim(cleanedToken(text)));
+      exception
+        catch RANGE_ERROR:
+          number := defaultValue;
+      end block;
+    end if;
+  end func;
+
+const func string: quotedValueAfter (in string: content, in string: keyName) is func
+  result
+    var string: value is "";
+  local
+    var string: keyText is "";
+    var integer: keyPos is 0;
+    var integer: keyEnd is 0;
+    var integer: valueStart is 0;
+    var integer: valueEnd is 0;
+  begin
+    keyText := "\"" <& keyName <& "\"";
+    keyPos := pos(lower(content), lower(keyText), 1);
+    if keyPos <> 0 then
+      keyEnd := pos(content, "\"", succ(keyPos));
+      if keyEnd <> 0 then
+        valueStart := pos(content, "\"", succ(keyEnd));
+        if valueStart <> 0 then
+          valueEnd := pos(content, "\"", succ(valueStart));
+          if valueEnd <> 0 then
+            value := content[succ(valueStart) .. pred(valueEnd)];
+          end if;
+        end if;
+      end if;
+    end if;
+  end func;
+
+const func integer: intSpawnargOrZero (in string: entityBlock,
+    in string: keyName) is func
+  result
+    var integer: number is 0;
+  local
+    var string: text is "";
+  begin
+    text := quotedValueAfter(entityBlock, keyName);
+    if text <> "" then
+      block
+        number := integer(text);
+      exception
+        catch RANGE_ERROR:
+          number := 0;
+      end block;
+    end if;
+  end func;
+
+const func float: vectorComponentOrDefault (
+    in string: vectorText, in integer: componentIndex,
+    in float: defaultValue) is func
+  result
+    var float: component is 0.0;
+  local
+    var array string: parts is 0 times "";
+  begin
+    component := defaultValue;
+    parts := noEmptyStrings(split(vectorText, ' '));
+    if length(parts) >= componentIndex then
+      block
+        component := float(parts[componentIndex]);
+      exception
+        catch RANGE_ERROR:
+          component := defaultValue;
+      end block;
+    end if;
+  end func;
+
+const func integer: matchingBlockEnd (in string: content,
+    in integer: blockStart) is func
+  result
+    var integer: blockEnd is 0;
+  local
+    var integer: idx is 0;
+    var integer: depth is 0;
+  begin
+    if blockStart <> 0 then
+      idx := blockStart;
+      while idx <= length(content) and blockEnd = 0 do
+        if content[idx] = '{' then
+          incr(depth);
+        elsif content[idx] = '}' then
+          decr(depth);
+          if depth = 0 then
+            blockEnd := idx;
+          end if;
+        end if;
+        incr(idx);
+      end while;
+    end if;
+  end func;
+
+const func string: declNameAfter (in string: content, in integer: startPos) is func
+  result
+    var string: declName is "";
+  local
+    var integer: idx is 0;
+    var char: ch is ' ';
+  begin
+    idx := startPos;
+    while idx <= length(content) and declName = "" do
+      ch := content[idx];
+      if ch <> ' ' and ch <> '\t' and ch <> '\n' and ch <> '\r' then
+        while idx <= length(content) and content[idx] <> ' ' and
+            content[idx] <> '\t' and content[idx] <> '\n' and
+            content[idx] <> '\r' and content[idx] <> '{' do
+          declName &:= content[idx];
+          incr(idx);
+        end while;
+      end if;
+      incr(idx);
+    end while;
+  end func;
+
+const proc: inspectScriptText (inout aiStats: stats,
+    in string: content) is func
+  local
+    var string: normalizedText is "";
+    var array string: tokens is 0 times "";
+    var integer: tokenIndex is 1;
+    var string: token is "";
+    var string: nextToken is "";
+  begin
+    normalizedText := replace(content, "\n", " ");
+    normalizedText := replace(normalizedText, "\r", " ");
+    normalizedText := replace(normalizedText, "\t", " ");
+    tokens := noEmptyStrings(split(normalizedText, ' '));
+    while tokenIndex < length(tokens) do
+      token := lower(cleanedToken(tokens[tokenIndex]));
+      nextToken := lower(cleanedToken(tokens[succ(tokenIndex)]));
+      if token = "object" and nextToken <> "" then
+        appendUnique(stats.scriptObjectNames, nextToken);
+      end if;
+      incr(tokenIndex);
+    end while;
+  end func;
+
+const proc: addEntityDef (inout aiStats: stats,
+    in string: className, in string: entityBlock) is func
+  local
+    var string: classLower is "";
+    var string: parentName is "";
+    var integer: healthValue is 0;
+    var string: spawnclass is "";
+    var string: animRef is "";
+    var string: soundRef is "";
+    var string: scriptObject is "";
+    var integer: meleeRange is 0;
+    var integer: meleeDamage is 0;
+  begin
+    classLower := lower(className);
+    stats.entityDefs +:= 1;
+    stats.entityDefNames &:= classLower;
+    parentName := lower(quotedValueAfter(entityBlock, "inherit"));
+    stats.entityDefParents &:= parentName;
+    healthValue := intSpawnargOrZero(entityBlock, "health");
+    stats.entityDefHealth &:= healthValue;
+    spawnclass := quotedValueAfter(entityBlock, "spawnclass");
+    stats.entityDefSpawnclasses &:= spawnclass;
+    animRef := normalizedAssetPath(quotedValueAfter(entityBlock, "anim"));
+    stats.entityDefAnims &:= animRef;
+    soundRef := normalizedAssetPath(quotedValueAfter(entityBlock, "snd_sight"));
+    stats.entityDefSounds &:= soundRef;
+    scriptObject := lower(quotedValueAfter(entityBlock, "scriptobject"));
+    stats.entityDefScriptObjects &:= scriptObject;
+    meleeRange := intSpawnargOrZero(entityBlock, "melee_range");
+    stats.entityDefMeleeRanges &:= meleeRange;
+    meleeDamage := intSpawnargOrZero(entityBlock, "damage_melee");
+    stats.entityDefMeleeDamages &:= meleeDamage;
+    if startsWith(classLower, "monster_") then
+      stats.monsterDefs +:= 1;
+      if stats.firstMonsterDef = "" then
+        stats.firstMonsterDef := classLower;
+      end if;
+      if parentName <> "" then
+        stats.monsterInheritValues +:= 1;
+      end if;
+      if healthValue <> 0 then
+        stats.monsterHealthValues +:= 1;
+      end if;
+      if spawnclass <> "" then
+        stats.monsterSpawnclassValues +:= 1;
+      end if;
+      if animRef <> "" then
+        stats.monsterAnimRefs +:= 1;
+      end if;
+      if soundRef <> "" then
+        stats.monsterSoundRefs +:= 1;
+      end if;
+      if scriptObject <> "" then
+        stats.monsterScriptObjects +:= 1;
+      end if;
+      if meleeRange <> 0 then
+        stats.monsterMeleeRangeValues +:= 1;
+      end if;
+      if meleeDamage <> 0 then
+        stats.monsterMeleeDamageValues +:= 1;
+      end if;
+    end if;
+  end func;
+
+const proc: inspectDefText (inout aiStats: stats,
+    in string: content) is func
+  local
+    var string: contentLower is "";
+    var integer: searchPos is 1;
+    var integer: defPos is 0;
+    var integer: blockStart is 0;
+    var integer: blockEnd is 0;
+    var string: className is "";
+  begin
+    contentLower := lower(content);
+    defPos := pos(contentLower, "entitydef ", searchPos);
+    while defPos <> 0 do
+      className := declNameAfter(content, defPos + length("entitydef "));
+      blockStart := pos(content, "{", defPos);
+      blockEnd := matchingBlockEnd(content, blockStart);
+      if blockStart <> 0 and blockEnd <> 0 then
+        addEntityDef(stats, className, content[blockStart .. blockEnd]);
+      end if;
+      searchPos := defPos + length("entitydef ");
+      defPos := pos(contentLower, "entitydef ", searchPos);
+    end while;
+  end func;
+
+const proc: inspectMapText (inout aiStats: stats,
+    in string: content) is func
+  local
+    var integer: searchPos is 1;
+    var integer: blockStart is 0;
+    var integer: blockEnd is 0;
+    var string: blockText is "";
+    var string: className is "";
+    var string: entityName is "";
+    var string: originText is "";
+  begin
+    blockStart := pos(content, "{", searchPos);
+    while blockStart <> 0 do
+      blockEnd := matchingBlockEnd(content, blockStart);
+      if blockEnd <> 0 then
+        stats.mapEntities +:= 1;
+        blockText := content[blockStart .. blockEnd];
+        className := lower(quotedValueAfter(blockText, "classname"));
+        entityName := quotedValueAfter(blockText, "name");
+        originText := quotedValueAfter(blockText, "origin");
+        if className = "info_player_start" then
+          stats.playerStartFound := TRUE;
+          stats.playerX := vectorComponentOrDefault(originText, 1, 0.0);
+          stats.playerY := vectorComponentOrDefault(originText, 2, 0.0);
+          stats.playerZ := vectorComponentOrDefault(originText, 3, 0.0);
+        elsif startsWith(className, "monster_") then
+          stats.mapMonsters +:= 1;
+          stats.monsterSpawnFound := TRUE;
+        if stats.firstMonsterSpawn = "" then
+          stats.firstMonsterSpawn := entityName;
+        end if;
+        if stats.firstMonsterClass = "" then
+          stats.firstMonsterClass := className;
+        end if;
+        stats.monsterX := vectorComponentOrDefault(originText, 1, 0.0);
+        stats.monsterY := vectorComponentOrDefault(originText, 2, 0.0);
+        stats.monsterZ := vectorComponentOrDefault(originText, 3, 0.0);
+      end if;
+        searchPos := succ(blockEnd);
+      else
+        searchPos := succ(blockStart);
+      end if;
+      blockStart := pos(content, "{", searchPos);
+    end while;
+  end func;
+
+const proc: inspectAasText (inout aiStats: stats,
+    in string: assetPath, in string: content) is func
+  local
+    var array string: tokens is 0 times "";
+    var integer: tokenIndex is 1;
+    var string: token is "";
+    var integer: areaId is 0;
+    var float: x is 0.0;
+    var float: y is 0.0;
+    var float: z is 0.0;
+    var integer: fromArea is 0;
+    var integer: toArea is 0;
+    var integer: cost is 0;
+    var integer: look is 0;
+  begin
+    if stats.firstAasAsset = "" then
+      stats.firstAasAsset := normalizedAssetPath(assetPath);
+    end if;
+    tokens := noEmptyStrings(split(normalizedTokenText(content), ' '));
+    while tokenIndex <= length(tokens) do
+      token := lower(cleanedToken(tokens[tokenIndex]));
+      if token = "aasversion" and tokenIndex < length(tokens) then
+        stats.aasVersion := intTokenOrZero(tokens[succ(tokenIndex)]);
+      elsif token = "settings" and tokenIndex < length(tokens) then
+        stats.aasSettings +:= 1;
+        if stats.firstAasAgentClass = "" then
+          stats.firstAasAgentClass := cleanedToken(tokens[succ(tokenIndex)]);
+        end if;
+      elsif token = "area" and tokenIndex + 1 <= length(tokens) then
+        areaId := intTokenOrZero(tokens[succ(tokenIndex)]);
+        x := 0.0;
+        y := 0.0;
+        z := 0.0;
+        look := tokenIndex + 2;
+        while look <= length(tokens) and lower(cleanedToken(tokens[look])) <>
+            "area" and lower(cleanedToken(tokens[look])) <> "reachability" do
+          if lower(cleanedToken(tokens[look])) = "origin" and look + 3 <= length(tokens) then
+            x := floatTokenOrDefault(tokens[look + 1], 0.0);
+            y := floatTokenOrDefault(tokens[look + 2], 0.0);
+            z := floatTokenOrDefault(tokens[look + 3], 0.0);
+          end if;
+          incr(look);
+        end while;
+        if areaId <> 0 then
+          stats.areaIds &:= areaId;
+          stats.areaX &:= x;
+          stats.areaY &:= y;
+          stats.areaZ &:= z;
+          stats.aasAreas +:= 1;
+        end if;
+      elsif token = "reachability" and tokenIndex + 2 <= length(tokens) then
+        fromArea := intTokenOrZero(tokens[succ(tokenIndex)]);
+        toArea := intTokenOrZero(tokens[tokenIndex + 2]);
+        cost := 0;
+        look := tokenIndex + 3;
+        while look <= length(tokens) and lower(cleanedToken(tokens[look])) <>
+            "area" and lower(cleanedToken(tokens[look])) <> "reachability" do
+          if lower(cleanedToken(tokens[look])) = "cost" and look < length(tokens) then
+            cost := intTokenOrZero(tokens[succ(look)]);
+          end if;
+          incr(look);
+        end while;
+        if fromArea <> 0 and toArea <> 0 then
+          stats.reachFrom &:= fromArea;
+          stats.reachTo &:= toArea;
+          stats.reachCost &:= cost;
+          stats.aasReachabilities +:= 1;
+        end if;
+      end if;
+      incr(tokenIndex);
+    end while;
+  end func;
+
+const func integer: nearestArea (in aiStats: stats,
+    in float: x, in float: y, in float: z) is func
+  result
+    var integer: areaId is 0;
+  local
+    var integer: idx is 1;
+    var float: dx is 0.0;
+    var float: dy is 0.0;
+    var float: dz is 0.0;
+    var float: distanceSq is 0.0;
+    var float: bestDistanceSq is 0.0;
+  begin
+    while idx <= length(stats.areaIds) do
+      dx := stats.areaX[idx] - x;
+      dy := stats.areaY[idx] - y;
+      dz := stats.areaZ[idx] - z;
+      distanceSq := dx * dx + dy * dy + dz * dz;
+      if areaId = 0 or distanceSq < bestDistanceSq then
+        areaId := stats.areaIds[idx];
+        bestDistanceSq := distanceSq;
+      end if;
+      incr(idx);
+    end while;
+  end func;
+
+const proc: solveNavigationPath (inout aiStats: stats) is func
+  local
+    var integer: idx is 1;
+    var integer: targetAreaIndex is 0;
+    var float: dx is 0.0;
+    var float: dy is 0.0;
+    var float: lengthSq is 0.0;
+  begin
+    stats.monsterArea := nearestArea(stats, stats.monsterX, stats.monsterY,
+        stats.monsterZ);
+    stats.playerArea := nearestArea(stats, stats.playerX, stats.playerY,
+        stats.playerZ);
+    while idx <= length(stats.reachFrom) and not stats.navPathFound do
+      if stats.reachFrom[idx] = stats.monsterArea and
+          stats.reachTo[idx] = stats.playerArea then
+        stats.navPathFound := TRUE;
+        stats.navPathSteps := 1;
+        stats.navPathCost := stats.reachCost[idx];
+        stats.firstNavPath := "area" <& stats.monsterArea <& ">area" <&
+            stats.playerArea;
+      end if;
+      incr(idx);
+    end while;
+    if stats.navPathFound then
+      idx := 1;
+      while idx <= length(stats.areaIds) and targetAreaIndex = 0 do
+        if stats.areaIds[idx] = stats.playerArea then
+          targetAreaIndex := idx;
+        end if;
+        incr(idx);
+      end while;
+      if targetAreaIndex <> 0 then
+        dx := stats.areaX[targetAreaIndex] - stats.monsterX;
+        dy := stats.areaY[targetAreaIndex] - stats.monsterY;
+        lengthSq := dx * dx + dy * dy;
+        if lengthSq <> 0.0 then
+          stats.navStepX := stats.monsterX + dx * 16.0 / sqrt(lengthSq);
+          stats.navStepY := stats.monsterY + dy * 16.0 / sqrt(lengthSq);
+        else
+          stats.navStepX := stats.monsterX;
+          stats.navStepY := stats.monsterY;
+        end if;
+      end if;
+    end if;
+  end func;
+
+const proc: resolveMonsterValue (inout aiStats: stats,
+    in string: monsterClass) is func
+  local
+    var string: currentClass is "";
+    var integer: defIndex is 0;
+    var integer: depth is 0;
+  begin
+    currentClass := monsterClass;
+    while currentClass <> "" and depth < ENTITY_DEF_INHERIT_LIMIT do
+      defIndex := indexOfString(stats.entityDefNames, currentClass);
+      if defIndex <> 0 then
+        if stats.resolvedMonsterHealth = DEFAULT_MONSTER_HEALTH and
+            stats.entityDefHealth[defIndex] <> 0 then
+          stats.resolvedMonsterHealth := stats.entityDefHealth[defIndex];
+        end if;
+        if stats.firstMonsterSpawnclass = "" and
+            stats.entityDefSpawnclasses[defIndex] <> "" then
+          stats.firstMonsterSpawnclass := stats.entityDefSpawnclasses[defIndex];
+        end if;
+        if stats.firstMonsterAnim = "" and stats.entityDefAnims[defIndex] <> "" then
+          stats.firstMonsterAnim := stats.entityDefAnims[defIndex];
+        end if;
+        if stats.firstMonsterSound = "" and stats.entityDefSounds[defIndex] <> "" then
+          stats.firstMonsterSound := stats.entityDefSounds[defIndex];
+        end if;
+        if stats.firstMonsterScriptObject = "" and
+            stats.entityDefScriptObjects[defIndex] <> "" then
+          stats.firstMonsterScriptObject := stats.entityDefScriptObjects[defIndex];
+        end if;
+        if stats.resolvedMeleeRange = 0 and
+            stats.entityDefMeleeRanges[defIndex] <> 0 then
+          stats.resolvedMeleeRange := stats.entityDefMeleeRanges[defIndex];
+        end if;
+        if stats.resolvedMeleeDamage = 0 and
+            stats.entityDefMeleeDamages[defIndex] <> 0 then
+          stats.resolvedMeleeDamage := stats.entityDefMeleeDamages[defIndex];
+        end if;
+        currentClass := stats.entityDefParents[defIndex];
+      else
+        currentClass := "";
+      end if;
+      incr(depth);
+    end while;
+  end func;
+
+const proc: finalizeAiReadiness (inout aiStats: stats) is func
+  local
+    var float: dx is 0.0;
+    var float: dy is 0.0;
+    var float: distSq is 0.0;
+  begin
+    if stats.firstMonsterClass <> "" then
+      resolveMonsterValue(stats, stats.firstMonsterClass);
+    end if;
+    stats.resolvedMonsterAnim := stats.firstMonsterAnim <> "" and
+        containsString(stats.animAssetStems, assetStem(stats.firstMonsterAnim));
+    stats.resolvedMonsterSound := stats.firstMonsterSound <> "" and
+        containsString(stats.soundAssetStems, assetStem(stats.firstMonsterSound));
+    stats.resolvedMonsterScriptObject := stats.firstMonsterScriptObject <> "" and
+        containsString(stats.scriptObjectNames, lower(stats.firstMonsterScriptObject));
+    stats.resolvedMonsterSpawnclass := stats.firstMonsterSpawnclass = "idAI";
+    if stats.playerStartFound and stats.monsterSpawnFound and
+        stats.resolvedMeleeRange <> 0 then
+      solveNavigationPath(stats);
+      dx := stats.monsterX - stats.playerX;
+      dy := stats.monsterY - stats.playerY;
+      distSq := dx * dx + dy * dy;
+      stats.monsterInRange := distSq <=
+          float(stats.resolvedMeleeRange * stats.resolvedMeleeRange);
+    end if;
+    if stats.resolvedMonsterSpawnclass and stats.resolvedMonsterAnim and stats.resolvedMonsterSound and
+        stats.resolvedMonsterScriptObject and stats.monsterInRange and
+        stats.resolvedMeleeDamage <> 0 then
+      stats.aiStateTransitions := 2;
+      stats.aiAttacks := 1;
+      stats.playerHealthAfterAi := DEFAULT_PLAYER_HEALTH -
+          stats.resolvedMeleeDamage;
+      stats.firstAiStatePath := "idle>alert>melee";
+    end if;
+  end func;
+
+const func array string: findPk4Archives (in string: basePath) is func
+  result
+    var array string: pk4Files is 0 times "";
+  local
+    var array string: names is 0 times "";
+    var string: name is "";
+  begin
+    if fileType(basePath) = FILE_DIR then
+      names := readDir(basePath);
+      for name range names do
+        if isPk4Name(name) and fileType(joinPath(basePath, name)) = FILE_REGULAR then
+          pk4Files &:= joinPath(basePath, name);
+        end if;
+      end for;
+    end if;
+  end func;
+
+const proc: scanArchive (inout aiStats: stats,
+    in string: pk4File, in string: requestedMapPath) is func
+  local
+    var fileSys: zipFs is fileSys.value;
+    var array string: paths is 0 times "";
+    var string: path is "";
+    var string: pathLower is "";
+  begin
+    zipFs := openZip(pk4File);
+    if zipFs = fileSys.value then
+      logError("could not open pk4 archive: " <& pk4File);
+    else
+      paths := readDir(zipFs, RECURSIVE);
+      for path range paths do
+        pathLower := normalizedAssetPath(path);
+        if endsWith(pathLower, ".md5anim") then
+          appendUnique(stats.animAssetStems, assetStem(pathLower));
+        elsif startsWith(pathLower, "sound/") and
+            (endsWith(pathLower, ".wav") or endsWith(pathLower, ".ogg")) then
+          appendUnique(stats.soundAssetStems, assetStem(pathLower));
+        elsif endsWith(pathLower, ".script") then
+          inspectScriptText(stats, getFile(zipFs, path));
+        end if;
+      end for;
+      for path range paths do
+        pathLower := normalizedAssetPath(path);
+        if endsWith(pathLower, ".def") then
+          inspectDefText(stats, getFile(zipFs, path));
+        elsif pathLower = requestedMapPath then
+          stats.requestedMapFound := TRUE;
+          inspectMapText(stats, getFile(zipFs, path));
+        elsif pathLower = stats.requestedAasPath then
+          stats.requestedAasFound := TRUE;
+          inspectAasText(stats, pathLower, getFile(zipFs, path));
+        end if;
+      end for;
+      close(zipFs);
+    end if;
+  end func;
+
+const proc: parseArgs (inout aiConfig: config) is func
+  local
+    var array string: args is 0 times "";
+    var integer: argIdx is 1;
+  begin
+    args := argv(PROGRAM);
+    while argIdx <= length(args) do
+      if args[argIdx] = "--help" or args[argIdx] = "-h" then
+        config.showHelp := TRUE;
+      elsif args[argIdx] = "--doom3_data_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.dataPath := convDosPath(args[argIdx]);
+      elsif args[argIdx] = "--doom3_base_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.basePath := convDosPath(args[argIdx]);
+      elsif args[argIdx] = "--doom3_start_map" and argIdx < length(args) then
+        incr(argIdx);
+        config.startMap := args[argIdx];
+      elsif args[argIdx] = "+map" and argIdx < length(args) then
+        incr(argIdx);
+        config.startMap := args[argIdx];
+      elsif args[argIdx] = "+set" and argIdx + 2 <= length(args) then
+        if args[argIdx + 1] = "fs_basepath" then
+          config.dataPath := convDosPath(args[argIdx + 2]);
+        elsif args[argIdx + 1] = "fs_game" then
+          config.basePath := convDosPath(args[argIdx + 2]);
+        end if;
+        argIdx +:= 2;
+      end if;
+      incr(argIdx);
+    end while;
+    if config.basePath = "" then
+      config.basePath := joinPath(config.dataPath, DEFAULT_BASE_DIR);
+    end if;
+  end func;
+
+const proc: showUsage is func
+  begin
+    writeln("Usage:");
+    writeln("  s7 doom3_seed7_ai.s7 --doom3_data_path <doom3-root>");
+    writeln("  s7 doom3_seed7_ai.s7 +set fs_basepath <doom3-root> +map <map>");
+    writeln("");
+    writeln("Scans user-owned Doom 3 pk4 files for monster AI readiness.");
+  end func;
+
+const proc: printStats (in aiStats: stats) is func
+  begin
+    logInfo("pk4_archives=" <& stats.pk4Archives);
+    logInfo("requested_map=" <& stats.requestedMapPath);
+    logInfo("requested_map_found=" <& stats.requestedMapFound);
+    logInfo("requested_aas=" <& stats.requestedAasPath);
+    logInfo("requested_aas_found=" <& stats.requestedAasFound);
+    logInfo("entity_defs=" <& stats.entityDefs <&
+        " monster_defs=" <& stats.monsterDefs <&
+        " inherits=" <& stats.monsterInheritValues);
+    logInfo("monster_spawnargs health=" <& stats.monsterHealthValues <&
+        " spawnclass=" <& stats.monsterSpawnclassValues <&
+        " anim=" <& stats.monsterAnimRefs <&
+        " sound=" <& stats.monsterSoundRefs <&
+        " scriptobject=" <& stats.monsterScriptObjects <&
+        " melee_range=" <& stats.monsterMeleeRangeValues <&
+        " melee_damage=" <& stats.monsterMeleeDamageValues);
+    logInfo("map_ai_entities monsters=" <& stats.mapMonsters <&
+        " player_start=" <& stats.playerStartFound);
+    logInfo("monster_binding anim=" <& stats.resolvedMonsterAnim <&
+        " sound=" <& stats.resolvedMonsterSound <&
+        " scriptobject=" <& stats.resolvedMonsterScriptObject <&
+        " spawnclass=" <& stats.resolvedMonsterSpawnclass);
+    logInfo("ai_state transitions=" <& stats.aiStateTransitions <&
+        " in_range=" <& stats.monsterInRange <&
+        " attacks=" <& stats.aiAttacks <&
+        " player_health_after=" <& stats.playerHealthAfterAi);
+    logInfo("ai_navigation aas_found=" <& stats.requestedAasFound <&
+        " areas=" <& stats.aasAreas <&
+        " reachabilities=" <& stats.aasReachabilities <&
+        " path=" <& stats.navPathFound <&
+        " steps=" <& stats.navPathSteps <&
+        " cost=" <& stats.navPathCost);
+    logInfo("ai_nav_movement monster_area=" <& stats.monsterArea <&
+        " player_area=" <& stats.playerArea <&
+        " next_x=" <& stats.navStepX <&
+        " next_y=" <& stats.navStepY);
+    if stats.firstMonsterDef <> "" then
+      logInfo("first_monster_def=" <& stats.firstMonsterDef);
+    end if;
+    if stats.firstMonsterSpawn <> "" then
+      logInfo("first_monster_spawn=" <& stats.firstMonsterSpawn);
+    end if;
+    if stats.firstMonsterClass <> "" then
+      logInfo("first_monster_class=" <& stats.firstMonsterClass);
+    end if;
+    if stats.firstMonsterAnim <> "" then
+      logInfo("first_monster_anim=" <& stats.firstMonsterAnim);
+    end if;
+    if stats.firstMonsterSound <> "" then
+      logInfo("first_monster_sound=" <& stats.firstMonsterSound);
+    end if;
+    if stats.firstMonsterScriptObject <> "" then
+      logInfo("first_monster_scriptobject=" <&
+          stats.firstMonsterScriptObject);
+    end if;
+    if stats.firstMonsterSpawnclass <> "" then
+      logInfo("first_monster_spawnclass=" <& stats.firstMonsterSpawnclass);
+    end if;
+    if stats.firstAasAsset <> "" then
+      logInfo("first_ai_aas_asset=" <& stats.firstAasAsset);
+    end if;
+    if stats.firstAasAgentClass <> "" then
+      logInfo("first_ai_aas_agent=" <& stats.firstAasAgentClass);
+    end if;
+    if stats.firstNavPath <> "" then
+      logInfo("first_ai_nav_path=" <& stats.firstNavPath);
+    end if;
+    if stats.firstAiStatePath <> "" then
+      logInfo("first_ai_state_path=" <& stats.firstAiStatePath);
+    end if;
+    logInfo("ai_probe_ready=" <& (stats.requestedMapFound and
+        stats.monsterDefs <> 0 and stats.mapMonsters <> 0 and
+        stats.resolvedMonsterSpawnclass and
+        stats.resolvedMonsterAnim and stats.resolvedMonsterSound and
+        stats.resolvedMonsterScriptObject and stats.navPathFound and
+        stats.aiAttacks <> 0));
+  end func;
+
+const proc: main is func
+  local
+    var aiConfig: config is aiConfig.value;
+    var aiStats: stats is aiStats.value;
+    var array string: pk4Files is 0 times "";
+    var string: pk4File is "";
+  begin
+    parseArgs(config);
+    if config.showHelp then
+      showUsage;
+    else
+      stats.requestedMapPath := mapNameToAssetPath(config.startMap);
+      stats.requestedAasPath := companionAasPath(stats.requestedMapPath);
+      if fileType(config.basePath) <> FILE_DIR then
+        logError("Doom 3 base directory not found: " <& config.basePath);
+      else
+        pk4Files := sort(findPk4Archives(config.basePath));
+        stats.pk4Archives := length(pk4Files);
+        if length(pk4Files) = 0 then
+          logError("No .pk4 archives found in: " <& config.basePath);
+        else
+          for pk4File range pk4Files do
+            scanArchive(stats, pk4File, stats.requestedMapPath);
+          end for;
+          finalizeAiReadiness(stats);
+          printStats(stats);
+        end if;
+      end if;
+    end if;
+  end func;

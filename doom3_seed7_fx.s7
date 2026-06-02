@@ -1,0 +1,674 @@
+(********************************************************************)
+(*  doom3_seed7_fx.s7                                              *)
+(*                                                                  *)
+(*  Focused Doom 3 / id Tech 4 FX/particle subsystem probe for      *)
+(*  Seed7. It reads user-owned pk4 archives, resolves projectile    *)
+(*  fx_* spawnargs to .fx declarations, verifies particle/sound/    *)
+(*  decal/light references, and emits a deterministic runtime       *)
+(*  impact-effect readiness contract. No commercial data is bundled.*)
+(********************************************************************)
+
+$ include "seed7_05.s7i";
+$ include "osfiles.s7i";
+$ include "zip.s7i";
+
+const string: DEFAULT_DATA_PATH is ".";
+const string: DEFAULT_BASE_DIR is "base";
+const string: DEFAULT_START_MAP is "game/mars_city1";
+const integer: FX_SAMPLE_MSEC is 128;
+
+const type: fxConfig is new struct
+    var string: dataPath is DEFAULT_DATA_PATH;
+    var string: basePath is "";
+    var string: startMap is DEFAULT_START_MAP;
+    var boolean: showHelp is FALSE;
+  end struct;
+
+const type: fxStats is new struct
+    var integer: pk4Archives is 0;
+    var string: requestedMapPath is "";
+    var boolean: requestedMapFound is FALSE;
+    var integer: fxFiles is 0;
+    var integer: fxDecls is 0;
+    var integer: particleAssets is 0;
+    var integer: materialDecls is 0;
+    var integer: soundAssets is 0;
+    var integer: entityDefs is 0;
+    var integer: projectileDefs is 0;
+    var integer: projectileFxRefs is 0;
+    var integer: resolvedProjectileFxRefs is 0;
+    var integer: missingProjectileFxRefs is 0;
+    var integer: fxParticleRefs is 0;
+    var integer: resolvedFxParticleRefs is 0;
+    var integer: missingFxParticleRefs is 0;
+    var integer: fxSoundRefs is 0;
+    var integer: resolvedFxSoundRefs is 0;
+    var integer: missingFxSoundRefs is 0;
+    var integer: fxDecalRefs is 0;
+    var integer: resolvedFxDecalRefs is 0;
+    var integer: missingFxDecalRefs is 0;
+    var integer: fxLightRefs is 0;
+    var integer: runtimeFxEvents is 0;
+    var integer: runtimeParticleEvents is 0;
+    var integer: runtimeSoundEvents is 0;
+    var integer: runtimeDecalEvents is 0;
+    var integer: runtimeLightEvents is 0;
+    var string: firstFxFile is "";
+    var string: firstFxDecl is "";
+    var string: firstParticleAsset is "";
+    var string: firstMaterialDecl is "";
+    var string: firstSoundAsset is "";
+    var string: firstProjectileDef is "";
+    var string: firstProjectileFxRef is "";
+    var string: firstFxParticleRef is "";
+    var string: firstFxSoundRef is "";
+    var string: firstFxDecalRef is "";
+    var string: firstFxLightRef is "";
+    var string: firstRuntimeFxEvent is "";
+    var string: firstFxTimeline is "";
+    var array string: fxDeclNames is 0 times "";
+    var array string: particleAssetPaths is 0 times "";
+    var array string: materialDeclNames is 0 times "";
+    var array string: soundAssetStems is 0 times "";
+  end struct;
+
+const proc: logInfo (in string: msg) is func
+  begin
+    writeln("[fx] " <& msg);
+  end func;
+
+const proc: logError (in string: msg) is func
+  begin
+    writeln("[fx-error] " <& msg);
+  end func;
+
+const func string: joinPath (in string: leftPath, in string: rightPath) is func
+  result
+    var string: joined is "";
+  begin
+    if leftPath = "" then
+      joined := rightPath;
+    elsif endsWith(leftPath, "/") or endsWith(leftPath, "\\") then
+      joined := leftPath <& rightPath;
+    else
+      joined := leftPath <& "/" <& rightPath;
+    end if;
+  end func;
+
+const func boolean: isPk4Name (in string: fileName) is
+    return endsWith(lower(fileName), ".pk4");
+
+const func string: normalizedAssetPath (in string: filePath) is
+    return replace(lower(filePath), "\\", "/");
+
+const func string: assetStem (in string: filePath) is func
+  result
+    var string: stem is "";
+  local
+    var string: path is "";
+    var integer: dotPos is 0;
+  begin
+    path := normalizedAssetPath(filePath);
+    dotPos := rpos(path, ".");
+    if dotPos <> 0 then
+      stem := path[.. pred(dotPos)];
+    else
+      stem := path;
+    end if;
+  end func;
+
+const func string: mapNameToAssetPath (in string: mapName) is func
+  result
+    var string: assetPath is "";
+  begin
+    assetPath := normalizedAssetPath(mapName);
+    if not startsWith(assetPath, "maps/") then
+      assetPath := "maps/" <& assetPath;
+    end if;
+    if not endsWith(assetPath, ".map") then
+      assetPath &:= ".map";
+    end if;
+  end func;
+
+const func boolean: containsString (in array string: values,
+    in string: value) is func
+  result
+    var boolean: found is FALSE;
+  local
+    var string: current is "";
+  begin
+    for current range values do
+      if current = value then
+        found := TRUE;
+      end if;
+    end for;
+  end func;
+
+const proc: appendUnique (inout array string: values, in string: value) is func
+  begin
+    if value <> "" and not containsString(values, value) then
+      values &:= value;
+    end if;
+  end func;
+
+const func string: cleanedToken (in string: token) is func
+  result
+    var string: clean is "";
+  local
+    var integer: idx is 1;
+    var char: ch is ' ';
+  begin
+    clean := trim(token);
+    while idx <= length(clean) do
+      ch := clean[idx];
+      if ch = '"' or ch = '(' or ch = ')' or ch = '{' or ch = '}' or
+          ch = ',' or ch = ';' then
+        clean := clean[.. pred(idx)] & clean[succ(idx) ..];
+      else
+        incr(idx);
+      end if;
+    end while;
+  end func;
+
+const func integer: matchingBlockEnd (in string: content,
+    in integer: blockStart) is func
+  result
+    var integer: blockEnd is 0;
+  local
+    var integer: idx is 0;
+    var integer: depth is 0;
+  begin
+    if blockStart <> 0 then
+      idx := blockStart;
+      while idx <= length(content) and blockEnd = 0 do
+        if content[idx] = '{' then
+          incr(depth);
+        elsif content[idx] = '}' then
+          decr(depth);
+          if depth = 0 then
+            blockEnd := idx;
+          end if;
+        end if;
+        incr(idx);
+      end while;
+    end if;
+  end func;
+
+const func string: declNameBeforeBlock (in string: content,
+    in integer: blockStart) is func
+  result
+    var string: declName is "";
+  local
+    var integer: idx is 0;
+    var integer: endPos is 0;
+    var integer: startPos is 0;
+  begin
+    idx := pred(blockStart);
+    while idx >= 1 and
+        (content[idx] = ' ' or content[idx] = '\t' or
+        content[idx] = '\n' or content[idx] = '\r') do
+      decr(idx);
+    end while;
+    endPos := idx;
+    while idx >= 1 and content[idx] <> ' ' and content[idx] <> '\t' and
+        content[idx] <> '\n' and content[idx] <> '\r' and
+        content[idx] <> '{' and content[idx] <> '}' do
+      decr(idx);
+    end while;
+    startPos := succ(idx);
+    if startPos <= endPos then
+      declName := lower(cleanedToken(content[startPos .. endPos]));
+    end if;
+  end func;
+
+const func string: declNameAfterKeyword (in string: content,
+    in integer: keywordPos, in string: keyword) is func
+  result
+    var string: declName is "";
+  local
+    var integer: idx is 0;
+    var integer: startPos is 0;
+    var integer: endPos is 0;
+  begin
+    idx := keywordPos + length(keyword);
+    while idx <= length(content) and
+        (content[idx] = ' ' or content[idx] = '\t' or
+        content[idx] = '\n' or content[idx] = '\r') do
+      incr(idx);
+    end while;
+    startPos := idx;
+    while idx <= length(content) and content[idx] <> ' ' and
+        content[idx] <> '\t' and content[idx] <> '\n' and
+        content[idx] <> '\r' and content[idx] <> '{' do
+      incr(idx);
+    end while;
+    endPos := pred(idx);
+    if startPos <= endPos then
+      declName := lower(cleanedToken(content[startPos .. endPos]));
+    end if;
+  end func;
+
+const func string: quotedValueAfter (in string: content, in string: keyName) is func
+  result
+    var string: value is "";
+  local
+    var string: keyText is "";
+    var integer: keyPos is 0;
+    var integer: keyEnd is 0;
+    var integer: valueStart is 0;
+    var integer: valueEnd is 0;
+  begin
+    keyText := "\"" <& keyName <& "\"";
+    keyPos := pos(lower(content), lower(keyText), 1);
+    if keyPos <> 0 then
+      keyEnd := pos(content, "\"", succ(keyPos));
+      if keyEnd <> 0 then
+        valueStart := pos(content, "\"", succ(keyEnd));
+        if valueStart <> 0 then
+          valueEnd := pos(content, "\"", succ(valueStart));
+          if valueEnd <> 0 then
+            value := content[succ(valueStart) .. pred(valueEnd)];
+          end if;
+        end if;
+      end if;
+    end if;
+  end func;
+
+const func boolean: isParticleAsset (in string: path) is
+    return endsWith(normalizedAssetPath(path), ".prt");
+
+const func boolean: isSoundAsset (in string: path) is func
+  result
+    var boolean: isSound is FALSE;
+  local
+    var string: lowerPath is "";
+  begin
+    lowerPath := normalizedAssetPath(path);
+    isSound := startsWith(lowerPath, "sound/") and
+        (endsWith(lowerPath, ".wav") or endsWith(lowerPath, ".ogg"));
+  end func;
+
+const proc: inspectMaterialText (inout fxStats: stats,
+    in string: content) is func
+  local
+    var integer: searchPos is 1;
+    var integer: blockStart is 0;
+    var integer: blockEnd is 0;
+    var string: materialName is "";
+  begin
+    blockStart := pos(content, "{", searchPos);
+    while blockStart <> 0 do
+      blockEnd := matchingBlockEnd(content, blockStart);
+      if blockEnd <> 0 then
+        materialName := declNameBeforeBlock(content, blockStart);
+        if materialName <> "" and not containsString(stats.materialDeclNames,
+            materialName) then
+          stats.materialDecls +:= 1;
+          appendUnique(stats.materialDeclNames, materialName);
+          if stats.firstMaterialDecl = "" then
+            stats.firstMaterialDecl := materialName;
+          end if;
+        end if;
+        searchPos := succ(blockEnd);
+      else
+        searchPos := succ(blockStart);
+      end if;
+      blockStart := pos(content, "{", searchPos);
+    end while;
+  end func;
+
+const proc: inspectFxDecl (inout fxStats: stats,
+    in string: path, in string: content) is func
+  local
+    var integer: searchPos is 1;
+    var integer: blockStart is 0;
+    var integer: blockEnd is 0;
+    var string: fxName is "";
+    var string: particleRef is "";
+    var string: soundRef is "";
+    var string: decalRef is "";
+    var string: lightRef is "";
+  begin
+    stats.fxFiles +:= 1;
+    if stats.firstFxFile = "" then
+      stats.firstFxFile := normalizedAssetPath(path);
+    end if;
+    blockStart := pos(content, "{", searchPos);
+    while blockStart <> 0 do
+      blockEnd := matchingBlockEnd(content, blockStart);
+      if blockEnd <> 0 then
+        fxName := declNameBeforeBlock(content, blockStart);
+        if fxName <> "" and not containsString(stats.fxDeclNames, fxName) then
+          stats.fxDecls +:= 1;
+          appendUnique(stats.fxDeclNames, fxName);
+          if stats.firstFxDecl = "" then
+            stats.firstFxDecl := fxName;
+          end if;
+        end if;
+        particleRef := normalizedAssetPath(quotedValueAfter(content[blockStart .. blockEnd],
+            "particle"));
+        soundRef := quotedValueAfter(content[blockStart .. blockEnd], "sound");
+        decalRef := normalizedAssetPath(quotedValueAfter(content[blockStart .. blockEnd],
+            "decal"));
+        lightRef := quotedValueAfter(content[blockStart .. blockEnd], "light");
+        if particleRef <> "" then
+          stats.fxParticleRefs +:= 1;
+          if stats.firstFxParticleRef = "" then
+            stats.firstFxParticleRef := particleRef;
+          end if;
+          if containsString(stats.particleAssetPaths, particleRef) then
+            stats.resolvedFxParticleRefs +:= 1;
+          else
+            stats.missingFxParticleRefs +:= 1;
+          end if;
+        end if;
+        if soundRef <> "" then
+          stats.fxSoundRefs +:= 1;
+          if stats.firstFxSoundRef = "" then
+            stats.firstFxSoundRef := soundRef;
+          end if;
+          if containsString(stats.soundAssetStems, assetStem(soundRef)) then
+            stats.resolvedFxSoundRefs +:= 1;
+          else
+            stats.missingFxSoundRefs +:= 1;
+          end if;
+        end if;
+        if decalRef <> "" then
+          stats.fxDecalRefs +:= 1;
+          if stats.firstFxDecalRef = "" then
+            stats.firstFxDecalRef := decalRef;
+          end if;
+          if containsString(stats.materialDeclNames, decalRef) then
+            stats.resolvedFxDecalRefs +:= 1;
+          else
+            stats.missingFxDecalRefs +:= 1;
+          end if;
+        end if;
+        if lightRef <> "" then
+          stats.fxLightRefs +:= 1;
+          if stats.firstFxLightRef = "" then
+            stats.firstFxLightRef := lightRef;
+          end if;
+        end if;
+        searchPos := succ(blockEnd);
+      else
+        searchPos := succ(blockStart);
+      end if;
+      blockStart := pos(content, "{", searchPos);
+    end while;
+  end func;
+
+const proc: inspectDefText (inout fxStats: stats,
+    in string: content) is func
+  local
+    var string: contentLower is "";
+    var integer: searchPos is 1;
+    var integer: defPos is 0;
+    var integer: blockStart is 0;
+    var integer: blockEnd is 0;
+    var string: className is "";
+    var string: fxRef is "";
+  begin
+    contentLower := lower(content);
+    defPos := pos(contentLower, "entitydef ", searchPos);
+    while defPos <> 0 do
+      stats.entityDefs +:= 1;
+      className := declNameAfterKeyword(content, defPos, "entityDef");
+      blockStart := pos(content, "{", defPos);
+      blockEnd := matchingBlockEnd(content, blockStart);
+      if blockStart <> 0 and blockEnd <> 0 then
+        if startsWith(className, "projectile_") then
+          stats.projectileDefs +:= 1;
+          if stats.firstProjectileDef = "" then
+            stats.firstProjectileDef := className;
+          end if;
+          fxRef := normalizedAssetPath(quotedValueAfter(content[blockStart .. blockEnd],
+              "fx_impact"));
+          if fxRef <> "" then
+            stats.projectileFxRefs +:= 1;
+            if stats.firstProjectileFxRef = "" then
+              stats.firstProjectileFxRef := className <& "=" <& fxRef;
+            end if;
+            if containsString(stats.fxDeclNames, fxRef) then
+              stats.resolvedProjectileFxRefs +:= 1;
+            else
+              stats.missingProjectileFxRefs +:= 1;
+            end if;
+          end if;
+        end if;
+      end if;
+      searchPos := defPos + length("entitydef ");
+      defPos := pos(contentLower, "entitydef ", searchPos);
+    end while;
+  end func;
+
+const proc: inspectMapText (inout fxStats: stats,
+    in string: content) is func
+  begin
+    stats.requestedMapFound := pos(lower(content), "\"classname\"") <> 0;
+  end func;
+
+const proc: deriveRuntimeFx (inout fxStats: stats) is func
+  begin
+    if stats.resolvedProjectileFxRefs <> 0 and
+        stats.resolvedFxParticleRefs <> 0 then
+      stats.runtimeFxEvents := 1;
+      stats.runtimeParticleEvents := stats.resolvedFxParticleRefs;
+      stats.runtimeSoundEvents := stats.resolvedFxSoundRefs;
+      stats.runtimeDecalEvents := stats.resolvedFxDecalRefs;
+      stats.runtimeLightEvents := stats.fxLightRefs;
+      stats.firstRuntimeFxEvent := "projectile_impact>" <& stats.firstFxDecl;
+      stats.firstFxTimeline := "impact@0ms>particle@" <& str(FX_SAMPLE_MSEC) <&
+          "ms>sound@0ms>decal@0ms>light@0ms";
+    end if;
+  end func;
+
+const func array string: findPk4Archives (in string: basePath) is func
+  result
+    var array string: pk4Files is 0 times "";
+  local
+    var array string: names is 0 times "";
+    var string: name is "";
+  begin
+    if fileType(basePath) = FILE_DIR then
+      names := readDir(basePath);
+      for name range names do
+        if isPk4Name(name) and fileType(joinPath(basePath, name)) = FILE_REGULAR then
+          pk4Files &:= joinPath(basePath, name);
+        end if;
+      end for;
+    end if;
+  end func;
+
+const proc: scanArchive (inout fxStats: stats,
+    in string: pk4File) is func
+  local
+    var fileSys: zipFs is fileSys.value;
+    var array string: paths is 0 times "";
+    var string: path is "";
+    var string: normalizedPath is "";
+  begin
+    zipFs := openZip(pk4File);
+    if zipFs = fileSys.value then
+      logError("Could not open pk4 archive: " <& pk4File);
+    else
+      paths := sort(readDir(zipFs, RECURSIVE));
+      for path range paths do
+        normalizedPath := normalizedAssetPath(path);
+        if isParticleAsset(normalizedPath) then
+          stats.particleAssets +:= 1;
+          appendUnique(stats.particleAssetPaths, normalizedPath);
+          if stats.firstParticleAsset = "" then
+            stats.firstParticleAsset := normalizedPath;
+          end if;
+        elsif isSoundAsset(normalizedPath) then
+          stats.soundAssets +:= 1;
+          appendUnique(stats.soundAssetStems, assetStem(normalizedPath));
+          if stats.firstSoundAsset = "" then
+            stats.firstSoundAsset := normalizedPath;
+          end if;
+        end if;
+      end for;
+      for path range paths do
+        normalizedPath := normalizedAssetPath(path);
+        if endsWith(normalizedPath, ".mtr") then
+          inspectMaterialText(stats, getFile(zipFs, path));
+        end if;
+      end for;
+      for path range paths do
+        normalizedPath := normalizedAssetPath(path);
+        if endsWith(normalizedPath, ".fx") then
+          inspectFxDecl(stats, path, getFile(zipFs, path));
+        end if;
+      end for;
+      for path range paths do
+        normalizedPath := normalizedAssetPath(path);
+        if endsWith(normalizedPath, ".def") then
+          inspectDefText(stats, getFile(zipFs, path));
+        elsif normalizedPath = stats.requestedMapPath then
+          inspectMapText(stats, getFile(zipFs, path));
+        end if;
+      end for;
+      close(zipFs);
+    end if;
+  end func;
+
+const proc: parseArgs (inout fxConfig: config) is func
+  local
+    var array string: args is 0 times "";
+    var integer: argIdx is 1;
+  begin
+    args := argv(PROGRAM);
+    while argIdx <= length(args) do
+      if args[argIdx] = "--help" or args[argIdx] = "-h" then
+        config.showHelp := TRUE;
+      elsif args[argIdx] = "--doom3_data_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.dataPath := convDosPath(args[argIdx]);
+      elsif args[argIdx] = "--doom3_base_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.basePath := convDosPath(args[argIdx]);
+      elsif args[argIdx] = "--doom3_start_map" and argIdx < length(args) then
+        incr(argIdx);
+        config.startMap := args[argIdx];
+      elsif args[argIdx] = "+map" and argIdx < length(args) then
+        incr(argIdx);
+        config.startMap := args[argIdx];
+      elsif args[argIdx] = "+set" and argIdx + 2 <= length(args) then
+        if args[argIdx + 1] = "fs_basepath" then
+          config.dataPath := convDosPath(args[argIdx + 2]);
+        elsif args[argIdx + 1] = "fs_game" then
+          config.basePath := convDosPath(args[argIdx + 2]);
+        end if;
+        argIdx +:= 2;
+      end if;
+      incr(argIdx);
+    end while;
+    if config.basePath = "" then
+      config.basePath := joinPath(config.dataPath, DEFAULT_BASE_DIR);
+    end if;
+  end func;
+
+const proc: showUsage is func
+  begin
+    writeln("Usage:");
+    writeln("  s7 doom3_seed7_fx.s7 --doom3_data_path <doom3-root>");
+    writeln("  s7 doom3_seed7_fx.s7 +set fs_basepath <doom3-root> +map <map>");
+    writeln("");
+    writeln("Scans user-owned Doom 3 pk4 files for FX/particle readiness.");
+  end func;
+
+const proc: printStats (in fxStats: stats) is func
+  begin
+    logInfo("pk4_archives=" <& stats.pk4Archives);
+    logInfo("requested_map=" <& stats.requestedMapPath);
+    logInfo("requested_map_found=" <& stats.requestedMapFound);
+    logInfo("fx_assets files=" <& stats.fxFiles <& " decls=" <&
+        stats.fxDecls <& " particles=" <& stats.particleAssets);
+    logInfo("fx_catalog materials=" <& stats.materialDecls <&
+        " sounds=" <& stats.soundAssets);
+    logInfo("fx_projectiles entity_defs=" <& stats.entityDefs <&
+        " projectile_defs=" <& stats.projectileDefs <& " fx_refs=" <&
+        stats.projectileFxRefs <& " resolved=" <&
+        stats.resolvedProjectileFxRefs <& " missing=" <&
+        stats.missingProjectileFxRefs);
+    logInfo("fx_refs particles=" <& stats.fxParticleRefs <& " resolved=" <&
+        stats.resolvedFxParticleRefs <& " missing=" <&
+        stats.missingFxParticleRefs <& " sounds=" <& stats.fxSoundRefs <&
+        " sound_resolved=" <& stats.resolvedFxSoundRefs);
+    logInfo("fx_refs decals=" <& stats.fxDecalRefs <& " resolved=" <&
+        stats.resolvedFxDecalRefs <& " missing=" <&
+        stats.missingFxDecalRefs <& " lights=" <& stats.fxLightRefs);
+    logInfo("runtime_fx events=" <& stats.runtimeFxEvents <&
+        " particle=" <& stats.runtimeParticleEvents <& " sound=" <&
+        stats.runtimeSoundEvents <& " decal=" <& stats.runtimeDecalEvents <&
+        " light=" <& stats.runtimeLightEvents);
+    if stats.firstFxFile <> "" then
+      logInfo("first_fx_file=" <& stats.firstFxFile);
+    end if;
+    if stats.firstFxDecl <> "" then
+      logInfo("first_fx_decl=" <& stats.firstFxDecl);
+    end if;
+    if stats.firstParticleAsset <> "" then
+      logInfo("first_particle_asset=" <& stats.firstParticleAsset);
+    end if;
+    if stats.firstProjectileDef <> "" then
+      logInfo("first_fx_projectile_def=" <& stats.firstProjectileDef);
+    end if;
+    if stats.firstProjectileFxRef <> "" then
+      logInfo("first_projectile_fx_ref=" <& stats.firstProjectileFxRef);
+    end if;
+    if stats.firstFxParticleRef <> "" then
+      logInfo("first_fx_particle_ref=" <& stats.firstFxParticleRef);
+    end if;
+    if stats.firstFxSoundRef <> "" then
+      logInfo("first_fx_sound_ref=" <& stats.firstFxSoundRef);
+    end if;
+    if stats.firstFxDecalRef <> "" then
+      logInfo("first_fx_decal_ref=" <& stats.firstFxDecalRef);
+    end if;
+    if stats.firstFxLightRef <> "" then
+      logInfo("first_fx_light_ref=" <& stats.firstFxLightRef);
+    end if;
+    if stats.firstRuntimeFxEvent <> "" then
+      logInfo("first_runtime_fx_event=" <& stats.firstRuntimeFxEvent);
+      logInfo("first_fx_timeline=" <& stats.firstFxTimeline);
+    end if;
+    logInfo("fx_probe_ready=" <& (stats.pk4Archives <> 0 and
+        stats.requestedMapFound and stats.fxDecls <> 0 and
+        stats.resolvedProjectileFxRefs <> 0 and
+        stats.resolvedFxParticleRefs <> 0 and
+        stats.resolvedFxSoundRefs <> 0 and
+        stats.resolvedFxDecalRefs <> 0 and stats.fxLightRefs <> 0 and
+        stats.runtimeFxEvents <> 0));
+  end func;
+
+const proc: main is func
+  local
+    var fxConfig: config is fxConfig.value;
+    var fxStats: stats is fxStats.value;
+    var array string: pk4Files is 0 times "";
+    var string: pk4File is "";
+  begin
+    parseArgs(config);
+    if config.showHelp then
+      showUsage;
+    else
+      stats.requestedMapPath := mapNameToAssetPath(config.startMap);
+      if fileType(config.basePath) <> FILE_DIR then
+        logError("Doom 3 base directory not found: " <& config.basePath);
+      else
+        pk4Files := sort(findPk4Archives(config.basePath));
+        stats.pk4Archives := length(pk4Files);
+        if length(pk4Files) = 0 then
+          logError("No .pk4 archives found in: " <& config.basePath);
+        else
+          for pk4File range pk4Files do
+            scanArchive(stats, pk4File);
+          end for;
+          deriveRuntimeFx(stats);
+          printStats(stats);
+        end if;
+      end if;
+    end if;
+  end func;

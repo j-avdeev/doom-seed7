@@ -1,0 +1,372 @@
+(********************************************************************)
+(*  doom3_seed7_texture.s7                                         *)
+(*                                                                  *)
+(*  Focused Doom 3 / id Tech 4 texture metadata probe for Seed7.    *)
+(*  It reads user-owned pk4 archives, recognizes common Doom 3       *)
+(*  image assets, parses first-pass TGA/DDS headers, and reports     *)
+(*  texture metadata needed before real renderer upload.             *)
+(********************************************************************)
+
+$ include "seed7_05.s7i";
+$ include "osfiles.s7i";
+$ include "zip.s7i";
+
+const string: DEFAULT_DATA_PATH is ".";
+const string: DEFAULT_BASE_DIR is "base";
+
+const type: textureConfig is new struct
+    var string: dataPath is DEFAULT_DATA_PATH;
+    var string: basePath is "";
+    var boolean: showHelp is FALSE;
+  end struct;
+
+const type: textureStats is new struct
+    var integer: pk4Archives is 0;
+    var integer: imageAssets is 0;
+    var integer: tgaAssets is 0;
+    var integer: ddsAssets is 0;
+    var integer: jpgAssets is 0;
+    var integer: pngAssets is 0;
+    var integer: parsedHeaders is 0;
+    var integer: parsedTgaHeaders is 0;
+    var integer: parsedDdsHeaders is 0;
+    var integer: invalidHeaders is 0;
+    var integer: compressedTextures is 0;
+    var integer: uncompressedTextures is 0;
+    var integer: totalMipLevels is 0;
+    var string: firstImageAsset is "";
+    var string: firstParsedTexture is "";
+    var string: firstTgaTexture is "";
+    var string: firstDdsTexture is "";
+    var string: firstInvalidTexture is "";
+    var string: firstTextureSummary is "";
+  end struct;
+
+const proc: logInfo (in string: msg) is func
+  begin
+    writeln("[texture] " <& msg);
+  end func;
+
+const proc: logError (in string: msg) is func
+  begin
+    writeln("[texture-error] " <& msg);
+  end func;
+
+const func string: joinPath (in string: leftPath, in string: rightPath) is func
+  result
+    var string: joined is "";
+  begin
+    if leftPath = "" then
+      joined := rightPath;
+    elsif endsWith(leftPath, "/") or endsWith(leftPath, "\\") then
+      joined := leftPath <& rightPath;
+    else
+      joined := leftPath <& "/" <& rightPath;
+    end if;
+  end func;
+
+const func boolean: isPk4Name (in string: fileName) is
+    return endsWith(lower(fileName), ".pk4");
+
+const func string: normalizedAssetPath (in string: filePath) is
+    return replace(lower(filePath), "\\", "/");
+
+const func boolean: isImageAssetPath (in string: assetPath) is func
+  result
+    var boolean: isImage is FALSE;
+  local
+    var string: lowerPath is "";
+  begin
+    lowerPath := lower(assetPath);
+    isImage := endsWith(lowerPath, ".tga") or endsWith(lowerPath, ".dds") or
+        endsWith(lowerPath, ".png") or endsWith(lowerPath, ".jpg");
+  end func;
+
+const func integer: byteAt (in string: bytes, in integer: index) is func
+  result
+    var integer: value is 0;
+  begin
+    if index >= 1 and index <= length(bytes) then
+      value := ord(bytes[index]);
+    end if;
+  end func;
+
+const func integer: le16At (in string: bytes, in integer: index) is
+    return byteAt(bytes, index) + byteAt(bytes, succ(index)) * 256;
+
+const func integer: le32At (in string: bytes, in integer: index) is
+    return byteAt(bytes, index) + byteAt(bytes, succ(index)) * 256 +
+        byteAt(bytes, index + 2) * 65536 + byteAt(bytes, index + 3) * 16777216;
+
+const func string: fourCcAt (in string: bytes, in integer: index) is func
+  result
+    var string: code is "";
+  begin
+    if index >= 1 and index + 3 <= length(bytes) then
+      code := bytes[index .. index] <& bytes[succ(index) .. succ(index)] <&
+          bytes[index + 2 .. index + 2] <& bytes[index + 3 .. index + 3];
+    end if;
+  end func;
+
+const proc: inspectTgaHeader (inout textureStats: stats,
+    in string: assetPath, in string: bytes) is func
+  local
+    var integer: imageType is 0;
+    var integer: width is 0;
+    var integer: height is 0;
+    var integer: bitsPerPixel is 0;
+  begin
+    if length(bytes) >= 18 then
+      imageType := byteAt(bytes, 3);
+      width := le16At(bytes, 13);
+      height := le16At(bytes, 15);
+      bitsPerPixel := byteAt(bytes, 17);
+      if width > 0 and height > 0 and
+          (imageType = 2 or imageType = 3 or imageType = 10) then
+        stats.parsedHeaders +:= 1;
+        stats.parsedTgaHeaders +:= 1;
+        stats.uncompressedTextures +:= 1;
+        if stats.firstParsedTexture = "" then
+          stats.firstParsedTexture := assetPath;
+        end if;
+        if stats.firstTgaTexture = "" then
+          stats.firstTgaTexture := assetPath;
+        end if;
+        if stats.firstTextureSummary = "" then
+          stats.firstTextureSummary := assetPath <& ";format=tga;type=" <&
+              imageType <& ";width=" <& width <& ";height=" <& height <&
+              ";bpp=" <& bitsPerPixel;
+        end if;
+      else
+        stats.invalidHeaders +:= 1;
+        if stats.firstInvalidTexture = "" then
+          stats.firstInvalidTexture := assetPath;
+        end if;
+      end if;
+    else
+      stats.invalidHeaders +:= 1;
+      if stats.firstInvalidTexture = "" then
+        stats.firstInvalidTexture := assetPath;
+      end if;
+    end if;
+  end func;
+
+const proc: inspectDdsHeader (inout textureStats: stats,
+    in string: assetPath, in string: bytes) is func
+  local
+    var integer: headerSize is 0;
+    var integer: width is 0;
+    var integer: height is 0;
+    var integer: mipLevels is 0;
+    var string: fourCc is "";
+  begin
+    if length(bytes) >= 128 and bytes[1 .. 4] = "DDS " then
+      headerSize := le32At(bytes, 5);
+      height := le32At(bytes, 13);
+      width := le32At(bytes, 17);
+      mipLevels := le32At(bytes, 29);
+      fourCc := fourCcAt(bytes, 85);
+      if headerSize = 124 and width > 0 and height > 0 then
+        stats.parsedHeaders +:= 1;
+        stats.parsedDdsHeaders +:= 1;
+        stats.compressedTextures +:= 1;
+        if mipLevels <= 0 then
+          mipLevels := 1;
+        end if;
+        stats.totalMipLevels +:= mipLevels;
+        if stats.firstParsedTexture = "" then
+          stats.firstParsedTexture := assetPath;
+        end if;
+        if stats.firstDdsTexture = "" then
+          stats.firstDdsTexture := assetPath;
+        end if;
+        if stats.firstTextureSummary = "" then
+          stats.firstTextureSummary := assetPath <& ";format=dds;fourcc=" <&
+              fourCc <& ";width=" <& width <& ";height=" <& height <&
+              ";mips=" <& mipLevels;
+        end if;
+      else
+        stats.invalidHeaders +:= 1;
+        if stats.firstInvalidTexture = "" then
+          stats.firstInvalidTexture := assetPath;
+        end if;
+      end if;
+    else
+      stats.invalidHeaders +:= 1;
+      if stats.firstInvalidTexture = "" then
+        stats.firstInvalidTexture := assetPath;
+      end if;
+    end if;
+  end func;
+
+const proc: catalogImage (inout textureStats: stats,
+    in string: assetPath, in string: bytes) is func
+  local
+    var string: pathLower is "";
+  begin
+    pathLower := normalizedAssetPath(assetPath);
+    stats.imageAssets +:= 1;
+    if stats.firstImageAsset = "" then
+      stats.firstImageAsset := pathLower;
+    end if;
+    if endsWith(pathLower, ".tga") then
+      stats.tgaAssets +:= 1;
+      inspectTgaHeader(stats, pathLower, bytes);
+    elsif endsWith(pathLower, ".dds") then
+      stats.ddsAssets +:= 1;
+      inspectDdsHeader(stats, pathLower, bytes);
+    elsif endsWith(pathLower, ".jpg") then
+      stats.jpgAssets +:= 1;
+    elsif endsWith(pathLower, ".png") then
+      stats.pngAssets +:= 1;
+    end if;
+  end func;
+
+const proc: scanArchive (inout textureStats: stats,
+    in string: pk4File) is func
+  local
+    var fileSys: zipFs is fileSys.value;
+    var array string: paths is 0 times "";
+    var string: path is "";
+    var string: pathLower is "";
+  begin
+    zipFs := openZip(pk4File);
+    if zipFs = fileSys.value then
+      logError("could not open pk4 archive: " <& pk4File);
+    else
+      paths := readDir(zipFs, RECURSIVE);
+      for path range paths do
+        pathLower := normalizedAssetPath(path);
+        if isImageAssetPath(pathLower) then
+          catalogImage(stats, pathLower, getFile(zipFs, path));
+        end if;
+      end for;
+    end if;
+  end func;
+
+const func array string: findPk4Archives (in string: basePath) is func
+  result
+    var array string: pk4Files is 0 times "";
+  local
+    var array string: names is 0 times "";
+    var string: name is "";
+  begin
+    if fileType(basePath) = FILE_DIR then
+      names := readDir(basePath);
+      for name range names do
+        if isPk4Name(name) and fileType(joinPath(basePath, name)) = FILE_REGULAR then
+          pk4Files &:= joinPath(basePath, name);
+        end if;
+      end for;
+    end if;
+  end func;
+
+const proc: sortStrings (inout array string: values) is func
+  local
+    var integer: leftIdx is 1;
+    var integer: rightIdx is 1;
+    var string: temp is "";
+  begin
+    for leftIdx range 1 to length(values) do
+      for rightIdx range succ(leftIdx) to length(values) do
+        if values[rightIdx] < values[leftIdx] then
+          temp := values[leftIdx];
+          values[leftIdx] := values[rightIdx];
+          values[rightIdx] := temp;
+        end if;
+      end for;
+    end for;
+  end func;
+
+const proc: parseArgs (inout textureConfig: config) is func
+  local
+    var integer: idx is 1;
+    var string: arg is "";
+  begin
+    while idx <= length(argv(PROGRAM)) do
+      arg := argv(PROGRAM)[idx];
+      if arg = "--help" or arg = "-h" then
+        config.showHelp := TRUE;
+      elsif (arg = "--doom3_data_path" or arg = "+set" and
+          idx + 2 <= length(argv(PROGRAM)) and
+          argv(PROGRAM)[succ(idx)] = "fs_basepath") and
+          idx < length(argv(PROGRAM)) then
+        if arg = "+set" then
+          config.dataPath := convDosPath(argv(PROGRAM)[idx + 2]);
+          idx +:= 2;
+        else
+          config.dataPath := convDosPath(argv(PROGRAM)[succ(idx)]);
+          incr(idx);
+        end if;
+      elsif arg = "--doom3_base_path" and idx < length(argv(PROGRAM)) then
+        config.basePath := convDosPath(argv(PROGRAM)[succ(idx)]);
+        incr(idx);
+      end if;
+      incr(idx);
+    end while;
+    if config.basePath = "" then
+      config.basePath := joinPath(config.dataPath, DEFAULT_BASE_DIR);
+    end if;
+  end func;
+
+const proc: showUsage is func
+  begin
+    writeln("Usage:");
+    writeln("  s7 doom3_seed7_texture.s7 --doom3_data_path <doom3-root>");
+    writeln("  s7 doom3_seed7_texture.s7 +set fs_basepath <doom3-root>");
+    writeln;
+    writeln("Scans user-owned Doom 3 pk4 files for texture metadata readiness.");
+  end func;
+
+const proc: printStats (in textureStats: stats) is func
+  begin
+    logInfo("pk4_archives=" <& stats.pk4Archives);
+    logInfo("texture_assets total=" <& stats.imageAssets <& " tga=" <&
+        stats.tgaAssets <& " dds=" <& stats.ddsAssets <& " jpg=" <&
+        stats.jpgAssets <& " png=" <& stats.pngAssets);
+    logInfo("texture_headers parsed=" <& stats.parsedHeaders <&
+        " tga=" <& stats.parsedTgaHeaders <& " dds=" <&
+        stats.parsedDdsHeaders <& " invalid=" <& stats.invalidHeaders);
+    logInfo("texture_upload_plan compressed=" <& stats.compressedTextures <&
+        " uncompressed=" <& stats.uncompressedTextures <& " mip_levels=" <&
+        stats.totalMipLevels);
+    if stats.firstImageAsset <> "" then logInfo("first_image_asset=" <& stats.firstImageAsset); end if;
+    if stats.firstParsedTexture <> "" then logInfo("first_parsed_texture=" <& stats.firstParsedTexture); end if;
+    if stats.firstTgaTexture <> "" then logInfo("first_tga_texture=" <& stats.firstTgaTexture); end if;
+    if stats.firstDdsTexture <> "" then logInfo("first_dds_texture=" <& stats.firstDdsTexture); end if;
+    if stats.firstInvalidTexture <> "" then logInfo("first_invalid_texture=" <& stats.firstInvalidTexture); end if;
+    if stats.firstTextureSummary <> "" then logInfo("first_texture_summary=" <& stats.firstTextureSummary); end if;
+    logInfo("texture_probe_ready=" <& (stats.pk4Archives <> 0 and
+        stats.imageAssets <> 0 and stats.parsedHeaders <> 0 and
+        stats.parsedTgaHeaders <> 0 and stats.parsedDdsHeaders <> 0));
+  end func;
+
+const proc: main is func
+  local
+    var textureConfig: config is textureConfig.value;
+    var textureStats: stats is textureStats.value;
+    var array string: pk4Files is 0 times "";
+    var string: pk4File is "";
+  begin
+    parseArgs(config);
+    if config.showHelp then
+      showUsage;
+    else
+      if fileType(config.basePath) <> FILE_DIR then
+        logError("Doom 3 base directory not found: " <& config.basePath);
+        logError("Expected a legal install path containing base/*.pk4");
+      else
+        pk4Files := findPk4Archives(config.basePath);
+        sortStrings(pk4Files);
+        stats.pk4Archives := length(pk4Files);
+        if length(pk4Files) = 0 then
+          logError("No .pk4 archives found in: " <& config.basePath);
+        else
+          for pk4File range pk4Files do
+            scanArchive(stats, pk4File);
+          end for;
+          printStats(stats);
+        end if;
+      end if;
+    end if;
+  end func;

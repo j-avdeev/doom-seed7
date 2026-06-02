@@ -1,0 +1,570 @@
+(********************************************************************)
+(*  doom3_seed7_platform.s7                                         *)
+(*                                                                  *)
+(*  Focused Doom 3 / id Tech 4 platform probe for Seed7. It checks  *)
+(*  cvars, console-style startup commands, config binds, timing,     *)
+(*  input-action translation, and save/config path plumbing.          *)
+(********************************************************************)
+
+$ include "seed7_05.s7i";
+$ include "osfiles.s7i";
+$ include "zip.s7i";
+
+const string: DEFAULT_DATA_PATH is ".";
+const string: DEFAULT_BASE_DIR is "base";
+const string: DEFAULT_START_MAP is "game/mars_city1";
+const string: DEFAULT_RENDER_MODE is "metadata";
+const string: DEFAULT_SAVE_PATH is "doom3_seed7_user/save";
+const string: DEFAULT_CONFIG_PATH is "doom3_seed7_user/config";
+
+const type: cvarRecord is new struct
+    var string: name is "";
+    var string: value is "";
+  end struct;
+
+const type: bindRecord is new struct
+    var string: keyName is "";
+    var string: actionName is "";
+  end struct;
+
+const type: platformConfig is new struct
+    var string: dataPath is DEFAULT_DATA_PATH;
+    var string: basePath is "";
+    var string: startMap is DEFAULT_START_MAP;
+    var string: renderMode is DEFAULT_RENDER_MODE;
+    var string: savePath is DEFAULT_SAVE_PATH;
+    var string: configPath is DEFAULT_CONFIG_PATH;
+    var boolean: showHelp is FALSE;
+    var array cvarRecord: cvars is 0 times cvarRecord.value;
+    var array bindRecord: cliBinds is 0 times bindRecord.value;
+    var array cvarRecord: pendingCliCvars is 0 times cvarRecord.value;
+    var array bindRecord: pendingCliBinds is 0 times bindRecord.value;
+    var string: pendingCliMap is "";
+  end struct;
+
+const type: platformStats is new struct
+    var integer: pk4Archives is 0;
+    var integer: configFiles is 0;
+    var integer: configCvars is 0;
+    var integer: configBinds is 0;
+    var integer: configCommands is 0;
+    var integer: cliCommands is 0;
+    var integer: commandBufferCommands is 0;
+    var integer: commandSetCvars is 0;
+    var integer: commandBinds is 0;
+    var integer: commandMaps is 0;
+    var integer: totalCvars is 0;
+    var integer: totalBinds is 0;
+    var integer: inputEvents is 0;
+    var integer: resolvedInputActions is 0;
+    var boolean: forwardActive is FALSE;
+    var boolean: attackActive is FALSE;
+    var boolean: useActive is FALSE;
+    var boolean: pauseActive is FALSE;
+    var integer: frameMsec is 16;
+    var integer: frameHz is 60;
+    var string: firstConfigFile is "";
+    var string: firstConfigCvar is "";
+    var string: firstConfigBind is "";
+    var string: firstCliCvar is "";
+    var string: firstCliBind is "";
+    var string: firstInputAction is "";
+    var string: firstCommand is "";
+    var string: commandPath is "";
+  end struct;
+
+const proc: logInfo (in string: msg) is func
+  begin
+    writeln("[platform] " <& msg);
+  end func;
+
+const proc: logError (in string: msg) is func
+  begin
+    writeln("[platform-error] " <& msg);
+  end func;
+
+const func string: joinPath (in string: leftPath, in string: rightPath) is func
+  result
+    var string: joined is "";
+  begin
+    if leftPath = "" then
+      joined := rightPath;
+    elsif endsWith(leftPath, "/") or endsWith(leftPath, "\\") then
+      joined := leftPath <& rightPath;
+    else
+      joined := leftPath <& "/" <& rightPath;
+    end if;
+  end func;
+
+const func boolean: isPk4Name (in string: fileName) is
+    return endsWith(lower(fileName), ".pk4");
+
+const func string: normalizedAssetPath (in string: filePath) is
+    return replace(lower(filePath), "\\", "/");
+
+const func string: cleanedToken (in string: token) is func
+  result
+    var string: clean is "";
+  local
+    var integer: idx is 1;
+    var char: ch is ' ';
+  begin
+    clean := trim(token);
+    while idx <= length(clean) do
+      ch := clean[idx];
+      if ch = '"' or ch = '\r' or ch = '\t' then
+        clean := clean[.. pred(idx)] & clean[succ(idx) ..];
+      else
+        incr(idx);
+      end if;
+    end while;
+  end func;
+
+const func boolean: containsCvar (in array cvarRecord: cvars,
+    in string: cvarName) is func
+  result
+    var boolean: found is FALSE;
+  local
+    var cvarRecord: cvar is cvarRecord.value;
+  begin
+    for cvar range cvars do
+      if cvar.name = cvarName then
+        found := TRUE;
+      end if;
+    end for;
+  end func;
+
+const proc: setCvar (inout array cvarRecord: cvars,
+    in string: cvarName, in string: cvarValue) is func
+  local
+    var integer: idx is 1;
+    var cvarRecord: cvar is cvarRecord.value;
+  begin
+    while idx <= length(cvars) and cvars[idx].name <> cvarName do
+      incr(idx);
+    end while;
+    if idx <= length(cvars) then
+      cvars[idx].value := cvarValue;
+    else
+      cvar.name := cvarName;
+      cvar.value := cvarValue;
+      cvars &:= cvar;
+    end if;
+  end func;
+
+const proc: addBind (inout array bindRecord: binds,
+    in string: keyName, in string: actionName) is func
+  local
+    var integer: idx is 1;
+    var bindRecord: bind is bindRecord.value;
+  begin
+    while idx <= length(binds) and binds[idx].keyName <> lower(keyName) do
+      incr(idx);
+    end while;
+    if idx <= length(binds) then
+      binds[idx].actionName := actionName;
+    else
+      bind.keyName := lower(keyName);
+      bind.actionName := actionName;
+      binds &:= bind;
+    end if;
+  end func;
+
+const func string: bindAction (in array bindRecord: binds,
+    in string: keyName) is func
+  result
+    var string: actionName is "";
+  local
+    var integer: idx is 1;
+  begin
+    while idx <= length(binds) and actionName = "" do
+      if binds[idx].keyName = lower(keyName) then
+        actionName := binds[idx].actionName;
+      end if;
+      incr(idx);
+    end while;
+  end func;
+
+const func string: cvarValue (in array cvarRecord: cvars,
+    in string: cvarName, in string: fallbackValue) is func
+  result
+    var string: value is "";
+  local
+    var integer: idx is 1;
+  begin
+    value := fallbackValue;
+    while idx <= length(cvars) do
+      if cvars[idx].name = cvarName then
+        value := cvars[idx].value;
+      end if;
+      incr(idx);
+    end while;
+  end func;
+
+const proc: recordCommand (inout platformStats: stats,
+    in string: sourceName, in string: commandName) is func
+  local
+    var string: commandRef is "";
+  begin
+    commandRef := sourceName <& ":" <& commandName;
+    stats.commandBufferCommands +:= 1;
+    if sourceName = "cfg" then
+      stats.configCommands +:= 1;
+    elsif sourceName = "cli" then
+      stats.cliCommands +:= 1;
+    end if;
+    if commandName = "set" then
+      stats.commandSetCvars +:= 1;
+    elsif commandName = "bind" then
+      stats.commandBinds +:= 1;
+    elsif commandName = "map" then
+      stats.commandMaps +:= 1;
+    end if;
+    if stats.firstCommand = "" then
+      stats.firstCommand := commandRef;
+    end if;
+    if stats.commandPath = "" then
+      stats.commandPath := commandRef;
+    else
+      stats.commandPath &:= ">" <& commandRef;
+    end if;
+  end func;
+
+const proc: parseConfigLine (inout platformConfig: config,
+    inout platformStats: stats, in string: line) is func
+  local
+    var string: cleanLine is "";
+    var array string: parts is 0 times "";
+    var string: cvarName is "";
+    var string: cvarVal is "";
+    var string: keyName is "";
+    var string: actionName is "";
+  begin
+    cleanLine := trim(line);
+    if cleanLine <> "" and not startsWith(cleanLine, "//") then
+      parts := noEmptyStrings(split(cleanLine, ' '));
+      if length(parts) >= 3 and (parts[1] = "set" or parts[1] = "seta") then
+        cvarName := cleanedToken(parts[2]);
+        cvarVal := cleanedToken(parts[3]);
+        if cvarName <> "" then
+          setCvar(config.cvars, cvarName, cvarVal);
+          stats.configCvars +:= 1;
+          recordCommand(stats, "cfg", "set");
+          if stats.firstConfigCvar = "" then
+            stats.firstConfigCvar := cvarName <& "=" <& cvarVal;
+          end if;
+        end if;
+      elsif length(parts) >= 3 and parts[1] = "bind" then
+        keyName := cleanedToken(parts[2]);
+        actionName := cleanedToken(parts[3]);
+        if keyName <> "" and actionName <> "" then
+          addBind(config.cliBinds, keyName, actionName);
+          stats.configBinds +:= 1;
+          recordCommand(stats, "cfg", "bind");
+          if stats.firstConfigBind = "" then
+            stats.firstConfigBind := keyName <& "=" <& actionName;
+          end if;
+        end if;
+      end if;
+    end if;
+  end func;
+
+const proc: parseConfigText (inout platformConfig: config,
+    inout platformStats: stats, in string: path, in string: content) is func
+  local
+    var array string: lines is 0 times "";
+    var string: line is "";
+  begin
+    stats.configFiles +:= 1;
+    if stats.firstConfigFile = "" then
+      stats.firstConfigFile := path;
+    end if;
+    lines := split(content, '\n');
+    for line range lines do
+      parseConfigLine(config, stats, line);
+    end for;
+  end func;
+
+const proc: scanArchive (inout platformConfig: config,
+    inout platformStats: stats, in string: pk4File) is func
+  local
+    var fileSys: zipFs is fileSys.value;
+    var array string: paths is 0 times "";
+    var string: path is "";
+  begin
+    zipFs := openZip(pk4File);
+    if zipFs = fileSys.value then
+      logError("could not open pk4 archive: " <& pk4File);
+    else
+      paths := readDir(zipFs, RECURSIVE);
+      for path range paths do
+        if endsWith(normalizedAssetPath(path), ".cfg") then
+          parseConfigText(config, stats, normalizedAssetPath(path),
+              getFile(zipFs, path));
+        end if;
+      end for;
+      close(zipFs);
+    end if;
+  end func;
+
+const func array string: findPk4Archives (in string: basePath) is func
+  result
+    var array string: pk4Files is 0 times "";
+  local
+    var array string: names is 0 times "";
+    var string: name is "";
+  begin
+    if fileType(basePath) = FILE_DIR then
+      names := readDir(basePath);
+      for name range names do
+        if isPk4Name(name) and fileType(joinPath(basePath, name)) = FILE_REGULAR then
+          pk4Files &:= joinPath(basePath, name);
+        end if;
+      end for;
+    end if;
+  end func;
+
+const proc: seedDefaultCvars (inout platformConfig: config) is func
+  begin
+    if not containsCvar(config.cvars, "fs_basepath") then
+      setCvar(config.cvars, "fs_basepath", config.dataPath);
+    end if;
+    if not containsCvar(config.cvars, "fs_game") then
+      setCvar(config.cvars, "fs_game", "base");
+    end if;
+    if not containsCvar(config.cvars, "doom3_start_map") then
+      setCvar(config.cvars, "doom3_start_map", config.startMap);
+    end if;
+    if not containsCvar(config.cvars, "doom3_render_mode") then
+      setCvar(config.cvars, "doom3_render_mode", config.renderMode);
+    end if;
+    if not containsCvar(config.cvars, "com_fixedTic") then
+      setCvar(config.cvars, "com_fixedTic", "16");
+    end if;
+    if not containsCvar(config.cvars, "com_maxfps") then
+      setCvar(config.cvars, "com_maxfps", "60");
+    end if;
+  end func;
+
+const proc: parseArgs (inout platformConfig: config,
+    inout platformStats: stats) is func
+  local
+    var array string: args is 0 times "";
+    var integer: argIdx is 1;
+    var string: name is "";
+    var string: value is "";
+  begin
+    args := argv(PROGRAM);
+    while argIdx <= length(args) do
+      if args[argIdx] = "--help" or args[argIdx] = "-h" then
+        config.showHelp := TRUE;
+      elsif args[argIdx] = "--doom3_data_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.dataPath := convDosPath(args[argIdx]);
+      elsif args[argIdx] = "--doom3_base_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.basePath := convDosPath(args[argIdx]);
+      elsif args[argIdx] = "--doom3_start_map" and argIdx < length(args) then
+        incr(argIdx);
+        config.startMap := args[argIdx];
+      elsif args[argIdx] = "--doom3_render_mode" and argIdx < length(args) then
+        incr(argIdx);
+        config.renderMode := args[argIdx];
+      elsif args[argIdx] = "--doom3_save_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.savePath := convDosPath(args[argIdx]);
+      elsif args[argIdx] = "--doom3_config_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.configPath := convDosPath(args[argIdx]);
+      elsif args[argIdx] = "--set" and argIdx + 2 <= length(args) then
+        name := args[argIdx + 1];
+        value := args[argIdx + 2];
+        setCvar(config.pendingCliCvars, name, value);
+        if stats.firstCliCvar = "" then
+          stats.firstCliCvar := name <& "=" <& value;
+        end if;
+        argIdx +:= 2;
+      elsif args[argIdx] = "+set" and argIdx + 2 <= length(args) then
+        name := args[argIdx + 1];
+        value := args[argIdx + 2];
+        setCvar(config.pendingCliCvars, name, value);
+        if stats.firstCliCvar = "" then
+          stats.firstCliCvar := name <& "=" <& value;
+        end if;
+        argIdx +:= 2;
+      elsif args[argIdx] = "+bind" and argIdx + 2 <= length(args) then
+        addBind(config.pendingCliBinds, args[argIdx + 1], args[argIdx + 2]);
+        if stats.firstCliBind = "" then
+          stats.firstCliBind := args[argIdx + 1] <& "=" <& args[argIdx + 2];
+        end if;
+        argIdx +:= 2;
+      elsif args[argIdx] = "+map" and argIdx < length(args) then
+        incr(argIdx);
+        config.startMap := args[argIdx];
+        config.pendingCliMap := config.startMap;
+      end if;
+      incr(argIdx);
+    end while;
+    if config.basePath = "" then
+      config.basePath := joinPath(config.dataPath, DEFAULT_BASE_DIR);
+    end if;
+    seedDefaultCvars(config);
+  end func;
+
+const proc: applyPendingCliCommands (inout platformConfig: config,
+    inout platformStats: stats) is func
+  local
+    var cvarRecord: cvar is cvarRecord.value;
+    var bindRecord: bind is bindRecord.value;
+  begin
+    for cvar range config.pendingCliCvars do
+      setCvar(config.cvars, cvar.name, cvar.value);
+      recordCommand(stats, "cli", "set");
+    end for;
+    for bind range config.pendingCliBinds do
+      addBind(config.cliBinds, bind.keyName, bind.actionName);
+      recordCommand(stats, "cli", "bind");
+    end for;
+    if config.pendingCliMap <> "" then
+      config.startMap := config.pendingCliMap;
+      setCvar(config.cvars, "doom3_start_map", config.startMap);
+      recordCommand(stats, "cli", "map");
+    end if;
+  end func;
+
+const proc: evaluateInputFrame (in platformConfig: config,
+    inout platformStats: stats) is func
+  local
+    var array string: pressedKeys is [] ("w", "mouse1", "e", "escape");
+    var string: keyName is "";
+    var string: actionName is "";
+  begin
+    for keyName range pressedKeys do
+      stats.inputEvents +:= 1;
+      actionName := bindAction(config.cliBinds, keyName);
+      if actionName <> "" then
+        stats.resolvedInputActions +:= 1;
+        if stats.firstInputAction = "" then
+          stats.firstInputAction := keyName <& "=" <& actionName;
+        end if;
+        if actionName = "_forward" then
+          stats.forwardActive := TRUE;
+        elsif actionName = "_attack" then
+          stats.attackActive := TRUE;
+        elsif actionName = "_use" then
+          stats.useActive := TRUE;
+        elsif actionName = "togglemenu" or actionName = "_pause" then
+          stats.pauseActive := TRUE;
+        end if;
+      end if;
+    end for;
+  end func;
+
+const proc: finalizeTiming (in platformConfig: config,
+    inout platformStats: stats) is func
+  begin
+    block
+      stats.frameMsec := integer(cvarValue(config.cvars, "com_fixedTic", "16"));
+      stats.frameHz := integer(cvarValue(config.cvars, "com_maxfps", "60"));
+    exception
+      catch RANGE_ERROR:
+        stats.frameMsec := 16;
+        stats.frameHz := 60;
+    end block;
+  end func;
+
+const proc: showUsage is func
+  begin
+    writeln("Usage:");
+    writeln("  s7 doom3_seed7_platform.s7 --doom3_data_path <doom3-root>");
+    writeln("  s7 doom3_seed7_platform.s7 +set com_fixedTic 16 +bind w _forward");
+    writeln("");
+    writeln("Checks platform config, cvars, binds, timing, and input readiness.");
+  end func;
+
+const proc: printStats (in platformConfig: config,
+    in platformStats: stats) is func
+  begin
+    logInfo("pk4_archives=" <& stats.pk4Archives);
+    logInfo("save_path=" <& config.savePath);
+    logInfo("config_path=" <& config.configPath);
+    logInfo("start_map=" <& config.startMap);
+    logInfo("render_mode=" <& config.renderMode);
+    logInfo("config_files=" <& stats.configFiles);
+    logInfo("config_cvars=" <& stats.configCvars);
+    logInfo("config_binds=" <& stats.configBinds);
+    logInfo("command_buffer total=" <& stats.commandBufferCommands <&
+        " cfg=" <& stats.configCommands <& " cli=" <& stats.cliCommands);
+    logInfo("command_kinds set=" <& stats.commandSetCvars <&
+        " bind=" <& stats.commandBinds <& " map=" <& stats.commandMaps);
+    logInfo("total_cvars=" <& stats.totalCvars);
+    logInfo("total_binds=" <& stats.totalBinds);
+    if stats.firstConfigFile <> "" then
+      logInfo("first_config_file=" <& stats.firstConfigFile);
+    end if;
+    if stats.firstConfigCvar <> "" then
+      logInfo("first_config_cvar=" <& stats.firstConfigCvar);
+    end if;
+    if stats.firstConfigBind <> "" then
+      logInfo("first_config_bind=" <& stats.firstConfigBind);
+    end if;
+    if stats.firstCliCvar <> "" then
+      logInfo("first_cli_cvar=" <& stats.firstCliCvar);
+    end if;
+    if stats.firstCliBind <> "" then
+      logInfo("first_cli_bind=" <& stats.firstCliBind);
+    end if;
+    if stats.firstCommand <> "" then
+      logInfo("first_command=" <& stats.firstCommand);
+    end if;
+    if stats.commandPath <> "" then
+      logInfo("command_path=" <& stats.commandPath);
+    end if;
+    logInfo("timing frame_msec=" <& stats.frameMsec <& " maxfps=" <& stats.frameHz);
+    logInfo("input_events=" <& stats.inputEvents <& " actions=" <& stats.resolvedInputActions);
+    if stats.firstInputAction <> "" then
+      logInfo("first_input_action=" <& stats.firstInputAction);
+    end if;
+    logInfo("input_state forward=" <& stats.forwardActive <&
+        " attack=" <& stats.attackActive <&
+        " use=" <& stats.useActive <&
+        " pause=" <& stats.pauseActive);
+    logInfo("platform_probe_ready=" <& (stats.pk4Archives <> 0 and
+        stats.configFiles <> 0 and stats.configBinds >= 3 and
+        stats.commandBufferCommands <> 0 and stats.commandMaps <> 0 and
+        stats.forwardActive and stats.attackActive and stats.useActive and
+        stats.frameMsec > 0 and config.savePath <> "" and config.configPath <> ""));
+  end func;
+
+const proc: main is func
+  local
+    var platformConfig: config is platformConfig.value;
+    var platformStats: stats is platformStats.value;
+    var array string: pk4Files is 0 times "";
+    var string: pk4File is "";
+  begin
+    parseArgs(config, stats);
+    if config.showHelp then
+      showUsage;
+    else
+      if fileType(config.basePath) <> FILE_DIR then
+        logError("Doom 3 base directory not found: " <& config.basePath);
+      else
+        pk4Files := sort(findPk4Archives(config.basePath));
+        stats.pk4Archives := length(pk4Files);
+        if length(pk4Files) = 0 then
+          logError("No .pk4 archives found in: " <& config.basePath);
+        else
+          for pk4File range pk4Files do
+            scanArchive(config, stats, pk4File);
+          end for;
+          applyPendingCliCommands(config, stats);
+          evaluateInputFrame(config, stats);
+          finalizeTiming(config, stats);
+          stats.totalCvars := length(config.cvars);
+          stats.totalBinds := length(config.cliBinds);
+          printStats(config, stats);
+        end if;
+      end if;
+    end if;
+  end func;

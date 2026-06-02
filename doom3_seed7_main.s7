@@ -1,0 +1,14 @@
+(********************************************************************)
+(*  doom3_seed7_main.s7                                                *)
+(*  Main DOOM3 Seed7 runtime entrypoint.                                *)
+(*                                                                     *)
+(*  This file is the canonical browser/desktop entry for the current     *)
+(*  Doom 3 scanner/compatibility runtime path. It delegates to            *)
+(*  `doom3_seed7.s7`, which performs Stage-1+ platform, asset, and      *)
+(*  subsystem pipeline checks against user-owned Doom 3 `.pk4` files.    *)
+(*                                                                     *)
+(*  This is intentionally non-random and fully deterministic so the      *)
+(*  browser and native smoke flows remain replayable across runs.        *)
+(********************************************************************)
+
+$ include "doom3_seed7.s7";

@@ -1,0 +1,2275 @@
+(********************************************************************)
+(*  doom3_seed7_render.s7                                           *)
+(*                                                                  *)
+(*  Focused Doom 3 / id Tech 4 renderer-front-end probe for Seed7.  *)
+(*  It reads user-owned pk4 archives, extracts selected-map brush    *)
+(*  bounds plus material texture bindings, then builds a tiny        *)
+(*  deterministic depth-buffered ASCII framebuffer contract. No      *)
+(*  commercial data is bundled.                                      *)
+(********************************************************************)
+
+$ include "seed7_05.s7i";
+$ include "osfiles.s7i";
+$ include "zip.s7i";
+$ include "math.s7i";
+
+const string: DEFAULT_DATA_PATH is ".";
+const string: DEFAULT_BASE_DIR is "base";
+const string: DEFAULT_START_MAP is "game/mars_city1";
+const integer: FRAME_WIDTH is 24;
+const integer: FRAME_HEIGHT is 12;
+const float: FAR_DEPTH is 1000000.0;
+const float: MATERIAL_SAMPLE_TIME is 2.0;
+
+const type: renderConfig is new struct
+    var string: dataPath is DEFAULT_DATA_PATH;
+    var string: basePath is "";
+    var string: startMap is DEFAULT_START_MAP;
+    var boolean: showHelp is FALSE;
+  end struct;
+
+const type: renderSurface is new struct
+    var float: minX is 0.0;
+    var float: minY is 0.0;
+    var float: maxX is 0.0;
+    var float: maxY is 0.0;
+    var string: materialName is "";
+    var string: textureName is "";
+    var string: surfaceKind is "brush";
+    var boolean: textureAvailable is FALSE;
+    var boolean: complete is FALSE;
+  end struct;
+
+const type: renderLight is new struct
+    var string: lightName is "";
+    var boolean: hasOrigin is FALSE;
+    var boolean: hasRadius is FALSE;
+    var boolean: hasColor is FALSE;
+    var float: x is 0.0;
+    var float: y is 0.0;
+    var float: radius is 0.0;
+    var string: colorText is "";
+  end struct;
+
+const type: renderEntity is new struct
+    var string: className is "";
+    var string: entityName is "";
+    var string: modelRef is "";
+    var string: modelStem is "";
+    var string: animRef is "";
+    var string: animStem is "";
+    var string: skinRef is "";
+    var string: skinMaterial is "";
+    var boolean: hasOrigin is FALSE;
+    var boolean: modelResolved is FALSE;
+    var boolean: animResolved is FALSE;
+    var boolean: skinResolved is FALSE;
+    var float: x is 0.0;
+    var float: y is 0.0;
+  end struct;
+
+const type: renderStats is new struct
+    var integer: pk4Archives is 0;
+    var string: requestedMapPath is "";
+    var string: requestedRenderPath is "";
+    var boolean: requestedMapFound is FALSE;
+    var boolean: requestedRenderFound is FALSE;
+    var integer: materialDecls is 0;
+    var integer: materialTextureBindings is 0;
+    var integer: materialImageDirectives is 0;
+    var integer: materialStages is 0;
+    var integer: materialBlendStages is 0;
+    var integer: animatedMaterials is 0;
+    var integer: materialTransforms is 0;
+    var integer: materialTimeExpressions is 0;
+    var integer: imageAssets is 0;
+    var integer: modelAssets is 0;
+    var integer: md5MeshAssets is 0;
+    var integer: md5AnimAssets is 0;
+    var integer: parsedMd5Meshes is 0;
+    var integer: parsedMd5Anims is 0;
+    var integer: md5RenderVerts is 0;
+    var integer: md5RenderTris is 0;
+    var integer: md5RenderWeights is 0;
+    var integer: md5AnimFrames is 0;
+    var integer: md5AnimFrameRate is 0;
+    var integer: entityDefs is 0;
+    var integer: entityDefModelRefs is 0;
+    var integer: entityDefAnimRefs is 0;
+    var integer: entityDefSkinRefs is 0;
+    var integer: entityDefInherits is 0;
+    var integer: skinAssets is 0;
+    var integer: skinDecls is 0;
+    var integer: skinRemaps is 0;
+    var integer: mapEntities is 0;
+    var integer: playerStarts is 0;
+    var integer: lights is 0;
+    var integer: lightsWithRadius is 0;
+    var integer: lightsWithColor is 0;
+    var boolean: playerParsed is FALSE;
+    var float: playerX is 0.0;
+    var float: playerY is 0.0;
+    var float: playerYaw is 0.0;
+    var array string: materialNames is 0 times "";
+    var array string: materialTextures is 0 times "";
+    var array string: imageAssetNames is 0 times "";
+    var array string: modelAssetStems is 0 times "";
+    var array string: animAssetStems is 0 times "";
+    var array string: skinAssetStems is 0 times "";
+    var array string: skinNames is 0 times "";
+    var array string: skinRemapFromMaterials is 0 times "";
+    var array string: skinRemapToMaterials is 0 times "";
+    var array string: entityDefNames is 0 times "";
+    var array string: entityDefModelRefsByName is 0 times "";
+    var array string: entityDefAnimRefsByName is 0 times "";
+    var array string: entityDefSkinRefsByName is 0 times "";
+    var array string: entityDefInheritsByName is 0 times "";
+    var array string: compiledMaterialNames is 0 times "";
+    var array renderSurface: surfaces is 0 times renderSurface.value;
+    var array renderLight: renderLights is 0 times renderLight.value;
+    var array renderEntity: renderEntities is 0 times renderEntity.value;
+    var integer: brushSurfaces is 0;
+    var integer: patchSurfaces is 0;
+    var integer: visibleSurfaces is 0;
+    var integer: texturedSurfaces is 0;
+    var integer: fallbackSurfaces is 0;
+    var integer: litSurfaces is 0;
+    var integer: lightInfluences is 0;
+    var integer: framebufferColumns is 0;
+    var integer: framebufferPixels is 0;
+    var integer: depthWrites is 0;
+    var integer: occludedWrites is 0;
+    var integer: renderEntityCandidates is 0;
+    var integer: renderEntityVisible is 0;
+    var integer: renderEntityOccluded is 0;
+    var integer: renderEntityModelRefs is 0;
+    var integer: renderEntityModelsResolved is 0;
+    var integer: renderEntityModelsMissing is 0;
+    var integer: renderEntityAnimRefs is 0;
+    var integer: renderEntityAnimsResolved is 0;
+    var integer: renderEntityAnimsMissing is 0;
+    var integer: renderEntitySkinRefs is 0;
+    var integer: renderEntitySkinsResolved is 0;
+    var integer: renderEntitySkinsMissing is 0;
+    var integer: renderEntitySkinRemaps is 0;
+    var integer: compiledRenderModels is 0;
+    var integer: compiledRenderSurfaces is 0;
+    var integer: compiledRenderPortalAreas is 0;
+    var integer: compiledRenderPortals is 0;
+    var integer: firstCompiledPortalPositiveArea is 0;
+    var integer: firstCompiledPortalNegativeArea is 0;
+    var integer: compiledRenderVertexDecls is 0;
+    var integer: compiledRenderIndexDecls is 0;
+    var integer: compiledRenderVertexTotal is 0;
+    var integer: compiledRenderIndexTotal is 0;
+    var integer: compiledRenderMaterialRefs is 0;
+    var integer: compiledRenderTextureResolved is 0;
+    var integer: compiledRenderTextureMissing is 0;
+    var integer: animatedActorCandidates is 0;
+    var integer: animatedActorDrawCalls is 0;
+    var integer: animatedActorVertices is 0;
+    var integer: animatedActorTriangles is 0;
+    var integer: animatedActorTextureResolved is 0;
+    var integer: animatedActorLightInfluences is 0;
+    var string: compiledRenderVersion is "";
+    var string: compiledRenderModelName is "";
+    var integer: visibleModelEntities is 0;
+    var integer: occludedModelEntities is 0;
+    var string: firstVisibleEntity is "";
+    var string: firstOccludedEntity is "";
+    var string: firstRenderEntityModel is "";
+    var string: firstMissingRenderEntityModel is "";
+    var string: firstRenderEntityAnim is "";
+    var string: firstMissingRenderEntityAnim is "";
+    var string: firstRenderSkinBinding is "";
+    var string: firstMissingRenderSkin is "";
+    var string: firstRenderSkinRemap is "";
+    var string: nearestMaterial is "";
+    var string: nearestTexture is "";
+    var float: nearestDepth is FAR_DEPTH;
+    var integer: nearestLightCount is 0;
+    var string: nearestLightColor is "";
+    var string: firstAnimatedMaterial is "";
+    var string: firstAnimatedTexture is "";
+    var string: firstAnimatedTransform is "";
+    var string: firstMd5Mesh is "";
+    var string: firstMd5Anim is "";
+    var string: firstMd5Shader is "";
+    var string: firstAnimatedActor is "";
+    var string: firstAnimatedActorDrawCall is "";
+    var string: firstAnimatedActorVisibility is "";
+    var string: firstMaterialImageDirective is "";
+    var string: firstCompiledSurfaceSummary is "";
+    var string: firstCompiledDrawCallSummary is "";
+    var string: firstCompiledPortalSummary is "";
+    var string: firstCompiledPortalDetail is "";
+    var string: firstCompiledVisibilityScope is "";
+    var string: firstCompiledVisibilityFlood is "";
+    var float: firstAnimatedScrollU is 0.0;
+    var float: firstAnimatedScrollV is 0.0;
+    var float: firstAnimatedRotation is 0.0;
+    var string: firstFrameRow is "";
+  end struct;
+
+const proc: logInfo (in string: msg) is func
+  begin
+    writeln("[render] " <& msg);
+  end func;
+
+const proc: logError (in string: msg) is func
+  begin
+    writeln("[render-error] " <& msg);
+  end func;
+
+const func string: joinPath (in string: leftPath, in string: rightPath) is func
+  result
+    var string: joined is "";
+  begin
+    if leftPath = "" then
+      joined := rightPath;
+    elsif endsWith(leftPath, "/") or endsWith(leftPath, "\\") then
+      joined := leftPath <& rightPath;
+    else
+      joined := leftPath <& "/" <& rightPath;
+    end if;
+  end func;
+
+const func boolean: isPk4Name (in string: fileName) is
+    return endsWith(lower(fileName), ".pk4");
+
+const func string: normalizedAssetPath (in string: filePath) is func
+  result
+    var string: assetPath is "";
+  begin
+    assetPath := replace(lower(filePath), "\\", "/");
+    if endsWith(assetPath, ".tga") or endsWith(assetPath, ".dds") or
+        endsWith(assetPath, ".png") or endsWith(assetPath, ".jpg") then
+      assetPath := assetPath[.. length(assetPath) - 4];
+    end if;
+  end func;
+
+const func boolean: isModelRef (in string: filePath) is func
+  result
+    var boolean: modelRef is FALSE;
+  begin
+    modelRef := endsWith(lower(filePath), ".md5mesh") or
+        startsWith(lower(filePath), "models/");
+  end func;
+
+const func boolean: isSkinAssetPath (in string: filePath) is
+    return endsWith(normalizedAssetPath(filePath), ".skin");
+
+const func string: assetStem (in string: filePath) is func
+  result
+    var string: stem is "";
+  begin
+    stem := replace(lower(filePath), "\\", "/");
+    if endsWith(stem, ".md5mesh") then
+      stem := stem[.. length(stem) - length(".md5mesh")];
+    elsif endsWith(stem, ".md5anim") then
+      stem := stem[.. length(stem) - length(".md5anim")];
+    elsif endsWith(stem, ".lwo") then
+      stem := stem[.. length(stem) - length(".lwo")];
+    elsif endsWith(stem, ".ase") then
+      stem := stem[.. length(stem) - length(".ase")];
+    end if;
+  end func;
+
+const func string: mapNameToAssetPath (in string: mapName) is func
+  result
+    var string: assetPath is "";
+  begin
+    assetPath := replace(lower(mapName), "\\", "/");
+    if not startsWith(assetPath, "maps/") then
+      assetPath := "maps/" <& assetPath;
+    end if;
+    if not endsWith(assetPath, ".map") then
+      assetPath &:= ".map";
+    end if;
+  end func;
+
+const func string: compiledSiblingPath (in string: mapPath,
+    in string: suffix) is func
+  result
+    var string: sibling is "";
+  begin
+    if endsWith(mapPath, ".map") then
+      sibling := mapPath[.. length(mapPath) - 4] <& suffix;
+    else
+      sibling := mapPath <& suffix;
+    end if;
+  end func;
+
+const func boolean: stringInArray (in array string: values,
+    in string: needle) is func
+  result
+    var boolean: found is FALSE;
+  local
+    var string: value is "";
+  begin
+    for value range values do
+      if value = needle then
+        found := TRUE;
+      end if;
+    end for;
+  end func;
+
+const func string: cleanedToken (in string: token) is func
+  result
+    var string: clean is "";
+  local
+    var integer: idx is 1;
+    var char: ch is ' ';
+  begin
+    clean := token;
+    while idx <= length(clean) do
+      ch := clean[idx];
+      if ch = '"' or ch = '(' or ch = ')' or ch = '{' or ch = '}' or
+          ch = ',' or ch = ';' then
+        clean := clean[.. pred(idx)] & clean[succ(idx) ..];
+      else
+        incr(idx);
+      end if;
+    end while;
+  end func;
+
+const func integer: countOccurrences (in string: content,
+    in string: token) is func
+  result
+    var integer: count is 0;
+  local
+    var integer: searchPos is 1;
+    var integer: foundPos is 0;
+  begin
+    foundPos := pos(content, token, searchPos);
+    while foundPos <> 0 do
+      incr(count);
+      searchPos := foundPos + length(token);
+      foundPos := pos(content, token, searchPos);
+    end while;
+  end func;
+
+const func boolean: areaInList (in string: areaList, in integer: areaNum) is func
+  result
+    var boolean: found is FALSE;
+  begin
+    found := pos(areaList, ";" <& areaNum <& ";") <> 0;
+  end func;
+
+const proc: addAreaToList (inout string: areaList, in integer: areaNum) is func
+  begin
+    if not areaInList(areaList, areaNum) then
+      areaList &:= areaNum <& ";";
+    end if;
+  end func;
+
+const func integer: sumIntegersAfterWord (in string: content,
+    in string: keyName) is func
+  result
+    var integer: total is 0;
+  local
+    var array string: tokens is 0 times "";
+    var integer: tokenIndex is 1;
+    var integer: valueIndex is 0;
+    var integer: value is 0;
+    var boolean: foundValue is FALSE;
+  begin
+    tokens := noEmptyStrings(split(replace(replace(replace(content, "\n", " "),
+        "\r", " "), "\t", " "), ' '));
+    while tokenIndex < length(tokens) do
+      if lower(cleanedToken(tokens[tokenIndex])) = lower(keyName) then
+        foundValue := FALSE;
+        valueIndex := succ(tokenIndex);
+        while valueIndex <= length(tokens) and valueIndex <= tokenIndex + 4 and
+            not foundValue do
+          block
+            value := integer(cleanedToken(tokens[valueIndex]));
+            total +:= value;
+            foundValue := TRUE;
+          exception
+            catch RANGE_ERROR:
+              noop;
+          end block;
+          incr(valueIndex);
+        end while;
+      end if;
+      incr(tokenIndex);
+    end while;
+  end func;
+
+const func integer: integerAfterWord (in string: content,
+    in string: keyName) is func
+  result
+    var integer: value is 0;
+  local
+    var array string: tokens is 0 times "";
+    var integer: tokenIndex is 1;
+    var boolean: foundValue is FALSE;
+  begin
+    tokens := noEmptyStrings(split(replace(replace(replace(content, "\n", " "),
+        "\r", " "), "\t", " "), ' '));
+    while tokenIndex < length(tokens) and not foundValue do
+      if lower(cleanedToken(tokens[tokenIndex])) = lower(keyName) then
+        block
+          value := integer(cleanedToken(tokens[succ(tokenIndex)]));
+          foundValue := TRUE;
+        exception
+          catch RANGE_ERROR:
+            noop;
+        end block;
+      end if;
+      incr(tokenIndex);
+    end while;
+  end func;
+
+const func string: valueAfterWord (in string: content,
+    in string: keyName) is func
+  result
+    var string: value is "";
+  local
+    var array string: tokens is 0 times "";
+    var integer: tokenIndex is 1;
+  begin
+    tokens := noEmptyStrings(split(replace(replace(replace(content, "\n", " "),
+        "\r", " "), "\t", " "), ' '));
+    while tokenIndex < length(tokens) and value = "" do
+      if lower(cleanedToken(tokens[tokenIndex])) = lower(keyName) then
+        value := lower(cleanedToken(tokens[succ(tokenIndex)]));
+      end if;
+      incr(tokenIndex);
+    end while;
+  end func;
+
+const func string: declNameAfter (in string: content,
+    in integer: nameStart) is func
+  result
+    var string: declName is "";
+  local
+    var integer: idx is 0;
+    var integer: endIdx is 0;
+  begin
+    idx := nameStart;
+    while idx <= length(content) and (content[idx] = ' ' or
+        content[idx] = '\t' or content[idx] = '\n' or
+        content[idx] = '\r') do
+      incr(idx);
+    end while;
+    if idx <= length(content) and content[idx] = '"' then
+      incr(idx);
+      endIdx := pos(content, "\"", idx);
+      if endIdx <> 0 then
+        declName := content[idx .. pred(endIdx)];
+      end if;
+    else
+      endIdx := idx;
+      while endIdx <= length(content) and content[endIdx] <> ' ' and
+          content[endIdx] <> '\t' and content[endIdx] <> '\n' and
+          content[endIdx] <> '\r' and content[endIdx] <> '{' do
+        incr(endIdx);
+      end while;
+      if endIdx > idx then
+        declName := content[idx .. pred(endIdx)];
+      end if;
+    end if;
+  end func;
+
+const func string: quotedValueAfter (in string: content, in string: keyName) is func
+  result
+    var string: value is "";
+  local
+    var string: keyText is "";
+    var integer: keyPos is 0;
+    var integer: keyEnd is 0;
+    var integer: valueStart is 0;
+    var integer: valueEnd is 0;
+  begin
+    keyText := "\"" <& keyName <& "\"";
+    keyPos := pos(lower(content), lower(keyText), 1);
+    if keyPos <> 0 then
+      keyEnd := pos(content, "\"", succ(keyPos));
+      if keyEnd <> 0 then
+        valueStart := pos(content, "\"", succ(keyEnd));
+        if valueStart <> 0 then
+          valueEnd := pos(content, "\"", succ(valueStart));
+          if valueEnd <> 0 then
+            value := content[succ(valueStart) .. pred(valueEnd)];
+          end if;
+        end if;
+      end if;
+    end if;
+  end func;
+
+const func integer: previousCharPos (in string: content, in char: needle,
+    in integer: startPos) is func
+  result
+    var integer: foundPos is 0;
+  local
+    var integer: idx is 0;
+  begin
+    idx := startPos;
+    while idx >= 1 and foundPos = 0 do
+      if content[idx] = needle then
+        foundPos := idx;
+      end if;
+      decr(idx);
+    end while;
+  end func;
+
+const func integer: matchingBlockEnd (in string: content,
+    in integer: blockStart) is func
+  result
+    var integer: blockEnd is 0;
+  local
+    var integer: idx is 0;
+    var integer: depth is 0;
+  begin
+    if blockStart <> 0 then
+      idx := blockStart;
+      while idx <= length(content) and blockEnd = 0 do
+        if content[idx] = '{' then
+          incr(depth);
+        elsif content[idx] = '}' then
+          decr(depth);
+          if depth = 0 then
+            blockEnd := idx;
+          end if;
+        end if;
+        incr(idx);
+      end while;
+    end if;
+  end func;
+
+const func string: declNameBeforeBlock (in string: content,
+    in integer: blockStart) is func
+  result
+    var string: declName is "";
+  local
+    var integer: idx is 0;
+    var integer: endIdx is 0;
+  begin
+    idx := pred(blockStart);
+    while idx >= 1 and (content[idx] = ' ' or content[idx] = '\t' or
+        content[idx] = '\n' or content[idx] = '\r') do
+      decr(idx);
+    end while;
+    endIdx := idx;
+    while idx >= 1 and content[idx] <> ' ' and content[idx] <> '\t' and
+        content[idx] <> '\n' and content[idx] <> '\r' do
+      decr(idx);
+    end while;
+    if endIdx >= succ(idx) then
+      declName := lower(content[succ(idx) .. endIdx]);
+    end if;
+  end func;
+
+const func float: vectorComponentOrDefault (
+    in string: vectorText, in integer: componentIndex,
+    in float: defaultValue) is func
+  result
+    var float: component is 0.0;
+  local
+    var array string: parts is 0 times "";
+  begin
+    component := defaultValue;
+    parts := noEmptyStrings(split(vectorText, ' '));
+    if length(parts) >= componentIndex then
+      block
+        component := float(parts[componentIndex]);
+      exception
+        catch RANGE_ERROR:
+          component := defaultValue;
+      end block;
+    end if;
+  end func;
+
+const func float: degreesToRadians (in float: degrees) is
+    return degrees * 3.14159265358979323846 / 180.0;
+
+const func boolean: isRenderableEntityClass (in string: className) is func
+  result
+    var boolean: renderable is FALSE;
+  begin
+    renderable := startsWith(className, "item_") or
+        startsWith(className, "ammo_") or startsWith(className, "weapon_") or
+        startsWith(className, "monster_") or startsWith(className, "trigger_") or
+        className = "func_static" or className = "func_door" or
+        className = "mover_door";
+  end func;
+
+const func integer: surfaceLightCount (in renderStats: stats,
+    in renderSurface: surface) is func
+  result
+    var integer: lightCount is 0;
+  local
+    var renderLight: light is renderLight.value;
+    var float: centerX is 0.0;
+    var float: centerY is 0.0;
+    var float: dx is 0.0;
+    var float: dy is 0.0;
+  begin
+    centerX := (surface.minX + surface.maxX) / 2.0;
+    centerY := (surface.minY + surface.maxY) / 2.0;
+    for light range stats.renderLights do
+      if light.hasOrigin and light.hasRadius then
+        dx := light.x - centerX;
+        dy := light.y - centerY;
+        if dx * dx + dy * dy <= light.radius * light.radius then
+          lightCount +:= 1;
+        end if;
+      end if;
+    end for;
+  end func;
+
+const func string: firstSurfaceLightColor (in renderStats: stats,
+    in renderSurface: surface) is func
+  result
+    var string: colorText is "";
+  local
+    var renderLight: light is renderLight.value;
+    var float: centerX is 0.0;
+    var float: centerY is 0.0;
+    var float: dx is 0.0;
+    var float: dy is 0.0;
+  begin
+    centerX := (surface.minX + surface.maxX) / 2.0;
+    centerY := (surface.minY + surface.maxY) / 2.0;
+    for light range stats.renderLights do
+      if colorText = "" and light.hasOrigin and light.hasRadius then
+        dx := light.x - centerX;
+        dy := light.y - centerY;
+        if dx * dx + dy * dy <= light.radius * light.radius then
+          colorText := light.colorText;
+        end if;
+      end if;
+    end for;
+  end func;
+
+const func string: versionAfterHeader (in string: content,
+    in string: headerName) is func
+  result
+    var string: versionText is "";
+  local
+    var array string: tokens is 0 times "";
+    var integer: tokenIndex is 1;
+  begin
+    tokens := noEmptyStrings(split(replace(replace(replace(content, "\n", " "),
+        "\r", " "), "\t", " "), ' '));
+    while tokenIndex < length(tokens) and versionText = "" do
+      if lower(cleanedToken(tokens[tokenIndex])) = lower(headerName) then
+        versionText := cleanedToken(tokens[succ(tokenIndex)]);
+      end if;
+      incr(tokenIndex);
+    end while;
+  end func;
+
+const proc: addFirstCompiledRenderModelName (inout renderStats: stats,
+    in string: content) is func
+  local
+    var array string: tokens is 0 times "";
+    var integer: tokenIndex is 1;
+    var integer: nameIndex is 0;
+    var string: modelName is "";
+  begin
+    tokens := noEmptyStrings(split(replace(replace(replace(content, "\n", " "),
+        "\r", " "), "\t", " "), ' '));
+    while tokenIndex < length(tokens) and stats.compiledRenderModelName = "" do
+      if lower(cleanedToken(tokens[tokenIndex])) = "model" then
+        nameIndex := succ(tokenIndex);
+        while nameIndex <= length(tokens) and modelName = "" do
+          modelName := cleanedToken(tokens[nameIndex]);
+          if modelName = "" then
+            incr(nameIndex);
+          end if;
+        end while;
+        if modelName <> "" then
+          stats.compiledRenderModelName := modelName;
+        end if;
+      end if;
+      incr(tokenIndex);
+    end while;
+  end func;
+
+const proc: inspectSkinContent (inout renderStats: stats,
+    in string: path, in string: content) is func
+  local
+    var string: contentLower is "";
+    var integer: searchPos is 1;
+    var integer: skinPos is 0;
+    var string: skinName is "";
+    var integer: blockStart is 0;
+    var integer: blockEnd is 0;
+    var string: blockText is "";
+    var string: normalizedBlock is "";
+    var array string: tokens is 0 times "";
+    var integer: tokenIndex is 1;
+    var string: fromMaterial is "";
+    var string: toMaterial is "";
+  begin
+    stats.skinAssets +:= 1;
+    if not stringInArray(stats.skinAssetStems, assetStem(path)) then
+      stats.skinAssetStems &:= assetStem(path);
+    end if;
+    contentLower := lower(content);
+    skinPos := pos(contentLower, "skin ", searchPos);
+    while skinPos <> 0 do
+      skinName := lower(declNameAfter(content, skinPos + length("skin ")));
+      blockStart := pos(content, "{", skinPos);
+      blockEnd := matchingBlockEnd(content, blockStart);
+      if skinName <> "" and blockStart <> 0 and blockEnd <> 0 then
+        stats.skinDecls +:= 1;
+        stats.skinNames &:= skinName;
+        blockText := content[blockStart .. blockEnd];
+        normalizedBlock := replace(lower(blockText), "\n", " ");
+        normalizedBlock := replace(normalizedBlock, "\r", " ");
+        normalizedBlock := replace(normalizedBlock, "\t", " ");
+        tokens := noEmptyStrings(split(normalizedBlock, ' '));
+        tokenIndex := 1;
+        while tokenIndex < length(tokens) do
+          fromMaterial := cleanedToken(tokens[tokenIndex]);
+          toMaterial := cleanedToken(tokens[succ(tokenIndex)]);
+          if startsWith(fromMaterial, "textures/") or
+              startsWith(fromMaterial, "models/") then
+            stats.skinRemaps +:= 1;
+            stats.skinRemapFromMaterials &:= skinName <& "=" <& fromMaterial;
+            stats.skinRemapToMaterials &:= toMaterial;
+            incr(tokenIndex);
+          end if;
+          incr(tokenIndex);
+        end while;
+      end if;
+      searchPos := skinPos + length("skin ");
+      skinPos := pos(contentLower, "skin ", searchPos);
+    end while;
+  end func;
+
+const proc: inspectMd5MeshContent (inout renderStats: stats,
+    in string: path, in string: content) is func
+  begin
+    stats.md5MeshAssets +:= 1;
+    if stats.parsedMd5Meshes = 0 and
+        pos(lower(content), "md5version", 1) <> 0 and
+        pos(lower(content), "numverts", 1) <> 0 and
+        pos(lower(content), "numtris", 1) <> 0 then
+      stats.parsedMd5Meshes := 1;
+      stats.firstMd5Mesh := path;
+      stats.firstMd5Shader := valueAfterWord(content, "shader");
+      stats.md5RenderVerts := integerAfterWord(content, "numverts");
+      stats.md5RenderTris := integerAfterWord(content, "numtris");
+      stats.md5RenderWeights := integerAfterWord(content, "numweights");
+    end if;
+  end func;
+
+const proc: inspectMd5AnimContent (inout renderStats: stats,
+    in string: path, in string: content) is func
+  begin
+    stats.md5AnimAssets +:= 1;
+    if stats.parsedMd5Anims = 0 and
+        pos(lower(content), "md5version", 1) <> 0 and
+        pos(lower(content), "numframes", 1) <> 0 then
+      stats.parsedMd5Anims := 1;
+      stats.firstMd5Anim := path;
+      stats.md5AnimFrames := integerAfterWord(content, "numframes");
+      stats.md5AnimFrameRate := integerAfterWord(content, "framerate");
+    end if;
+  end func;
+
+const proc: inspectEntityDefContent (inout renderStats: stats,
+    in string: content) is func
+  local
+    var string: contentLower is "";
+    var integer: searchPos is 1;
+    var integer: defPos is 0;
+    var integer: blockStart is 0;
+    var integer: blockEnd is 0;
+    var string: defName is "";
+    var string: modelRef is "";
+    var string: animRef is "";
+    var string: skinRef is "";
+    var string: inheritRef is "";
+  begin
+    contentLower := lower(content);
+    defPos := pos(contentLower, "entitydef ", searchPos);
+    while defPos <> 0 do
+      defName := lower(declNameAfter(content, defPos + length("entitydef ")));
+      blockStart := pos(content, "{", defPos);
+      blockEnd := matchingBlockEnd(content, blockStart);
+      if defName <> "" and blockStart <> 0 and blockEnd <> 0 then
+        stats.entityDefs +:= 1;
+        modelRef := quotedValueAfter(content[blockStart .. blockEnd], "model");
+        animRef := quotedValueAfter(content[blockStart .. blockEnd], "anim");
+        skinRef := quotedValueAfter(content[blockStart .. blockEnd], "skin");
+        inheritRef := lower(quotedValueAfter(content[blockStart .. blockEnd],
+            "inherit"));
+        stats.entityDefNames &:= defName;
+        stats.entityDefModelRefsByName &:= modelRef;
+        stats.entityDefAnimRefsByName &:= animRef;
+        stats.entityDefSkinRefsByName &:= skinRef;
+        stats.entityDefInheritsByName &:= inheritRef;
+        if modelRef <> "" then
+          stats.entityDefModelRefs +:= 1;
+        end if;
+        if animRef <> "" then
+          stats.entityDefAnimRefs +:= 1;
+        end if;
+        if skinRef <> "" then
+          stats.entityDefSkinRefs +:= 1;
+        end if;
+        if inheritRef <> "" then
+          stats.entityDefInherits +:= 1;
+        end if;
+      end if;
+      searchPos := defPos + length("entitydef ");
+      defPos := pos(contentLower, "entitydef ", searchPos);
+    end while;
+  end func;
+
+const func string: modelRefForEntityClass (in renderStats: stats,
+    in string: className) is func
+  result
+    var string: modelRef is "";
+  local
+    var string: searchClass is "";
+    var integer: depth is 0;
+    var integer: idx is 1;
+    var boolean: found is FALSE;
+  begin
+    searchClass := lower(className);
+    while searchClass <> "" and modelRef = "" and depth < 8 do
+      found := FALSE;
+      idx := 1;
+      while idx <= length(stats.entityDefNames) and not found do
+        if stats.entityDefNames[idx] = searchClass then
+          found := TRUE;
+          if idx <= length(stats.entityDefModelRefsByName) then
+            modelRef := stats.entityDefModelRefsByName[idx];
+          end if;
+          if modelRef = "" and idx <= length(stats.entityDefInheritsByName) then
+            searchClass := stats.entityDefInheritsByName[idx];
+          else
+            searchClass := "";
+          end if;
+        end if;
+        incr(idx);
+      end while;
+      if not found then
+        searchClass := "";
+      end if;
+      incr(depth);
+    end while;
+  end func;
+
+const func string: animRefForEntityClass (in renderStats: stats,
+    in string: className) is func
+  result
+    var string: animRef is "";
+  local
+    var string: searchClass is "";
+    var integer: depth is 0;
+    var integer: idx is 1;
+    var boolean: found is FALSE;
+  begin
+    searchClass := lower(className);
+    while searchClass <> "" and animRef = "" and depth < 8 do
+      found := FALSE;
+      idx := 1;
+      while idx <= length(stats.entityDefNames) and not found do
+        if stats.entityDefNames[idx] = searchClass then
+          found := TRUE;
+          if idx <= length(stats.entityDefAnimRefsByName) then
+            animRef := stats.entityDefAnimRefsByName[idx];
+          end if;
+          if animRef = "" and idx <= length(stats.entityDefInheritsByName) then
+            searchClass := stats.entityDefInheritsByName[idx];
+          else
+            searchClass := "";
+          end if;
+        end if;
+        incr(idx);
+      end while;
+      if not found then
+        searchClass := "";
+      end if;
+      incr(depth);
+    end while;
+  end func;
+
+const func string: skinRefForEntityClass (in renderStats: stats,
+    in string: className) is func
+  result
+    var string: skinRef is "";
+  local
+    var string: searchClass is "";
+    var integer: depth is 0;
+    var integer: idx is 1;
+    var boolean: found is FALSE;
+  begin
+    searchClass := lower(className);
+    while searchClass <> "" and skinRef = "" and depth < 8 do
+      found := FALSE;
+      idx := 1;
+      while idx <= length(stats.entityDefNames) and not found do
+        if stats.entityDefNames[idx] = searchClass then
+          found := TRUE;
+          if idx <= length(stats.entityDefSkinRefsByName) then
+            skinRef := stats.entityDefSkinRefsByName[idx];
+          end if;
+          if skinRef = "" and idx <= length(stats.entityDefInheritsByName) then
+            searchClass := stats.entityDefInheritsByName[idx];
+          else
+            searchClass := "";
+          end if;
+        end if;
+        incr(idx);
+      end while;
+      if not found then
+        searchClass := "";
+      end if;
+      incr(depth);
+    end while;
+  end func;
+
+const func boolean: skinRefResolved (in renderStats: stats,
+    in string: skinRef) is func
+  result
+    var boolean: resolved is FALSE;
+  begin
+    resolved := skinRef <> "" and
+        (stringInArray(stats.skinNames, lower(skinRef)) or
+        stringInArray(stats.skinAssetStems, assetStem(skinRef)));
+  end func;
+
+const func string: firstRemappedMaterialForSkin (in renderStats: stats,
+    in string: skinRef) is func
+  result
+    var string: remap is "";
+  local
+    var integer: idx is 1;
+    var string: prefix is "";
+  begin
+    prefix := lower(skinRef) <& "=";
+    while idx <= length(stats.skinRemapFromMaterials) and remap = "" do
+      if startsWith(stats.skinRemapFromMaterials[idx], prefix) then
+        remap := stats.skinRemapFromMaterials[idx][succ(length(prefix)) ..] <&
+            ">" <& stats.skinRemapToMaterials[idx];
+      end if;
+      incr(idx);
+    end while;
+  end func;
+
+const proc: resolveRenderEntityModel (inout renderStats: stats,
+    inout renderEntity: entity, in string: entityBlock) is func
+  begin
+    entity.modelRef := quotedValueAfter(entityBlock, "model");
+    if entity.modelRef = "" then
+      entity.modelRef := modelRefForEntityClass(stats, entity.className);
+    end if;
+    entity.animRef := quotedValueAfter(entityBlock, "anim");
+    if entity.animRef = "" then
+      entity.animRef := animRefForEntityClass(stats, entity.className);
+    end if;
+    entity.skinRef := quotedValueAfter(entityBlock, "skin");
+    if entity.skinRef = "" then
+      entity.skinRef := skinRefForEntityClass(stats, entity.className);
+    end if;
+    if entity.modelRef <> "" then
+      stats.renderEntityModelRefs +:= 1;
+      if isModelRef(entity.modelRef) then
+        entity.modelStem := assetStem(entity.modelRef);
+      end if;
+      entity.modelResolved := entity.modelStem <> "" and
+          stringInArray(stats.modelAssetStems, entity.modelStem);
+      if entity.modelResolved then
+        stats.renderEntityModelsResolved +:= 1;
+        if stats.firstRenderEntityModel = "" then
+          stats.firstRenderEntityModel := entity.entityName <& "=" <&
+              entity.modelStem;
+        end if;
+      else
+        stats.renderEntityModelsMissing +:= 1;
+        if stats.firstMissingRenderEntityModel = "" then
+          stats.firstMissingRenderEntityModel := entity.entityName <& "=" <&
+              entity.modelRef;
+        end if;
+      end if;
+    end if;
+    if entity.animRef <> "" then
+      stats.renderEntityAnimRefs +:= 1;
+      entity.animStem := assetStem(entity.animRef);
+      entity.animResolved := stringInArray(stats.animAssetStems,
+          entity.animStem);
+      if entity.animResolved then
+        stats.renderEntityAnimsResolved +:= 1;
+        if stats.firstRenderEntityAnim = "" then
+          stats.firstRenderEntityAnim := entity.entityName <& "=" <&
+              entity.animStem;
+        end if;
+      else
+        stats.renderEntityAnimsMissing +:= 1;
+        if stats.firstMissingRenderEntityAnim = "" then
+          stats.firstMissingRenderEntityAnim := entity.entityName <& "=" <&
+              entity.animRef;
+        end if;
+      end if;
+    end if;
+    if entity.skinRef <> "" then
+      stats.renderEntitySkinRefs +:= 1;
+      entity.skinResolved := skinRefResolved(stats, entity.skinRef);
+      if entity.skinResolved then
+        stats.renderEntitySkinsResolved +:= 1;
+        entity.skinMaterial := firstRemappedMaterialForSkin(stats,
+            entity.skinRef);
+        if entity.skinMaterial <> "" then
+          stats.renderEntitySkinRemaps +:= 1;
+          if stats.firstRenderSkinRemap = "" then
+            stats.firstRenderSkinRemap := entity.entityName <& "=" <&
+                entity.skinMaterial;
+          end if;
+        end if;
+        if stats.firstRenderSkinBinding = "" then
+          stats.firstRenderSkinBinding := entity.entityName <& "=" <&
+              lower(entity.skinRef);
+        end if;
+      else
+        stats.renderEntitySkinsMissing +:= 1;
+        if stats.firstMissingRenderSkin = "" then
+          stats.firstMissingRenderSkin := entity.entityName <& "=" <&
+              entity.skinRef;
+        end if;
+      end if;
+    end if;
+  end func;
+
+const proc: inspectMaterialContent (inout renderStats: stats,
+    in string: content) is func
+  local
+    var string: contentLower is "";
+    var string: blockText is "";
+    var string: blockLower is "";
+    var integer: searchPos is 1;
+    var integer: blockStart is 0;
+    var integer: blockEnd is 0;
+    var string: materialName is "";
+    var integer: mapPos is 0;
+    var integer: scrollPos is 0;
+    var integer: rotatePos is 0;
+    var string: textureName is "";
+    var array string: tokens is 0 times "";
+    var array string: lines is 0 times "";
+    var string: line is "";
+    var string: directiveName is "";
+    var boolean: imageDirective is FALSE;
+    var boolean: materialAnimated is FALSE;
+    var float: scrollU is 0.0;
+    var float: scrollV is 0.0;
+    var float: rotation is 0.0;
+  begin
+    contentLower := lower(content);
+    blockStart := pos(content, "{", searchPos);
+    while blockStart <> 0 do
+      materialName := declNameBeforeBlock(content, blockStart);
+      blockEnd := matchingBlockEnd(content, blockStart);
+      if materialName <> "" and blockEnd <> 0 then
+        if not stringInArray(stats.materialNames, materialName) then
+          stats.materialNames &:= materialName;
+          stats.materialDecls +:= 1;
+          blockText := content[blockStart .. blockEnd];
+          blockLower := lower(blockText);
+          textureName := "";
+          materialAnimated := FALSE;
+          scrollU := 0.0;
+          scrollV := 0.0;
+          rotation := 0.0;
+          stats.materialStages +:= countOccurrences(blockLower, "{") - 1;
+          stats.materialBlendStages +:= countOccurrences(blockLower, "blend ");
+          lines := split(blockText, '\n');
+          for line range lines do
+            tokens := noEmptyStrings(split(lower(trim(line)), ' '));
+            directiveName := "";
+            if length(tokens) >= 2 then
+              directiveName := lower(cleanedToken(tokens[1]));
+            end if;
+            imageDirective := FALSE;
+            if directiveName = "diffusemap" then
+              imageDirective := TRUE;
+            elsif directiveName = "bumpmap" then
+              imageDirective := TRUE;
+            elsif directiveName = "specularmap" then
+              imageDirective := TRUE;
+            elsif directiveName = "qer_editorimage" then
+              imageDirective := TRUE;
+            end if;
+            if length(tokens) >= 2 and imageDirective then
+              stats.materialImageDirectives +:= 1;
+              if stats.firstMaterialImageDirective = "" then
+                stats.firstMaterialImageDirective := cleanedToken(tokens[1]) <&
+                    "=" <& normalizedAssetPath(cleanedToken(tokens[2]));
+              end if;
+              if textureName = "" then
+                textureName := normalizedAssetPath(cleanedToken(tokens[2]));
+              end if;
+            end if;
+          end for;
+          mapPos := pos(blockLower, "map ", 1);
+          if mapPos <> 0 then
+            tokens := noEmptyStrings(split(blockText[mapPos ..], ' '));
+            if length(tokens) >= 2 then
+              textureName := normalizedAssetPath(trim(cleanedToken(tokens[2])));
+              stats.materialTextureBindings +:= 1;
+            end if;
+          end if;
+          scrollPos := pos(blockLower, "scroll ", 1);
+          rotatePos := pos(blockLower, "rotate ", 1);
+          if scrollPos <> 0 then
+            tokens := noEmptyStrings(split(blockText[scrollPos ..], ' '));
+            if length(tokens) >= 3 then
+              block
+                scrollU := float(trim(cleanedToken(tokens[2])));
+                scrollV := float(trim(cleanedToken(tokens[3])));
+                stats.materialTransforms +:= 1;
+                materialAnimated := TRUE;
+              exception
+                catch RANGE_ERROR:
+                  noop;
+              end block;
+            end if;
+          end if;
+          if rotatePos <> 0 then
+            tokens := noEmptyStrings(split(blockText[rotatePos ..], ' '));
+            if length(tokens) >= 2 then
+              block
+                rotation := float(trim(cleanedToken(tokens[2])));
+                stats.materialTransforms +:= 1;
+                materialAnimated := TRUE;
+              exception
+                catch RANGE_ERROR:
+                  noop;
+              end block;
+            end if;
+          end if;
+          if pos(blockLower, "time", 1) <> 0 or scrollPos <> 0 or rotatePos <> 0 then
+            stats.materialTimeExpressions +:= 1;
+          end if;
+          if materialAnimated then
+            stats.animatedMaterials +:= 1;
+            if stats.firstAnimatedMaterial = "" then
+              stats.firstAnimatedMaterial := materialName;
+              stats.firstAnimatedTexture := textureName;
+              if scrollPos <> 0 then
+                stats.firstAnimatedTransform := "scroll";
+                stats.firstAnimatedScrollU := scrollU * MATERIAL_SAMPLE_TIME;
+                stats.firstAnimatedScrollV := scrollV * MATERIAL_SAMPLE_TIME;
+              end if;
+              if rotatePos <> 0 then
+                if stats.firstAnimatedTransform = "" then
+                  stats.firstAnimatedTransform := "rotate";
+                else
+                  stats.firstAnimatedTransform &:= "+rotate";
+                end if;
+                stats.firstAnimatedRotation := rotation * MATERIAL_SAMPLE_TIME;
+              end if;
+            end if;
+          end if;
+          stats.materialTextures &:= textureName;
+        end if;
+      end if;
+      if blockEnd <> 0 then
+        searchPos := succ(blockEnd);
+      else
+        searchPos := succ(blockStart);
+      end if;
+      blockStart := pos(content, "{", searchPos);
+    end while;
+  end func;
+
+const proc: resolveSurfaceTexture (inout renderStats: stats,
+    inout renderSurface: surface) is func
+  local
+    var integer: idx is 1;
+  begin
+    idx := 1;
+    while idx <= length(stats.materialNames) do
+      if stats.materialNames[idx] = surface.materialName then
+        surface.textureName := stats.materialTextures[idx];
+        surface.textureAvailable := surface.textureName <> "" and
+            stringInArray(stats.imageAssetNames, surface.textureName);
+      end if;
+      incr(idx);
+    end while;
+  end func;
+
+const proc: addCompiledRenderMaterialRefs (inout renderStats: stats,
+    in string: content) is func
+  local
+    var array string: tokens is 0 times "";
+    var integer: tokenIndex is 1;
+    var string: materialName is "";
+  begin
+    tokens := noEmptyStrings(split(replace(replace(replace(content, "\n", " "),
+        "\r", " "), "\t", " "), ' '));
+    while tokenIndex < length(tokens) do
+      if lower(cleanedToken(tokens[tokenIndex])) = "material" then
+        materialName := lower(cleanedToken(tokens[succ(tokenIndex)]));
+        if materialName <> "" then
+          stats.compiledRenderMaterialRefs +:= 1;
+          if not stringInArray(stats.compiledMaterialNames, materialName) then
+            stats.compiledMaterialNames &:= materialName;
+          end if;
+        end if;
+      end if;
+      incr(tokenIndex);
+    end while;
+  end func;
+
+const func string: textureForMaterial (in renderStats: stats,
+    in string: materialName) is func
+  result
+    var string: textureName is "";
+  local
+    var integer: idx is 1;
+  begin
+    while idx <= length(stats.materialNames) and textureName = "" do
+      if stats.materialNames[idx] = materialName then
+        textureName := stats.materialTextures[idx];
+      end if;
+      incr(idx);
+    end while;
+  end func;
+
+const proc: resolveCompiledRenderTextures (inout renderStats: stats) is func
+  local
+    var string: materialName is "";
+    var string: textureName is "";
+  begin
+    stats.compiledRenderTextureResolved := 0;
+    stats.compiledRenderTextureMissing := 0;
+    for materialName range stats.compiledMaterialNames do
+      textureName := textureForMaterial(stats, materialName);
+      if textureName <> "" and stringInArray(stats.imageAssetNames,
+          textureName) then
+        stats.compiledRenderTextureResolved +:= 1;
+      else
+        stats.compiledRenderTextureMissing +:= 1;
+      end if;
+    end for;
+  end func;
+
+const proc: buildFirstCompiledSurfaceSummary (inout renderStats: stats) is func
+  local
+    var string: materialName is "";
+    var string: textureName is "";
+    var integer: triangleCount is 0;
+  begin
+    stats.firstCompiledSurfaceSummary := "";
+    stats.firstCompiledDrawCallSummary := "";
+    if length(stats.compiledMaterialNames) <> 0 then
+      materialName := stats.compiledMaterialNames[1];
+      textureName := textureForMaterial(stats, materialName);
+      if textureName <> "" then
+        stats.firstCompiledSurfaceSummary := "material=" <& materialName <&
+            ";texture=" <& textureName <& ";verts=" <&
+            stats.compiledRenderVertexTotal <& ";indexes=" <&
+            stats.compiledRenderIndexTotal;
+        triangleCount := stats.compiledRenderIndexTotal div 3;
+        stats.firstCompiledDrawCallSummary := "material=" <& materialName <&
+            ";texture=" <& textureName <& ";tris=" <& triangleCount <&
+            ";portal_areas=" <& stats.compiledRenderPortalAreas;
+      end if;
+    end if;
+  end func;
+
+const proc: addCompiledPortalFloodInfo (inout renderStats: stats,
+    in string: content) is func
+  local
+    var array string: lines is 0 times "";
+    var array string: tokens is 0 times "";
+    var string: line is "";
+    var string: areaList is "";
+    var integer: passIndex is 1;
+    var integer: pointCount is 0;
+    var integer: positiveArea is 0;
+    var integer: negativeArea is 0;
+    var integer: portalLinks is 0;
+    var boolean: inPortalBlock is FALSE;
+    var boolean: headerRead is FALSE;
+  begin
+    if stats.compiledRenderPortalAreas <> 0 and
+        stats.firstCompiledPortalDetail <> "" then
+      areaList := ";";
+      addAreaToList(areaList, stats.firstCompiledPortalPositiveArea);
+      lines := split(content, '\n');
+      while passIndex <= stats.compiledRenderPortalAreas do
+        inPortalBlock := FALSE;
+        headerRead := FALSE;
+        for line range lines do
+          if pos(lower(line), "interareaportals") <> 0 then
+            inPortalBlock := TRUE;
+            headerRead := FALSE;
+          elsif inPortalBlock and pos(line, "}") <> 0 then
+            inPortalBlock := FALSE;
+          elsif inPortalBlock then
+            tokens := noEmptyStrings(split(trim(line), ' '));
+            if not headerRead then
+              if length(tokens) >= 2 then
+                headerRead := TRUE;
+              end if;
+            elsif length(tokens) >= 3 then
+              block
+                pointCount := integer(cleanedToken(tokens[1]));
+                positiveArea := integer(cleanedToken(tokens[2]));
+                negativeArea := integer(cleanedToken(tokens[3]));
+                if pointCount <> 0 then
+                  if passIndex = 1 then
+                    incr(portalLinks);
+                  end if;
+                  if areaInList(areaList, positiveArea) or
+                      areaInList(areaList, negativeArea) then
+                    addAreaToList(areaList, positiveArea);
+                    addAreaToList(areaList, negativeArea);
+                  end if;
+                end if;
+              exception
+                catch RANGE_ERROR:
+                  noop;
+              end block;
+            end if;
+          end if;
+        end for;
+        incr(passIndex);
+      end while;
+      if portalLinks <> 0 then
+        stats.firstCompiledVisibilityFlood := "camera_area=" <&
+            stats.firstCompiledPortalPositiveArea <& ";visible_areas=" <&
+            pred(countOccurrences(areaList, ";")) <& ";portal_links=" <&
+            portalLinks;
+      end if;
+    end if;
+  end func;
+
+const proc: addCompiledPortalInfo (inout renderStats: stats,
+    in string: content) is func
+  local
+    var array string: tokens is 0 times "";
+    var integer: tokenIndex is 1;
+    var integer: valueIndex is 0;
+    var integer: integersFound is 0;
+    var integer: parsedValue is 0;
+    var integer: areaCount is 0;
+    var integer: portalCount is 0;
+    var integer: firstPortalPoints is 0;
+    var integer: firstPortalPositiveArea is 0;
+    var integer: firstPortalNegativeArea is 0;
+  begin
+    tokens := noEmptyStrings(split(replace(replace(replace(content, "\n", " "),
+        "\r", " "), "\t", " "), ' '));
+    while tokenIndex < length(tokens) and stats.firstCompiledPortalSummary = "" do
+      if lower(cleanedToken(tokens[tokenIndex])) = "interareaportals" then
+        valueIndex := succ(tokenIndex);
+        while valueIndex <= length(tokens) and integersFound < 5 do
+          block
+            parsedValue := integer(cleanedToken(tokens[valueIndex]));
+            incr(integersFound);
+            if integersFound = 1 then
+              areaCount := parsedValue;
+            elsif integersFound = 2 then
+              portalCount := parsedValue;
+            elsif integersFound = 3 then
+              firstPortalPoints := parsedValue;
+            elsif integersFound = 4 then
+              firstPortalPositiveArea := parsedValue;
+            elsif integersFound = 5 then
+              firstPortalNegativeArea := parsedValue;
+            end if;
+          exception
+            catch RANGE_ERROR:
+              noop;
+          end block;
+          incr(valueIndex);
+        end while;
+        if integersFound >= 2 then
+          stats.compiledRenderPortalAreas := areaCount;
+          stats.compiledRenderPortals := portalCount;
+          stats.firstCompiledPortalSummary := "areas=" <& areaCount <&
+              ";portals=" <& portalCount;
+        end if;
+        if integersFound >= 5 then
+          stats.firstCompiledPortalPositiveArea := firstPortalPositiveArea;
+          stats.firstCompiledPortalNegativeArea := firstPortalNegativeArea;
+          stats.firstCompiledPortalDetail := "points=" <&
+              firstPortalPoints <& ";positive_area=" <&
+              firstPortalPositiveArea <& ";negative_area=" <&
+              firstPortalNegativeArea;
+          stats.firstCompiledVisibilityScope := "camera_area=" <&
+              firstPortalPositiveArea <& ";visible_areas=" <&
+              succ(ord(firstPortalPositiveArea <> firstPortalNegativeArea)) <&
+              ";via_portals=" <& portalCount;
+          addCompiledPortalFloodInfo(stats, content);
+        end if;
+      end if;
+      incr(tokenIndex);
+    end while;
+  end func;
+
+const proc: addBrushFromBlock (inout renderStats: stats,
+    in string: blockText) is func
+  local
+    var array string: lines is 0 times "";
+    var string: line is "";
+    var string: cleanLine is "";
+    var array string: tokens is 0 times "";
+    var integer: tokenIdx is 1;
+    var float: nx is 0.0;
+    var float: ny is 0.0;
+    var float: dist is 0.0;
+    var float: planeValue is 0.0;
+    var renderSurface: surface is renderSurface.value;
+    var boolean: hasMinX is FALSE;
+    var boolean: hasMaxX is FALSE;
+    var boolean: hasMinY is FALSE;
+    var boolean: hasMaxY is FALSE;
+  begin
+    lines := split(blockText, '\n');
+    for line range lines do
+      if startsWith(trim(line), "(") then
+        cleanLine := replace(trim(line), "(", " ");
+        cleanLine := replace(cleanLine, ")", " ");
+        tokens := noEmptyStrings(split(cleanLine, ' '));
+        if length(tokens) >= 4 then
+          block
+            nx := float(cleanedToken(tokens[1]));
+            ny := float(cleanedToken(tokens[2]));
+            dist := float(cleanedToken(tokens[4]));
+            planeValue := -dist;
+            if nx = 1.0 and ny = 0.0 then
+              surface.maxX := planeValue;
+              hasMaxX := TRUE;
+            elsif nx = -1.0 and ny = 0.0 then
+              surface.minX := -planeValue;
+              hasMinX := TRUE;
+            elsif nx = 0.0 and ny = 1.0 then
+              surface.maxY := planeValue;
+              hasMaxY := TRUE;
+            elsif nx = 0.0 and ny = -1.0 then
+              surface.minY := -planeValue;
+              hasMinY := TRUE;
+            end if;
+          exception
+            catch RANGE_ERROR:
+              noop;
+          end block;
+          tokenIdx := 1;
+          while tokenIdx <= length(tokens) and surface.materialName = "" do
+            if startsWith(lower(tokens[tokenIdx]), "textures/") or
+                startsWith(lower(tokens[tokenIdx]), "materials/") then
+              surface.materialName := lower(cleanedToken(tokens[tokenIdx]));
+            end if;
+            incr(tokenIdx);
+          end while;
+        end if;
+      end if;
+    end for;
+    surface.complete := hasMinX and hasMaxX and hasMinY and hasMaxY;
+    if surface.complete then
+      surface.surfaceKind := "brush";
+      resolveSurfaceTexture(stats, surface);
+      stats.surfaces &:= surface;
+      stats.brushSurfaces +:= 1;
+    end if;
+  end func;
+
+const proc: addPatchFromBlock (inout renderStats: stats,
+    in string: blockText) is func
+  local
+    var array string: lines is 0 times "";
+    var string: line is "";
+    var string: cleanLine is "";
+    var array string: tokens is 0 times "";
+    var string: token is "";
+    var string: cleanToken is "";
+    var renderSurface: surface is renderSurface.value;
+    var integer: numericIndex is 0;
+    var float: parsedValue is 0.0;
+    var float: currentX is 0.0;
+    var boolean: havePoint is FALSE;
+  begin
+    surface.surfaceKind := "patch";
+    lines := split(blockText, '\n');
+    for line range lines do
+      cleanLine := replace(trim(line), "(", " ");
+      cleanLine := replace(cleanLine, ")", " ");
+      tokens := noEmptyStrings(split(cleanLine, ' '));
+      for token range tokens do
+        cleanToken := lower(cleanedToken(token));
+        if surface.materialName = "" and
+            (startsWith(cleanToken, "textures/") or
+            startsWith(cleanToken, "materials/")) then
+          surface.materialName := cleanToken;
+        end if;
+        if pos(line, "( (") <> 0 then
+          block
+            parsedValue := float(cleanToken);
+            numericIndex +:= 1;
+            if numericIndex rem 5 = 1 then
+              currentX := parsedValue;
+            elsif numericIndex rem 5 = 2 then
+              if not havePoint then
+                surface.minX := currentX;
+                surface.maxX := currentX;
+                surface.minY := parsedValue;
+                surface.maxY := parsedValue;
+                havePoint := TRUE;
+              else
+                if currentX < surface.minX then
+                  surface.minX := currentX;
+                elsif currentX > surface.maxX then
+                  surface.maxX := currentX;
+                end if;
+                if parsedValue < surface.minY then
+                  surface.minY := parsedValue;
+                elsif parsedValue > surface.maxY then
+                  surface.maxY := parsedValue;
+                end if;
+              end if;
+            end if;
+          exception
+            catch RANGE_ERROR:
+              noop;
+          end block;
+        end if;
+      end for;
+    end for;
+    surface.complete := havePoint and surface.materialName <> "";
+    if surface.complete then
+      resolveSurfaceTexture(stats, surface);
+      stats.surfaces &:= surface;
+      stats.patchSurfaces +:= 1;
+    end if;
+  end func;
+
+const proc: inspectBrushes (inout renderStats: stats,
+    in string: content) is func
+  local
+    var string: contentLower is "";
+    var integer: searchPos is 1;
+    var integer: brushPos is 0;
+    var integer: blockStart is 0;
+    var integer: blockEnd is 0;
+  begin
+    contentLower := lower(content);
+    brushPos := pos(contentLower, "brushdef3", searchPos);
+    while brushPos <> 0 do
+      blockStart := pos(content, "{", brushPos);
+      blockEnd := matchingBlockEnd(content, blockStart);
+      if blockStart <> 0 and blockEnd <> 0 then
+        addBrushFromBlock(stats, content[blockStart .. blockEnd]);
+      end if;
+      searchPos := brushPos + length("brushdef3");
+      brushPos := pos(contentLower, "brushdef3", searchPos);
+    end while;
+  end func;
+
+const proc: inspectPatches (inout renderStats: stats,
+    in string: content) is func
+  local
+    var string: contentLower is "";
+    var integer: searchPos is 1;
+    var integer: patchPos2 is 0;
+    var integer: patchPos3 is 0;
+    var integer: patchPos is 0;
+    var integer: blockStart is 0;
+    var integer: blockEnd is 0;
+  begin
+    contentLower := lower(content);
+    patchPos2 := pos(contentLower, "patchdef2", searchPos);
+    patchPos3 := pos(contentLower, "patchdef3", searchPos);
+    while patchPos2 <> 0 or patchPos3 <> 0 do
+      if patchPos2 = 0 then
+        patchPos := patchPos3;
+      elsif patchPos3 = 0 then
+        patchPos := patchPos2;
+      elsif patchPos2 < patchPos3 then
+        patchPos := patchPos2;
+      else
+        patchPos := patchPos3;
+      end if;
+      blockStart := pos(content, "{", patchPos);
+      blockEnd := matchingBlockEnd(content, blockStart);
+      if blockStart <> 0 and blockEnd <> 0 then
+        addPatchFromBlock(stats, content[blockStart .. blockEnd]);
+      end if;
+      searchPos := patchPos + length("patchdef2");
+      patchPos2 := pos(contentLower, "patchdef2", searchPos);
+      patchPos3 := pos(contentLower, "patchdef3", searchPos);
+    end while;
+  end func;
+
+const proc: inspectMapEntity (inout renderStats: stats,
+    in string: entityBlock) is func
+  local
+    var string: className is "";
+    var string: originText is "";
+    var string: angleText is "";
+    var string: radiusText is "";
+    var renderLight: light is renderLight.value;
+    var renderEntity: entity is renderEntity.value;
+  begin
+    className := lower(quotedValueAfter(entityBlock, "classname"));
+    if className <> "" then
+      stats.mapEntities +:= 1;
+      if className = "info_player_start" then
+        stats.playerStarts +:= 1;
+        originText := quotedValueAfter(entityBlock, "origin");
+        if originText <> "" then
+          stats.playerParsed := TRUE;
+          stats.playerX := vectorComponentOrDefault(originText, 1, 0.0);
+          stats.playerY := vectorComponentOrDefault(originText, 2, 0.0);
+        end if;
+        angleText := quotedValueAfter(entityBlock, "angle");
+        if angleText <> "" then
+          block
+            stats.playerYaw := float(angleText);
+          exception
+            catch RANGE_ERROR:
+            stats.playerYaw := 0.0;
+          end block;
+        end if;
+      elsif className = "light" then
+        stats.lights +:= 1;
+        light.lightName := quotedValueAfter(entityBlock, "name");
+        originText := quotedValueAfter(entityBlock, "origin");
+        if originText <> "" then
+          light.hasOrigin := TRUE;
+          light.x := vectorComponentOrDefault(originText, 1, 0.0);
+          light.y := vectorComponentOrDefault(originText, 2, 0.0);
+        end if;
+        radiusText := quotedValueAfter(entityBlock, "light_radius");
+        if radiusText <> "" then
+          light.hasRadius := TRUE;
+          light.radius := vectorComponentOrDefault(radiusText, 1, 0.0);
+          stats.lightsWithRadius +:= 1;
+        end if;
+        light.colorText := quotedValueAfter(entityBlock, "_color");
+        if light.colorText <> "" then
+          light.hasColor := TRUE;
+          stats.lightsWithColor +:= 1;
+        end if;
+        stats.renderLights &:= light;
+      elsif isRenderableEntityClass(className) then
+        originText := quotedValueAfter(entityBlock, "origin");
+        entity.className := className;
+        entity.entityName := quotedValueAfter(entityBlock, "name");
+        resolveRenderEntityModel(stats, entity, entityBlock);
+        if originText <> "" then
+          entity.hasOrigin := TRUE;
+          entity.x := vectorComponentOrDefault(originText, 1, 0.0);
+          entity.y := vectorComponentOrDefault(originText, 2, 0.0);
+        end if;
+        if entity.hasOrigin then
+          stats.renderEntities &:= entity;
+        end if;
+      end if;
+    end if;
+  end func;
+
+const proc: inspectMapContent (inout renderStats: stats,
+    in string: content) is func
+  local
+    var string: contentLower is "";
+    var integer: searchPos is 1;
+    var integer: classPos is 0;
+    var integer: blockStart is 0;
+    var integer: blockEnd is 0;
+  begin
+    inspectBrushes(stats, content);
+    inspectPatches(stats, content);
+    contentLower := lower(content);
+    classPos := pos(contentLower, "\"classname\"", searchPos);
+    while classPos <> 0 do
+      blockStart := previousCharPos(content, '{', classPos);
+      blockEnd := matchingBlockEnd(content, blockStart);
+      if blockStart <> 0 and blockEnd <> 0 then
+        inspectMapEntity(stats, content[blockStart .. blockEnd]);
+      end if;
+      searchPos := classPos + length("\"classname\"");
+      classPos := pos(contentLower, "\"classname\"", searchPos);
+    end while;
+  end func;
+
+const proc: drawFrame (inout renderStats: stats) is func
+  local
+    var array float: depthBuffer is FRAME_WIDTH times FAR_DEPTH;
+    var array string: rows is FRAME_HEIGHT times "";
+    var integer: row is 1;
+    var integer: col is 1;
+    var renderSurface: surface is renderSurface.value;
+    var float: yawRadians is 0.0;
+    var float: cosYaw is 0.0;
+    var float: sinYaw is 0.0;
+    var float: centerX is 0.0;
+    var float: centerY is 0.0;
+    var float: relX is 0.0;
+    var float: relY is 0.0;
+    var float: forward is 0.0;
+    var float: side is 0.0;
+    var integer: screenX is 0;
+    var integer: span is 0;
+    var integer: leftCol is 0;
+    var integer: rightCol is 0;
+    var integer: topRow is 0;
+    var integer: bottomRow is 0;
+    var char: pixel is '#';
+    var integer: lightCount is 0;
+    var renderEntity: entity is renderEntity.value;
+  begin
+    for row range 1 to FRAME_HEIGHT do
+      rows[row] := "";
+      for col range 1 to FRAME_WIDTH do
+        rows[row] &:= ".";
+      end for;
+    end for;
+    if stats.playerParsed then
+      yawRadians := degreesToRadians(stats.playerYaw);
+      cosYaw := cos(yawRadians);
+      sinYaw := sin(yawRadians);
+      for surface range stats.surfaces do
+        centerX := (surface.minX + surface.maxX) / 2.0;
+        centerY := (surface.minY + surface.maxY) / 2.0;
+        relX := centerX - stats.playerX;
+        relY := centerY - stats.playerY;
+        forward := relX * cosYaw + relY * sinYaw;
+        side := -relX * sinYaw + relY * cosYaw;
+        if forward > 1.0 then
+          stats.visibleSurfaces +:= 1;
+          screenX := FRAME_WIDTH div 2;
+          if side < -64.0 then
+            screenX -:= 6;
+          elsif side < -24.0 then
+            screenX -:= 3;
+          elsif side > 64.0 then
+            screenX +:= 6;
+          elsif side > 24.0 then
+            screenX +:= 3;
+          end if;
+          if forward < 96.0 then
+            span := 5;
+          elsif forward < 160.0 then
+            span := 3;
+          else
+            span := 2;
+          end if;
+          leftCol := screenX - span;
+          rightCol := screenX + span;
+          topRow := FRAME_HEIGHT div 3;
+          bottomRow := FRAME_HEIGHT * 2 div 3;
+          if surface.textureAvailable then
+            stats.texturedSurfaces +:= 1;
+          else
+            stats.fallbackSurfaces +:= 1;
+          end if;
+          lightCount := surfaceLightCount(stats, surface);
+          if lightCount <> 0 then
+            stats.litSurfaces +:= 1;
+            stats.lightInfluences +:= lightCount;
+            if surface.textureAvailable then
+              pixel := '*';
+            else
+              pixel := '=';
+            end if;
+          elsif surface.textureAvailable then
+            pixel := '#';
+          else
+            pixel := '+';
+          end if;
+          for col range leftCol to rightCol do
+            if col >= 1 and col <= FRAME_WIDTH then
+              stats.framebufferColumns +:= 1;
+              if forward < depthBuffer[col] then
+                depthBuffer[col] := forward;
+                stats.depthWrites +:= 1;
+                for row range topRow to bottomRow do
+                  if row >= 1 and row <= FRAME_HEIGHT then
+                    rows[row] := rows[row][.. pred(col)] & str(pixel) &
+                        rows[row][succ(col) ..];
+                    stats.framebufferPixels +:= 1;
+                  end if;
+                end for;
+                if forward < stats.nearestDepth then
+                  stats.nearestDepth := forward;
+                  stats.nearestMaterial := surface.materialName;
+                  stats.nearestTexture := surface.textureName;
+                  stats.nearestLightCount := lightCount;
+                  stats.nearestLightColor := firstSurfaceLightColor(stats,
+                      surface);
+                end if;
+              else
+                stats.occludedWrites +:= 1;
+              end if;
+            end if;
+          end for;
+        end if;
+      end for;
+      for entity range stats.renderEntities do
+        relX := entity.x - stats.playerX;
+        relY := entity.y - stats.playerY;
+        forward := relX * cosYaw + relY * sinYaw;
+        side := -relX * sinYaw + relY * cosYaw;
+        if forward > 1.0 then
+          stats.renderEntityCandidates +:= 1;
+          screenX := FRAME_WIDTH div 2;
+          if side < -64.0 then
+            screenX -:= 6;
+          elsif side < -24.0 then
+            screenX -:= 3;
+          elsif side > 64.0 then
+            screenX +:= 6;
+          elsif side > 24.0 then
+            screenX +:= 3;
+          end if;
+          if screenX >= 1 and screenX <= FRAME_WIDTH then
+            if forward < depthBuffer[screenX] then
+              stats.renderEntityVisible +:= 1;
+              if entity.modelResolved then
+                stats.visibleModelEntities +:= 1;
+              end if;
+              if stats.firstVisibleEntity = "" then
+                stats.firstVisibleEntity := entity.entityName;
+              end if;
+              rows[FRAME_HEIGHT div 2] :=
+                  rows[FRAME_HEIGHT div 2][.. pred(screenX)] & "E" &
+                  rows[FRAME_HEIGHT div 2][succ(screenX) ..];
+            else
+              stats.renderEntityOccluded +:= 1;
+              if entity.modelResolved then
+                stats.occludedModelEntities +:= 1;
+              end if;
+              if stats.firstOccludedEntity = "" then
+                stats.firstOccludedEntity := entity.entityName;
+              end if;
+            end if;
+          end if;
+        end if;
+      end for;
+    end if;
+    if length(rows) >= FRAME_HEIGHT div 2 then
+      stats.firstFrameRow := rows[FRAME_HEIGHT div 2];
+    end if;
+  end func;
+
+const proc: buildAnimatedActorHandoff (inout renderStats: stats) is func
+  local
+    var renderEntity: entity is renderEntity.value;
+    var string: actorTexture is "";
+    var integer: actorLights is 0;
+  begin
+    for entity range stats.renderEntities do
+      if startsWith(entity.className, "monster_") and entity.modelResolved and
+          entity.animResolved and stats.parsedMd5Meshes <> 0 and
+          stats.parsedMd5Anims <> 0 then
+        stats.animatedActorCandidates +:= 1;
+        if stats.animatedActorDrawCalls = 0 and
+            entity.modelStem = assetStem(stats.firstMd5Mesh) and
+            entity.animStem = assetStem(stats.firstMd5Anim) then
+          stats.animatedActorDrawCalls := 1;
+          stats.animatedActorVertices := stats.md5RenderVerts;
+          stats.animatedActorTriangles := stats.md5RenderTris;
+          actorTexture := textureForMaterial(stats, stats.firstMd5Shader);
+          if actorTexture <> "" and
+              stringInArray(stats.imageAssetNames, actorTexture) then
+            stats.animatedActorTextureResolved := 1;
+          end if;
+          actorLights := 0;
+          if length(stats.renderLights) <> 0 then
+            actorLights := 1;
+          end if;
+          stats.animatedActorLightInfluences := actorLights;
+          stats.firstAnimatedActor := entity.entityName;
+          stats.firstAnimatedActorDrawCall := "entity=" <& entity.entityName <&
+              ";mesh=" <& entity.modelStem <& ";anim=" <& entity.animStem <&
+              ";shader=" <& stats.firstMd5Shader <& ";texture=" <&
+              actorTexture <& ";tris=" <& stats.animatedActorTriangles;
+          stats.firstAnimatedActorVisibility := "entity=" <&
+              entity.entityName <& ";camera_bound=" <& stats.playerParsed <&
+              ";texture_resolved=" <& stats.animatedActorTextureResolved <&
+              ";lights=" <& stats.animatedActorLightInfluences;
+        end if;
+      end if;
+    end for;
+  end func;
+
+const func array string: findPk4Archives (in string: basePath) is func
+  result
+    var array string: pk4Files is 0 times "";
+  local
+    var array string: names is 0 times "";
+    var string: name is "";
+  begin
+    if fileType(basePath) = FILE_DIR then
+      names := readDir(basePath);
+      for name range names do
+        if isPk4Name(name) and fileType(joinPath(basePath, name)) = FILE_REGULAR then
+          pk4Files &:= joinPath(basePath, name);
+        end if;
+      end for;
+    end if;
+  end func;
+
+const proc: scanArchive (inout renderStats: stats,
+    in string: pk4File, in string: targetMapPath) is func
+  local
+    var fileSys: zipFs is fileSys.value;
+    var array string: paths is 0 times "";
+    var string: path is "";
+    var string: pathLower is "";
+    var string: contentLower is "";
+  begin
+    zipFs := openZip(pk4File);
+    if zipFs = fileSys.value then
+      logError("could not open pk4 archive: " <& pk4File);
+    else
+      paths := readDir(zipFs, RECURSIVE);
+      for path range paths do
+        pathLower := replace(lower(path), "\\", "/");
+        if endsWith(pathLower, ".tga") or endsWith(pathLower, ".dds") or
+            endsWith(pathLower, ".png") or endsWith(pathLower, ".jpg") then
+          stats.imageAssets +:= 1;
+          stats.imageAssetNames &:= normalizedAssetPath(pathLower);
+        elsif endsWith(pathLower, ".md5mesh") or endsWith(pathLower, ".lwo") or
+            endsWith(pathLower, ".ase") then
+          stats.modelAssets +:= 1;
+          if not stringInArray(stats.modelAssetStems, assetStem(pathLower)) then
+            stats.modelAssetStems &:= assetStem(pathLower);
+          end if;
+          if endsWith(pathLower, ".md5mesh") then
+            inspectMd5MeshContent(stats, pathLower, getFile(zipFs, path));
+          end if;
+        elsif endsWith(pathLower, ".md5anim") then
+          inspectMd5AnimContent(stats, pathLower, getFile(zipFs, path));
+          if not stringInArray(stats.animAssetStems, assetStem(pathLower)) then
+            stats.animAssetStems &:= assetStem(pathLower);
+          end if;
+        elsif endsWith(pathLower, ".mtr") then
+          inspectMaterialContent(stats, getFile(zipFs, path));
+        elsif isSkinAssetPath(pathLower) then
+          inspectSkinContent(stats, pathLower, getFile(zipFs, path));
+        elsif endsWith(pathLower, ".def") or endsWith(pathLower, ".decl") then
+          inspectEntityDefContent(stats, getFile(zipFs, path));
+        end if;
+      end for;
+      for path range paths do
+        pathLower := replace(lower(path), "\\", "/");
+        if not stats.requestedMapFound and pathLower = targetMapPath then
+          stats.requestedMapFound := TRUE;
+          inspectMapContent(stats, getFile(zipFs, path));
+        elsif not stats.requestedRenderFound and
+            pathLower = stats.requestedRenderPath then
+          stats.requestedRenderFound := TRUE;
+          stats.compiledRenderVersion := versionAfterHeader(getFile(zipFs, path),
+              "PROC");
+          addFirstCompiledRenderModelName(stats, getFile(zipFs, path));
+          contentLower := lower(getFile(zipFs, path));
+          stats.compiledRenderModels := countOccurrences(contentLower,
+              "model {");
+          stats.compiledRenderSurfaces := countOccurrences(contentLower,
+              "surface");
+          stats.compiledRenderPortals := countOccurrences(contentLower,
+              "interareaportals");
+          addCompiledPortalInfo(stats, getFile(zipFs, path));
+          stats.compiledRenderVertexDecls := countOccurrences(contentLower,
+              "numverts");
+          stats.compiledRenderIndexDecls := countOccurrences(contentLower,
+              "numindexes");
+          stats.compiledRenderVertexTotal := sumIntegersAfterWord(contentLower,
+              "numverts");
+          stats.compiledRenderIndexTotal := sumIntegersAfterWord(contentLower,
+              "numindexes");
+          addCompiledRenderMaterialRefs(stats, getFile(zipFs, path));
+        end if;
+      end for;
+      close(zipFs);
+    end if;
+  end func;
+
+const proc: parseArgs (inout renderConfig: config) is func
+  local
+    var array string: args is 0 times "";
+    var integer: argIdx is 1;
+  begin
+    args := argv(PROGRAM);
+    while argIdx <= length(args) do
+      if args[argIdx] = "--help" or args[argIdx] = "-h" then
+        config.showHelp := TRUE;
+      elsif args[argIdx] = "--doom3_data_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.dataPath := convDosPath(args[argIdx]);
+      elsif args[argIdx] = "--doom3_base_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.basePath := convDosPath(args[argIdx]);
+      elsif args[argIdx] = "--doom3_start_map" and argIdx < length(args) then
+        incr(argIdx);
+        config.startMap := args[argIdx];
+      elsif args[argIdx] = "+map" and argIdx < length(args) then
+        incr(argIdx);
+        config.startMap := args[argIdx];
+      elsif args[argIdx] = "+set" and argIdx + 2 <= length(args) then
+        if args[argIdx + 1] = "fs_basepath" then
+          config.dataPath := convDosPath(args[argIdx + 2]);
+        elsif args[argIdx + 1] = "fs_game" then
+          config.basePath := convDosPath(args[argIdx + 2]);
+        end if;
+        argIdx +:= 2;
+      end if;
+      incr(argIdx);
+    end while;
+    if config.basePath = "" then
+      config.basePath := joinPath(config.dataPath, DEFAULT_BASE_DIR);
+    end if;
+  end func;
+
+const proc: showUsage is func
+  begin
+    writeln("Usage:");
+    writeln("  s7 doom3_seed7_render.s7 --doom3_data_path <doom3-root>");
+    writeln("  s7 doom3_seed7_render.s7 +set fs_basepath <doom3-root> +map <map>");
+    writeln("");
+    writeln("Scans user-owned Doom 3 pk4 files for renderer-front-end readiness.");
+  end func;
+
+const proc: printStats (in renderStats: stats) is func
+  begin
+    logInfo("pk4_archives=" <& stats.pk4Archives);
+    logInfo("requested_map=" <& stats.requestedMapPath);
+    logInfo("requested_map_found=" <& stats.requestedMapFound);
+    logInfo("material_decls=" <& stats.materialDecls <&
+        " texture_bindings=" <& stats.materialTextureBindings <&
+        " image_assets=" <& stats.imageAssets);
+    logInfo("material_image_directives=" <& stats.materialImageDirectives);
+    if stats.firstMaterialImageDirective <> "" then
+      logInfo("first_material_image_directive=" <&
+          stats.firstMaterialImageDirective);
+    end if;
+    logInfo("material_stages=" <& stats.materialStages <&
+        " blend_stages=" <& stats.materialBlendStages <&
+        " animated=" <& stats.animatedMaterials <&
+        " transforms=" <& stats.materialTransforms <&
+        " time_expr=" <& stats.materialTimeExpressions);
+    logInfo("model_assets=" <& stats.modelAssets <&
+        " unique=" <& length(stats.modelAssetStems));
+    logInfo("md5_render_assets mesh=" <& stats.md5MeshAssets <&
+        " anim=" <& stats.md5AnimAssets <&
+        " parsed_mesh=" <& stats.parsedMd5Meshes <&
+        " parsed_anim=" <& stats.parsedMd5Anims);
+    logInfo("md5_render_geometry verts=" <& stats.md5RenderVerts <&
+        " tris=" <& stats.md5RenderTris <&
+        " weights=" <& stats.md5RenderWeights <&
+        " anim_frames=" <& stats.md5AnimFrames <&
+        " anim_frame_rate=" <& stats.md5AnimFrameRate);
+    logInfo("entity_defs=" <& stats.entityDefs <&
+        " model_refs=" <& stats.entityDefModelRefs <&
+        " skin_refs=" <& stats.entityDefSkinRefs <&
+        " inherits=" <& stats.entityDefInherits);
+    logInfo("entity_def_anims refs=" <& stats.entityDefAnimRefs);
+    logInfo("render_skin_assets=" <& stats.skinAssets <&
+        " unique=" <& length(stats.skinAssetStems) <&
+        " skin_decls=" <& stats.skinDecls <&
+        " remaps=" <& stats.skinRemaps);
+    logInfo("map_entities=" <& stats.mapEntities <&
+        " player_start=" <& stats.playerStarts);
+    logInfo("map_lights=" <& stats.lights <&
+        " radius=" <& stats.lightsWithRadius <&
+        " color=" <& stats.lightsWithColor);
+    logInfo("player_start_parsed=" <& stats.playerParsed);
+    logInfo("render_surfaces=" <& length(stats.surfaces) <&
+        " brush=" <& stats.brushSurfaces <&
+        " patch=" <& stats.patchSurfaces <&
+        " visible=" <& stats.visibleSurfaces <&
+        " textured=" <& stats.texturedSurfaces <&
+        " fallback=" <& stats.fallbackSurfaces <&
+        " lit=" <& stats.litSurfaces);
+    logInfo("compiled_render_map proc_found=" <& stats.requestedRenderFound <&
+        " models=" <& stats.compiledRenderModels <&
+        " surfaces=" <& stats.compiledRenderSurfaces <&
+        " portals=" <& stats.compiledRenderPortals);
+    if stats.compiledRenderVersion <> "" or
+        stats.compiledRenderModelName <> "" then
+      logInfo("compiled_render_identity version=" <&
+          stats.compiledRenderVersion <& " model=" <&
+          stats.compiledRenderModelName);
+    end if;
+    logInfo("compiled_render_portals areas=" <&
+        stats.compiledRenderPortalAreas <& " portals=" <&
+        stats.compiledRenderPortals);
+    logInfo("compiled_render_geometry vert_decls=" <&
+        stats.compiledRenderVertexDecls <& " index_decls=" <&
+        stats.compiledRenderIndexDecls <& " vertices=" <&
+        stats.compiledRenderVertexTotal <& " indexes=" <&
+        stats.compiledRenderIndexTotal);
+    logInfo("compiled_render_materials refs=" <&
+        stats.compiledRenderMaterialRefs <& " unique=" <&
+        length(stats.compiledMaterialNames) <& " texture_resolved=" <&
+        stats.compiledRenderTextureResolved <& " texture_missing=" <&
+        stats.compiledRenderTextureMissing);
+    if stats.firstCompiledSurfaceSummary <> "" then
+      logInfo("first_compiled_render_surface=" <&
+          stats.firstCompiledSurfaceSummary);
+    end if;
+    if stats.firstCompiledDrawCallSummary <> "" then
+      logInfo("first_compiled_render_drawcall=" <&
+          stats.firstCompiledDrawCallSummary);
+    end if;
+    if stats.firstCompiledPortalSummary <> "" then
+      logInfo("first_compiled_render_portals=" <&
+          stats.firstCompiledPortalSummary);
+    end if;
+    if stats.firstCompiledPortalDetail <> "" then
+      logInfo("first_compiled_render_portal=" <&
+          stats.firstCompiledPortalDetail);
+    end if;
+    if stats.firstCompiledVisibilityScope <> "" then
+      logInfo("first_compiled_visibility_scope=" <&
+          stats.firstCompiledVisibilityScope);
+    end if;
+    if stats.firstCompiledVisibilityFlood <> "" then
+      logInfo("compiled_visibility_flood=" <&
+          stats.firstCompiledVisibilityFlood);
+    end if;
+    logInfo("render_light_influences=" <& stats.lightInfluences);
+    logInfo("framebuffer=" <& FRAME_WIDTH <& "x" <& FRAME_HEIGHT <&
+        " columns=" <& stats.framebufferColumns <&
+        " pixels=" <& stats.framebufferPixels);
+    logInfo("depth_buffer writes=" <& stats.depthWrites <&
+        " occluded=" <& stats.occludedWrites);
+    logInfo("render_entities candidates=" <& stats.renderEntityCandidates <&
+        " visible=" <& stats.renderEntityVisible <&
+        " occluded=" <& stats.renderEntityOccluded);
+    logInfo("render_entity_models refs=" <& stats.renderEntityModelRefs <&
+        " resolved=" <& stats.renderEntityModelsResolved <&
+        " missing=" <& stats.renderEntityModelsMissing <&
+        " visible=" <& stats.visibleModelEntities <&
+        " occluded=" <& stats.occludedModelEntities);
+    logInfo("render_entity_anims refs=" <& stats.renderEntityAnimRefs <&
+        " resolved=" <& stats.renderEntityAnimsResolved <&
+        " missing=" <& stats.renderEntityAnimsMissing);
+    logInfo("render_entity_skins refs=" <& stats.renderEntitySkinRefs <&
+        " resolved=" <& stats.renderEntitySkinsResolved <&
+        " missing=" <& stats.renderEntitySkinsMissing <&
+        " remaps=" <& stats.renderEntitySkinRemaps);
+    if stats.firstVisibleEntity <> "" then
+      logInfo("first_visible_entity=" <& stats.firstVisibleEntity);
+    end if;
+    if stats.firstOccludedEntity <> "" then
+      logInfo("first_occluded_entity=" <& stats.firstOccludedEntity);
+    end if;
+    if stats.firstRenderEntityModel <> "" then
+      logInfo("first_render_entity_model=" <& stats.firstRenderEntityModel);
+    end if;
+    if stats.firstRenderEntityAnim <> "" then
+      logInfo("first_render_entity_anim=" <& stats.firstRenderEntityAnim);
+    end if;
+    if stats.firstMissingRenderEntityModel <> "" then
+      logInfo("first_missing_render_entity_model=" <&
+          stats.firstMissingRenderEntityModel);
+    end if;
+    if stats.firstMissingRenderEntityAnim <> "" then
+      logInfo("first_missing_render_entity_anim=" <&
+          stats.firstMissingRenderEntityAnim);
+    end if;
+    if stats.firstRenderSkinBinding <> "" then
+      logInfo("first_render_skin_binding=" <& stats.firstRenderSkinBinding);
+    end if;
+    if stats.firstRenderSkinRemap <> "" then
+      logInfo("first_render_skin_remap=" <& stats.firstRenderSkinRemap);
+    end if;
+    if stats.firstMissingRenderSkin <> "" then
+      logInfo("first_missing_render_skin=" <& stats.firstMissingRenderSkin);
+    end if;
+    if stats.nearestMaterial <> "" then
+      logInfo("nearest_surface_material=" <& stats.nearestMaterial);
+      logInfo("nearest_surface_texture=" <& stats.nearestTexture);
+      logInfo("nearest_surface_depth=" <& stats.nearestDepth);
+      logInfo("nearest_surface_lights=" <& stats.nearestLightCount);
+      logInfo("nearest_surface_light_color=" <& stats.nearestLightColor);
+    end if;
+    if stats.firstAnimatedMaterial <> "" then
+      logInfo("first_animated_material=" <& stats.firstAnimatedMaterial);
+      logInfo("first_animated_texture=" <& stats.firstAnimatedTexture);
+      logInfo("first_animated_transform=" <& stats.firstAnimatedTransform);
+      logInfo("material_anim_sample time=" <& MATERIAL_SAMPLE_TIME <&
+          " scroll_u=" <& stats.firstAnimatedScrollU <&
+          " scroll_v=" <& stats.firstAnimatedScrollV <&
+          " rotation=" <& stats.firstAnimatedRotation);
+    end if;
+    logInfo("animated_actor_handoff candidates=" <&
+        stats.animatedActorCandidates <& " drawcalls=" <&
+        stats.animatedActorDrawCalls <& " vertices=" <&
+        stats.animatedActorVertices <& " triangles=" <&
+        stats.animatedActorTriangles <& " texture_resolved=" <&
+        stats.animatedActorTextureResolved <& " light_influences=" <&
+        stats.animatedActorLightInfluences);
+    if stats.firstMd5Mesh <> "" then
+      logInfo("first_md5_render_mesh=" <& stats.firstMd5Mesh);
+    end if;
+    if stats.firstMd5Anim <> "" then
+      logInfo("first_md5_render_anim=" <& stats.firstMd5Anim);
+    end if;
+    if stats.firstAnimatedActorDrawCall <> "" then
+      logInfo("first_animated_actor=" <& stats.firstAnimatedActor);
+      logInfo("first_animated_actor_drawcall=" <&
+          stats.firstAnimatedActorDrawCall);
+      logInfo("first_animated_actor_visibility=" <&
+          stats.firstAnimatedActorVisibility);
+    end if;
+    logInfo("frame_mid_row=" <& stats.firstFrameRow);
+    logInfo("render_probe_ready=" <& (stats.requestedMapFound and
+        stats.playerParsed and length(stats.surfaces) <> 0 and
+        stats.visibleSurfaces <> 0 and stats.framebufferPixels <> 0 and
+        stats.depthWrites <> 0 and stats.lightInfluences <> 0 and
+        stats.renderEntityVisible <> 0 and stats.renderEntityOccluded <> 0 and
+        stats.visibleModelEntities <> 0 and stats.occludedModelEntities <> 0 and
+        stats.renderEntitySkinsResolved <> 0 and
+        stats.renderEntitySkinsMissing = 0 and
+        stats.renderEntitySkinRemaps <> 0 and
+        stats.requestedRenderFound and stats.compiledRenderSurfaces <> 0 and
+        stats.compiledRenderVersion <> "" and
+        stats.compiledRenderModelName <> "" and
+        stats.compiledRenderTextureResolved <> 0 and
+        stats.firstCompiledDrawCallSummary <> "" and
+        stats.firstCompiledVisibilityScope <> "" and
+        stats.firstCompiledVisibilityFlood <> "" and
+        stats.animatedMaterials <> 0 and stats.materialTransforms <> 0 and
+        stats.animatedActorDrawCalls <> 0 and
+        stats.animatedActorTextureResolved <> 0));
+  end func;
+
+const proc: main is func
+  local
+    var renderConfig: config is renderConfig.value;
+    var renderStats: stats is renderStats.value;
+    var array string: pk4Files is 0 times "";
+    var string: pk4File is "";
+  begin
+    parseArgs(config);
+    if config.showHelp then
+      showUsage;
+    else
+      stats.requestedMapPath := mapNameToAssetPath(config.startMap);
+      stats.requestedRenderPath := compiledSiblingPath(stats.requestedMapPath,
+          ".proc");
+      if fileType(config.basePath) <> FILE_DIR then
+        logError("Doom 3 base directory not found: " <& config.basePath);
+      else
+        pk4Files := sort(findPk4Archives(config.basePath));
+        stats.pk4Archives := length(pk4Files);
+        if length(pk4Files) = 0 then
+          logError("No .pk4 archives found in: " <& config.basePath);
+        else
+          for pk4File range pk4Files do
+            scanArchive(stats, pk4File, stats.requestedMapPath);
+          end for;
+          resolveCompiledRenderTextures(stats);
+          buildFirstCompiledSurfaceSummary(stats);
+          drawFrame(stats);
+          buildAnimatedActorHandoff(stats);
+          printStats(stats);
+        end if;
+      end if;
+    end if;
+  end func;
