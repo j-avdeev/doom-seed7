@@ -20,7 +20,7 @@ const integer: VIEW_CENTER_Y is SCREEN_HEIGHT mdiv 2;
 const float:   FOCAL_LENGTH  is 390.0;
 const float:   NEAR_PLANE    is 0.18;
 const float:   FAR_DEPTH     is 38.0;
-const float:   MOVE_SPEED    is 0.10;
+const float:   MOVE_SPEED    is 0.115;
 const float:   ROT_SPEED     is 0.050;
 
 const integer: MAP_E1M1 is 1;
@@ -1300,15 +1300,15 @@ const proc: updateMonsterSlot (inout engineState: state,
       if kind = KIND_IRON_BRUTE then
         speed := 0.020;
         attackRange := 1.35;
-        damage := 13;
+        damage := 7;
       elsif kind = KIND_EMBER_CRAWLER then
         speed := 0.040;
         attackRange := 1.10;
-        damage := 9;
+        damage := 5;
       else
         speed := 0.030;
         attackRange := 5.60;
-        damage := 6;
+        damage := 3;
       end if;
       dx := state.camX - x;
       dz := state.camZ - z;

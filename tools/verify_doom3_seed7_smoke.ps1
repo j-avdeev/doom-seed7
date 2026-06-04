@@ -161,6 +161,7 @@ Assert-FileNotMatches -Path "doom3_seed7_engine.s7" -Pattern "ammoWidth := clamp
 
 Write-Host "Checking interactive control mapping..."
 $engineSource = Get-Content -LiteralPath "doom3_seed7_engine.s7" -Raw
+Assert-FileContains -Path "doom3_seed7_engine.s7" -Needle "const float:   MOVE_SPEED    is 0.115;" -Label "player movement tuning"
 if ($engineSource -notmatch "KEY_RIGHT[\s\S]{0,240}rotatePlayer\(state, ROT_SPEED\)") {
   throw "Right arrow must rotate with positive engine yaw."
 }
@@ -171,6 +172,10 @@ Assert-FileContains -Path "doom3_seed7_engine.s7" -Needle "state.lastKey = 'w'" 
 Assert-FileContains -Path "doom3_seed7_engine.s7" -Needle "state.lastKey = 'a'" -Label "WASD controls"
 Assert-FileContains -Path "doom3_seed7_engine.s7" -Needle "state.lastKey = 's'" -Label "WASD controls"
 Assert-FileContains -Path "doom3_seed7_engine.s7" -Needle "state.lastKey = 'd'" -Label "WASD controls"
+Assert-FileContains -Path "doom3_seed7_engine.s7" -Needle "damage := 7;" -Label "monster damage tuning"
+Assert-FileContains -Path "doom3_seed7_engine.s7" -Needle "damage := 5;" -Label "monster damage tuning"
+Assert-FileContains -Path "doom3_seed7_engine.s7" -Needle "damage := 3;" -Label "monster damage tuning"
+Assert-FileNotMatches -Path "doom3_seed7_engine.s7" -Pattern "damage := 13|damage := 9|damage := 6" -Label "monster damage tuning"
 
 Write-Host "Running engine native smoke..."
 $smokeOutput = cmd /c "node seed7/bin/s7.js -l seed7/lib doom3_seed7_runtime.s7 --smoke_frames 2 2>&1"
