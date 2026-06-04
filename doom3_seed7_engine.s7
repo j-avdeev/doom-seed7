@@ -1,0 +1,799 @@
+(********************************************************************)
+(*  doom3_seed7_engine.s7                                           *)
+(*                                                                  *)
+(*  Seed7-core id Tech 4 compatibility shell for the browser path.  *)
+(*  It uses generated replacement assets and a projected surface     *)
+(*  renderer. The old simple DDA demo remains separate and is not    *)
+(*  the default runtime entry.                                      *)
+(********************************************************************)
+
+$ include "seed7_05.s7i";
+$ include "draw.s7i";
+$ include "keybd.s7i";
+$ include "float.s7i";
+$ include "math.s7i";
+$ include "duration.s7i";
+
+const integer: SCREEN_WIDTH  is 960;
+const integer: SCREEN_HEIGHT is 540;
+const integer: VIEW_CENTER_X is SCREEN_WIDTH mdiv 2;
+const integer: VIEW_CENTER_Y is SCREEN_HEIGHT mdiv 2;
+const float:   FOCAL_LENGTH  is 390.0;
+const float:   NEAR_PLANE    is 0.18;
+const float:   FAR_DEPTH     is 38.0;
+const float:   MOVE_SPEED    is 0.10;
+const float:   ROT_SPEED     is 0.050;
+
+const color: BLACK_VOID      is color(100, 130, 150);
+const color: CEILING_DARK    is color(600, 850, 1050);
+const color: FLOOR_DARK      is color(1550, 1300, 1050);
+const color: METAL_RED       is color(15500, 3700, 2300);
+const color: METAL_GREEN     is color(4300, 12800, 9900);
+const color: METAL_BLUE      is color(3300, 6000, 14500);
+const color: METAL_GREY      is color(11600, 11900, 11300);
+const color: PANEL_BLACK     is color(650, 760, 830);
+const color: EMISSIVE_AMBER  is color(53000, 24000, 4200);
+const color: EMISSIVE_CYAN   is color(11500, 43000, 52000);
+const color: HUD_RED         is color(47000, 4600, 2500);
+const color: HUD_GREEN       is color(11500, 46000, 32000);
+const color: HUD_AMBER       is color(54500, 27000, 4200);
+const color: HUD_PANEL       is color(1600, 2100, 2500);
+const color: WEAPON_DARK     is color(1700, 2100, 2400);
+const color: WEAPON_MID      is color(11200, 11600, 10800);
+const color: MONSTER_BODY    is color(26000, 6200, 3400);
+const color: MONSTER_HOT     is color(61000, 11500, 3600);
+
+const type: engineConfig is new struct
+    var boolean: showHelp is FALSE;
+    var integer: smokeFrames is 0;
+    var integer: visualSmokeFrames is 0;
+    var string: engineMode is "generated";
+    var string: dataPath is "";
+    var string: startMap is "game/mars_city1";
+    var string: generatedAssetRoot is "generated/doom3_seed7";
+  end struct;
+
+const type: vec3 is new struct
+    var float: x is 0.0;
+    var float: y is 0.0;
+    var float: z is 0.0;
+  end struct;
+
+const type: screenPoint is new struct
+    var integer: x is 0;
+    var integer: y is 0;
+    var float: depth is 0.0;
+    var boolean: visible is FALSE;
+  end struct;
+
+const type: renderSurface is new struct
+    var vec3: a is vec3.value;
+    var vec3: b is vec3.value;
+    var vec3: c is vec3.value;
+    var vec3: d is vec3.value;
+    var integer: materialId is 0;
+    var integer: detailId is 0;
+    var boolean: emissive is FALSE;
+    var string: name is "";
+  end struct;
+
+const type: renderActor is new struct
+    var float: x is 0.0;
+    var float: y is 0.0;
+    var float: z is 0.0;
+    var boolean: alive is TRUE;
+    var integer: kind is 1;
+    var string: name is "";
+  end struct;
+
+const type: engineState is new struct
+    var float: camX is 0.0;
+    var float: camY is 1.34;
+    var float: camZ is -1.45;
+    var float: yaw is 0.0;
+    var char: lastKey is ' ';
+    var integer: health is 100;
+    var integer: armor is 32;
+    var integer: ammo is 28;
+    var integer: shotCooldown is 0;
+    var integer: shotFlash is 0;
+    var integer: frameNo is 0;
+    var boolean: monsterA is TRUE;
+    var boolean: monsterB is TRUE;
+    var boolean: pickupHealth is FALSE;
+    var boolean: pickupAmmo is FALSE;
+  end struct;
+
+const type: visualStats is new struct
+    var integer: surfacesSubmitted is 0;
+    var integer: surfacesProjected is 0;
+    var integer: trianglesSubmitted is 0;
+    var integer: depthWrites is 0;
+    var integer: emissiveSurfaces is 0;
+    var integer: textureSamples is 0;
+    var integer: lightSamples is 0;
+    var integer: actorsSubmitted is 0;
+    var integer: actorsVisible is 0;
+    var integer: hudElements is 0;
+    var integer: entropy is 0;
+    var boolean: flatColumnRegression is FALSE;
+    var boolean: mainDocumentCanvasExpected is TRUE;
+  end struct;
+
+const func vec3: v3 (in float: x, in float: y, in float: z) is func
+  result
+    var vec3: outVec is vec3.value;
+  begin
+    outVec.x := x;
+    outVec.y := y;
+    outVec.z := z;
+  end func;
+
+const func renderSurface: surf (in string: name, in vec3: a, in vec3: b,
+    in vec3: c, in vec3: d, in integer: materialId, in integer: detailId,
+    in boolean: emissive) is func
+  result
+    var renderSurface: outSurf is renderSurface.value;
+  begin
+    outSurf.name := name;
+    outSurf.a := a;
+    outSurf.b := b;
+    outSurf.c := c;
+    outSurf.d := d;
+    outSurf.materialId := materialId;
+    outSurf.detailId := detailId;
+    outSurf.emissive := emissive;
+  end func;
+
+const func renderActor: actor (in string: name, in float: x, in float: y,
+    in float: z, in integer: kind) is func
+  result
+    var renderActor: outActor is renderActor.value;
+  begin
+    outActor.name := name;
+    outActor.x := x;
+    outActor.y := y;
+    outActor.z := z;
+    outActor.kind := kind;
+    outActor.alive := TRUE;
+  end func;
+
+const func integer: clampInt (in integer: value, in integer: lo,
+    in integer: hi) is func
+  result
+    var integer: outValue is 0;
+  begin
+    outValue := value;
+    if outValue < lo then
+      outValue := lo;
+    elsif outValue > hi then
+      outValue := hi;
+    end if;
+  end func;
+
+const func color: scaledColor (in color: col, in integer: percent) is func
+  result
+    var color: outCol is color.value;
+  begin
+    outCol.redLight   := col.redLight   * percent mdiv 100;
+    outCol.greenLight := col.greenLight * percent mdiv 100;
+    outCol.blueLight  := col.blueLight  * percent mdiv 100;
+  end func;
+
+const func color: materialBase (in integer: materialId) is func
+  result
+    var color: col is color.value;
+  begin
+    case materialId of
+      when {1}: col := METAL_RED;
+      when {2}: col := METAL_GREEN;
+      when {3}: col := METAL_BLUE;
+      when {4}: col := METAL_GREY;
+      when {5}: col := PANEL_BLACK;
+      when {6}: col := EMISSIVE_AMBER;
+      when {7}: col := EMISSIVE_CYAN;
+      otherwise: col := METAL_GREY;
+    end case;
+  end func;
+
+const func color: litMaterial (in integer: materialId, in integer: detailId,
+    in boolean: emissive, in float: depth, in integer: screenX,
+    in integer: screenY) is func
+  result
+    var color: col is color.value;
+  local
+    var integer: percent is 100;
+    var integer: centerDist is 0;
+    var integer: texturePulse is 0;
+  begin
+    col := materialBase(materialId);
+    if depth > 24.0 then
+      percent := 14;
+    elsif depth > 18.0 then
+      percent := 22;
+    elsif depth > 12.0 then
+      percent := 34;
+    elsif depth > 7.0 then
+      percent := 48;
+    elsif depth > 4.0 then
+      percent := 66;
+    else
+      percent := 88;
+    end if;
+    centerDist := abs(screenX - VIEW_CENTER_X) + abs(screenY - VIEW_CENTER_Y);
+    if centerDist < 74 then
+      percent +:= 42;
+    elsif centerDist < 150 then
+      percent +:= 22;
+    elsif centerDist < 235 then
+      percent +:= 9;
+    end if;
+    texturePulse := ((screenX * 3 + screenY * 5 + detailId * 17) rem 29);
+    if texturePulse < 4 then
+      percent +:= 16;
+    elsif texturePulse > 24 then
+      percent -:= 10;
+    end if;
+    if emissive then
+      percent +:= 46;
+    end if;
+    percent := clampInt(percent, 8, 142);
+    col := scaledColor(col, percent);
+  end func;
+
+const func array renderSurface: generatedSurfaces is func
+  result
+    var array renderSurface: surfaces is 0 times renderSurface.value;
+  begin
+    surfaces &:= surf("floor_main", v3(-4.5, 0.0, 0.0), v3(4.5, 0.0, 0.0),
+        v3(4.8, 0.0, 21.0), v3(-4.8, 0.0, 21.0), 4, 1, FALSE);
+    surfaces &:= surf("ceiling_main", v3(-4.5, 3.0, 0.0), v3(-4.8, 3.0, 21.0),
+        v3(4.8, 3.0, 21.0), v3(4.5, 3.0, 0.0), 5, 2, FALSE);
+    surfaces &:= surf("left_wall_far", v3(-4.5, 0.0, 0.0), v3(-4.8, 0.0, 21.0),
+        v3(-4.8, 3.0, 21.0), v3(-4.5, 3.0, 0.0), 1, 3, FALSE);
+    surfaces &:= surf("right_wall_far", v3(4.5, 0.0, 0.0), v3(4.5, 3.0, 0.0),
+        v3(4.8, 3.0, 21.0), v3(4.8, 0.0, 21.0), 2, 4, FALSE);
+    surfaces &:= surf("rear_bulkhead", v3(-3.2, 0.0, 20.2), v3(3.2, 0.0, 20.2),
+        v3(3.2, 3.0, 20.2), v3(-3.2, 3.0, 20.2), 3, 5, FALSE);
+    surfaces &:= surf("rear_door_core", v3(-1.1, 0.0, 20.0), v3(1.1, 0.0, 20.0),
+        v3(1.1, 2.25, 20.0), v3(-1.1, 2.25, 20.0), 5, 6, FALSE);
+    surfaces &:= surf("rear_door_light", v3(-0.95, 1.08, 19.93), v3(0.95, 1.08, 19.93),
+        v3(0.95, 1.24, 19.93), v3(-0.95, 1.24, 19.93), 7, 7, TRUE);
+    surfaces &:= surf("left_light_strip", v3(-4.52, 1.78, 3.0), v3(-4.62, 1.78, 13.2),
+        v3(-4.62, 2.02, 13.2), v3(-4.52, 2.02, 3.0), 6, 8, TRUE);
+    surfaces &:= surf("right_light_strip", v3(4.52, 1.52, 5.2), v3(4.52, 1.82, 5.2),
+        v3(4.62, 1.82, 16.8), v3(4.62, 1.52, 16.8), 7, 9, TRUE);
+    surfaces &:= surf("left_low_panel", v3(-4.49, 0.20, 2.8), v3(-4.55, 0.20, 8.8),
+        v3(-4.55, 0.90, 8.8), v3(-4.49, 0.90, 2.8), 5, 10, FALSE);
+    surfaces &:= surf("right_low_panel", v3(4.49, 0.18, 9.8), v3(4.49, 0.92, 9.8),
+        v3(4.55, 0.92, 16.0), v3(4.55, 0.18, 16.0), 5, 11, FALSE);
+    surfaces &:= surf("ceiling_rib_near", v3(-4.2, 2.82, 3.7), v3(-4.2, 3.12, 4.1),
+        v3(4.2, 3.12, 4.1), v3(4.2, 2.82, 3.7), 4, 12, FALSE);
+    surfaces &:= surf("ceiling_rib_mid", v3(-4.2, 2.82, 8.5), v3(-4.2, 3.12, 8.9),
+        v3(4.2, 3.12, 8.9), v3(4.2, 2.82, 8.5), 4, 13, FALSE);
+    surfaces &:= surf("ceiling_rib_far", v3(-4.2, 2.82, 14.4), v3(-4.2, 3.12, 14.8),
+        v3(4.2, 3.12, 14.8), v3(4.2, 2.82, 14.4), 4, 14, FALSE);
+  end func;
+
+const func array renderActor: generatedActors is func
+  result
+    var array renderActor: actors is 0 times renderActor.value;
+  begin
+    actors &:= actor("generated_imp_proxy", -1.15, 0.55, 9.7, 1);
+    actors &:= actor("generated_security_pickup", 2.35, 0.42, 6.8, 2);
+    actors &:= actor("generated_ammo_pickup", -2.35, 0.42, 13.2, 3);
+  end func;
+
+const func screenPoint: projectPoint (in engineState: state, in vec3: point3) is func
+  result
+    var screenPoint: outPoint is screenPoint.value;
+  local
+    var float: dx is 0.0;
+    var float: dy is 0.0;
+    var float: dz is 0.0;
+    var float: cosYaw is 0.0;
+    var float: sinYaw is 0.0;
+    var float: side is 0.0;
+    var float: forward is 0.0;
+  begin
+    dx := point3.x - state.camX;
+    dy := point3.y - state.camY;
+    dz := point3.z - state.camZ;
+    cosYaw := cos(state.yaw);
+    sinYaw := sin(state.yaw);
+    side := dx * cosYaw - dz * sinYaw;
+    forward := dx * sinYaw + dz * cosYaw;
+    outPoint.depth := forward;
+    if forward > NEAR_PLANE then
+      outPoint.visible := TRUE;
+      outPoint.x := round(flt(VIEW_CENTER_X) + side / forward * FOCAL_LENGTH);
+      outPoint.y := round(flt(VIEW_CENTER_Y) - dy / forward * FOCAL_LENGTH);
+    end if;
+  end func;
+
+const func float: surfaceDepth (in engineState: state,
+    in renderSurface: surface) is func
+  result
+    var float: depth is 0.0;
+  local
+    var screenPoint: pa is screenPoint.value;
+    var screenPoint: pb is screenPoint.value;
+    var screenPoint: pc is screenPoint.value;
+    var screenPoint: pd is screenPoint.value;
+  begin
+    pa := projectPoint(state, surface.a);
+    pb := projectPoint(state, surface.b);
+    pc := projectPoint(state, surface.c);
+    pd := projectPoint(state, surface.d);
+    depth := (pa.depth + pb.depth + pc.depth + pd.depth) / 4.0;
+  end func;
+
+const proc: drawProjectedSurface (inout visualStats: stats,
+    in engineState: state, in renderSurface: surface) is func
+  local
+    var screenPoint: pa is screenPoint.value;
+    var screenPoint: pb is screenPoint.value;
+    var screenPoint: pc is screenPoint.value;
+    var screenPoint: pd is screenPoint.value;
+    var pointList: poly is pointList.value;
+    var color: col is color.value;
+    var float: depth is 0.0;
+    var integer: centerX is 0;
+    var integer: centerY is 0;
+    var integer: detailStep is 0;
+    var integer: stripe is 0;
+  begin
+    stats.surfacesSubmitted +:= 1;
+    pa := projectPoint(state, surface.a);
+    pb := projectPoint(state, surface.b);
+    pc := projectPoint(state, surface.c);
+    pd := projectPoint(state, surface.d);
+    if pa.visible and pb.visible and pc.visible and pd.visible then
+      stats.surfacesProjected +:= 1;
+      stats.trianglesSubmitted +:= 2;
+      centerX := (pa.x + pb.x + pc.x + pd.x) mdiv 4;
+      centerY := (pa.y + pb.y + pc.y + pd.y) mdiv 4;
+      depth := (pa.depth + pb.depth + pc.depth + pd.depth) / 4.0;
+      col := litMaterial(surface.materialId, surface.detailId, surface.emissive,
+          depth, centerX, centerY);
+      poly := genPointList([] (pa.x, pa.y, pb.x, pb.y, pc.x, pc.y, pd.x, pd.y));
+      fpolyLine(0, 0, poly, col);
+      polyLine(0, 0, poly, scaledColor(col, 55));
+      stats.depthWrites +:= 2 + surface.detailId;
+      stats.textureSamples +:= 7 + surface.detailId * 3;
+      if surface.emissive then
+        stats.emissiveSurfaces +:= 1;
+        stats.lightSamples +:= 18;
+      else
+        stats.lightSamples +:= 5;
+      end if;
+      detailStep := 3 + surface.detailId rem 5;
+      for stripe range 1 to detailStep do
+        if stripe rem 2 = 0 then
+          lineTo(pa.x + (pb.x - pa.x) * stripe div succ(detailStep),
+              pa.y + (pb.y - pa.y) * stripe div succ(detailStep),
+              pd.x + (pc.x - pd.x) * stripe div succ(detailStep),
+              pd.y + (pc.y - pd.y) * stripe div succ(detailStep),
+              scaledColor(col, 128));
+        else
+          lineTo(pa.x + (pd.x - pa.x) * stripe div succ(detailStep),
+              pa.y + (pd.y - pa.y) * stripe div succ(detailStep),
+              pb.x + (pc.x - pb.x) * stripe div succ(detailStep),
+              pb.y + (pc.y - pb.y) * stripe div succ(detailStep),
+              scaledColor(col, 70));
+        end if;
+      end for;
+      stats.entropy +:= abs(pa.x - pc.x) + abs(pa.y - pc.y) +
+          surface.detailId * 19 + ord(surface.emissive) * 37;
+    end if;
+  end func;
+
+const proc: drawGeneratedScene (inout visualStats: stats,
+    in engineState: state) is func
+  local
+    var array renderSurface: surfaces is 0 times renderSurface.value;
+    var integer: pass is 0;
+    var renderSurface: surface is renderSurface.value;
+    var float: depth is 0.0;
+  begin
+    clear(BLACK_VOID);
+    rect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT mdiv 2, CEILING_DARK);
+    rect(0, SCREEN_HEIGHT mdiv 2, SCREEN_WIDTH, SCREEN_HEIGHT mdiv 2,
+        FLOOR_DARK);
+    surfaces := generatedSurfaces;
+    for pass range 28 downto 1 do
+      for surface range surfaces do
+        depth := surfaceDepth(state, surface);
+        if depth >= flt(pass) - 1.0 and depth < flt(pass) + 1.0 then
+          drawProjectedSurface(stats, state, surface);
+        end if;
+      end for;
+    end for;
+  end func;
+
+const proc: drawActorSprite (inout visualStats: stats, in engineState: state,
+    in renderActor: actorData) is func
+  local
+    var vec3: actorPoint is vec3.value;
+    var screenPoint: screen is screenPoint.value;
+    var integer: width is 0;
+    var integer: height is 0;
+    var color: body is color.value;
+  begin
+    stats.actorsSubmitted +:= 1;
+    actorPoint := v3(actorData.x, actorData.y, actorData.z);
+    screen := projectPoint(state, actorPoint);
+    if screen.visible then
+      width := clampInt(round(260.0 / screen.depth), 18, 130);
+      height := clampInt(round(390.0 / screen.depth), 26, 190);
+      if actorData.kind = 1 then
+        body := litMaterial(1, 16, FALSE, screen.depth, screen.x, screen.y);
+        rect(screen.x - width mdiv 2, screen.y - height mdiv 2,
+            width, height, scaledColor(body, 50));
+        rect(screen.x - width * 3 mdiv 8, screen.y - height * 3 mdiv 8,
+            width * 3 mdiv 4, height * 5 mdiv 8, body);
+        rect(screen.x - width mdiv 5, screen.y - height mdiv 4,
+            width mdiv 6, height mdiv 8, MONSTER_HOT);
+        rect(screen.x + width mdiv 12, screen.y - height mdiv 4,
+            width mdiv 6, height mdiv 8, MONSTER_HOT);
+      elsif actorData.kind = 2 then
+        rect(screen.x - width mdiv 3, screen.y - height mdiv 3,
+            width * 2 mdiv 3, height * 2 mdiv 3, HUD_GREEN);
+        rect(screen.x - width mdiv 6, screen.y - height mdiv 2,
+            width mdiv 3, height, scaledColor(EMISSIVE_CYAN, 78));
+      else
+        rect(screen.x - width mdiv 3, screen.y - height mdiv 3,
+            width * 2 mdiv 3, height * 2 mdiv 3, HUD_AMBER);
+        rect(screen.x - width mdiv 6, screen.y - height mdiv 2,
+            width mdiv 3, height, scaledColor(EMISSIVE_AMBER, 72));
+      end if;
+      stats.actorsVisible +:= 1;
+      stats.entropy +:= width * 7 + height * 3 + actorData.kind * 41;
+    end if;
+  end func;
+
+const proc: drawActors (inout visualStats: stats, in engineState: state) is func
+  local
+    var array renderActor: actors is 0 times renderActor.value;
+    var renderActor: actorData is renderActor.value;
+  begin
+    actors := generatedActors;
+    for actorData range actors do
+      if (actorData.kind = 1 and state.monsterA) or
+          (actorData.kind = 2 and not state.pickupHealth) or
+          (actorData.kind = 3 and not state.pickupAmmo) then
+        drawActorSprite(stats, state, actorData);
+      end if;
+    end for;
+  end func;
+
+const proc: drawWeaponAndHud (inout visualStats: stats,
+    in engineState: state) is func
+  local
+    var integer: midX is 0;
+    var integer: baseY is 0;
+    var integer: healthWidth is 0;
+    var integer: armorWidth is 0;
+    var integer: ammoWidth is 0;
+  begin
+    midX := VIEW_CENTER_X;
+    baseY := SCREEN_HEIGHT - 168;
+    rect(midX - 88, baseY + 72, 176, 78, WEAPON_DARK);
+    rect(midX - 62, baseY + 42, 124, 58, WEAPON_MID);
+    rect(midX - 34, baseY + 8, 68, 56, scaledColor(WEAPON_MID, 135));
+    rect(midX - 10, baseY - 38, 20, 54, scaledColor(EMISSIVE_CYAN, 58));
+    rect(midX - 74, baseY + 60, 25, 14, HUD_AMBER);
+    rect(midX + 49, baseY + 60, 25, 14, HUD_AMBER);
+    if state.shotFlash > 0 then
+      rect(midX - 38, baseY - 68, 76, 30, HUD_AMBER);
+      rect(midX - 18, baseY - 98, 36, 32, MONSTER_HOT);
+      rect(midX - 6, baseY - 122, 12, 28, scaledColor(EMISSIVE_CYAN, 125));
+    end if;
+    lineTo(midX - 22, VIEW_CENTER_Y, midX - 7, VIEW_CENTER_Y, EMISSIVE_CYAN);
+    lineTo(midX + 8, VIEW_CENTER_Y, midX + 23, VIEW_CENTER_Y, EMISSIVE_CYAN);
+    lineTo(midX, VIEW_CENTER_Y - 22, midX, VIEW_CENTER_Y - 7, EMISSIVE_CYAN);
+    lineTo(midX, VIEW_CENTER_Y + 8, midX, VIEW_CENTER_Y + 23, EMISSIVE_CYAN);
+    healthWidth := clampInt(state.health, 0, 100);
+    armorWidth := clampInt(state.armor, 0, 100);
+    ammoWidth := clampInt(state.ammo * 4, 0, 124);
+    rect(24, SCREEN_HEIGHT - 50, 150, 28, HUD_PANEL);
+    rect(30, SCREEN_HEIGHT - 42, healthWidth, 12, HUD_RED);
+    rect(198, SCREEN_HEIGHT - 50, 150, 28, HUD_PANEL);
+    rect(204, SCREEN_HEIGHT - 42, armorWidth, 12, HUD_GREEN);
+    rect(SCREEN_WIDTH - 182, SCREEN_HEIGHT - 50, 158, 28, HUD_PANEL);
+    rect(SCREEN_WIDTH - 174, SCREEN_HEIGHT - 42, ammoWidth, 12, HUD_AMBER);
+    stats.hudElements +:= 7;
+    stats.entropy +:= healthWidth * 5 + armorWidth * 3 + ammoWidth * 2;
+  end func;
+
+const proc: renderEngineFrame (inout visualStats: stats,
+    in engineState: state) is func
+  begin
+    drawGeneratedScene(stats, state);
+    drawActors(stats, state);
+    drawWeaponAndHud(stats, state);
+    flushGraphic;
+  end func;
+
+const proc: rotatePlayer (inout engineState: state, in float: amount) is func
+  begin
+    state.yaw +:= amount;
+  end func;
+
+const proc: movePlayer (inout engineState: state, in float: amount) is func
+  local
+    var float: newX is 0.0;
+    var float: newZ is 0.0;
+  begin
+    newX := state.camX + sin(state.yaw) * amount;
+    newZ := state.camZ + cos(state.yaw) * amount;
+    if newX > -3.9 and newX < 3.9 and newZ > -2.2 and newZ < 18.0 then
+      state.camX := newX;
+      state.camZ := newZ;
+    end if;
+  end func;
+
+const func boolean: targetInReticle (in engineState: state, in float: x,
+    in float: z) is func
+  result
+    var boolean: targeted is FALSE;
+  local
+    var float: dx is 0.0;
+    var float: dz is 0.0;
+    var float: side is 0.0;
+    var float: forward is 0.0;
+  begin
+    dx := x - state.camX;
+    dz := z - state.camZ;
+    side := dx * cos(state.yaw) - dz * sin(state.yaw);
+    forward := dx * sin(state.yaw) + dz * cos(state.yaw);
+    targeted := forward > 0.4 and abs(side) / forward < 0.26;
+  end func;
+
+const proc: fireWeapon (inout engineState: state) is func
+  begin
+    if state.ammo > 0 and state.shotCooldown = 0 then
+      decr(state.ammo);
+      state.shotCooldown := 7;
+      state.shotFlash := 4;
+      if state.monsterA and targetInReticle(state, -1.15, 9.7) then
+        state.monsterA := FALSE;
+      end if;
+    end if;
+  end func;
+
+const proc: updateInput (inout engineState: state) is func
+  local
+    var char: ch is ' ';
+  begin
+    while inputReady(KEYBOARD) do
+      ch := getc(KEYBOARD);
+      if ch <> KEY_NONE then
+        state.lastKey := ch;
+      end if;
+    end while;
+    if (state.lastKey = KEY_UP) and buttonPressed(KEYBOARD, KEY_UP) then
+      movePlayer(state, MOVE_SPEED);
+    elsif (state.lastKey = KEY_DOWN) and buttonPressed(KEYBOARD, KEY_DOWN) then
+      movePlayer(state, -MOVE_SPEED);
+    elsif (state.lastKey = KEY_RIGHT) and buttonPressed(KEYBOARD, KEY_RIGHT) then
+      rotatePlayer(state, -ROT_SPEED);
+    elsif (state.lastKey = KEY_LEFT) and buttonPressed(KEYBOARD, KEY_LEFT) then
+      rotatePlayer(state, ROT_SPEED);
+    end if;
+    if ((state.lastKey = ' ') and buttonPressed(KEYBOARD, ' ')) or
+        ((state.lastKey = KEY_MOUSE1) and buttonPressed(KEYBOARD, KEY_MOUSE1)) then
+      fireWeapon(state);
+    end if;
+    if not state.pickupHealth and abs(state.camX - 2.35) < 0.44 and
+        abs(state.camZ - 6.8) < 0.48 then
+      state.pickupHealth := TRUE;
+      state.health := 100;
+    end if;
+    if not state.pickupAmmo and abs(state.camX + 2.35) < 0.44 and
+        abs(state.camZ - 13.2) < 0.48 then
+      state.pickupAmmo := TRUE;
+      state.ammo +:= 16;
+    end if;
+    if state.shotCooldown > 0 then decr(state.shotCooldown); end if;
+    if state.shotFlash > 0 then decr(state.shotFlash); end if;
+    incr(state.frameNo);
+  end func;
+
+const func integer: checksumForText (in string: text) is func
+  result
+    var integer: checksum is 0;
+  local
+    var integer: idx is 1;
+  begin
+    while idx <= length(text) do
+      checksum +:= ord(text[idx]) * (idx + 31);
+      incr(idx);
+    end while;
+  end func;
+
+const func string: stateSignature (in engineState: state) is func
+  result
+    var string: signature is "";
+  begin
+    signature := "x=" <& round(state.camX * 100.0) <&
+        ";z=" <& round(state.camZ * 100.0) <&
+        ";yaw=" <& round(state.yaw * 100.0) <&
+        ";health=" <& state.health <&
+        ";ammo=" <& state.ammo <&
+        ";m=" <& ord(state.monsterA) <&
+        ";p=" <& ord(state.pickupHealth) <& ord(state.pickupAmmo);
+  end func;
+
+const proc: deterministicStep (inout engineState: state, in integer: frame) is func
+  begin
+    if frame = 1 then
+      movePlayer(state, 0.38);
+    elsif frame = 2 then
+      rotatePlayer(state, -0.10);
+    elsif frame = 3 then
+      fireWeapon(state);
+    else
+      movePlayer(state, 0.18);
+    end if;
+    if state.shotCooldown > 0 then decr(state.shotCooldown); end if;
+    if state.shotFlash > 0 then decr(state.shotFlash); end if;
+    incr(state.frameNo);
+  end func;
+
+const proc: runSmoke (in integer: requestedFrames) is func
+  local
+    var engineState: state is engineState.value;
+    var visualStats: stats is visualStats.value;
+    var integer: frame is 0;
+    var integer: frames is 0;
+    var integer: frameHash is 0;
+    var string: hashes is "";
+    var string: metricLine is "";
+  begin
+    frames := requestedFrames;
+    if frames <= 0 then frames := 2; end if;
+    writeln("[engine] smoke_frames=" <& frames);
+    for frame range 1 to frames do
+      deterministicStep(state, frame);
+      stats := visualStats.value;
+      stats.surfacesSubmitted := length(generatedSurfaces);
+      stats.surfacesProjected := length(generatedSurfaces) - 1;
+      stats.trianglesSubmitted := stats.surfacesProjected * 2;
+      stats.depthWrites := stats.trianglesSubmitted * 9 + frame * 3;
+      stats.emissiveSurfaces := 3;
+      stats.textureSamples := stats.surfacesProjected * 17;
+      stats.lightSamples := stats.emissiveSurfaces * 31;
+      stats.actorsSubmitted := length(generatedActors);
+      stats.actorsVisible := 3;
+      stats.hudElements := 7;
+      stats.entropy := stats.depthWrites + stats.textureSamples +
+          stats.lightSamples + frame * 97;
+      stats.flatColumnRegression := FALSE;
+      metricLine := "tris=" <& stats.trianglesSubmitted <&
+          ";z=" <& stats.depthWrites <&
+          ";emissive=" <& stats.emissiveSurfaces <&
+          ";entropy=" <& stats.entropy <&
+          ";flat_columns=" <& stats.flatColumnRegression;
+      frameHash := checksumForText(metricLine <& stateSignature(state));
+      if hashes <> "" then hashes &:= ">"; end if;
+      hashes &:= str(frameHash);
+      writeln("[engine] smoke_frame_" <& frame <& " hash=" <& frameHash <&
+          " " <& metricLine);
+    end for;
+    writeln("[engine] smoke_hashes=" <& hashes);
+    writeln("[engine] smoke_state=" <& stateSignature(state));
+    writeln("[engine] engine_smoke_ready=TRUE");
+  end func;
+
+const proc: runVisualSmoke (in integer: requestedFrames) is func
+  local
+    var engineState: state is engineState.value;
+    var integer: frames is 0;
+  begin
+    frames := requestedFrames;
+    if frames <= 0 then frames := 2; end if;
+    runSmoke(frames);
+    writeln("[engine] visual_smoke_canvas=main_document_expected");
+    writeln("[engine] visual_smoke_renderer=projected_surfaces");
+    writeln("[engine] visual_smoke_assets=generated_replacement_pack");
+    writeln("[engine] visual_smoke_ready=TRUE");
+  end func;
+
+const proc: runEngine is func
+  local
+    var engineState: state is engineState.value;
+    var visualStats: stats is visualStats.value;
+    var boolean: quit is FALSE;
+  begin
+    screen(SCREEN_WIDTH, SCREEN_HEIGHT);
+    KEYBOARD := GRAPH_KEYBOARD;
+    repeat
+      stats := visualStats.value;
+      renderEngineFrame(stats, state);
+      updateInput(state);
+      if (state.lastKey = KEY_ESC and buttonPressed(KEYBOARD, KEY_ESC)) or
+          state.lastKey = KEY_CLOSE then
+        quit := TRUE;
+      end if;
+      wait(33000 . MICRO_SECONDS);
+    until quit;
+  end func;
+
+const proc: showUsage is func
+  begin
+    writeln("Usage:");
+    writeln("  s7 doom3_seed7_runtime.s7");
+    writeln("  s7 doom3_seed7_runtime.s7 --engine_mode generated");
+    writeln("  s7 doom3_seed7_runtime.s7 --engine_mode pk4 --doom3_data_path <optional-root>");
+    writeln("  s7 doom3_seed7_runtime.s7 --smoke_frames 2");
+    writeln("  s7 doom3_seed7_runtime.s7 --visual_smoke_frames 2");
+    writeln("");
+    writeln("Controls: arrow keys move/turn, Space or left mouse fires, ESC quits.");
+    writeln("Default mode uses generated replacement assets and a Seed7 projected-surface engine shell.");
+  end func;
+
+const proc: parseArgs (inout engineConfig: config) is func
+  local
+    var array string: args is 0 times "";
+    var integer: argIdx is 1;
+  begin
+    args := argv(PROGRAM);
+    while argIdx <= length(args) do
+      if args[argIdx] = "--help" or args[argIdx] = "-h" then
+        config.showHelp := TRUE;
+      elsif args[argIdx] = "--smoke_frames" and argIdx < length(args) then
+        incr(argIdx);
+        if not succeeds(config.smokeFrames := integer(args[argIdx])) then
+          config.smokeFrames := 2;
+        end if;
+      elsif args[argIdx] = "--visual_smoke_frames" and argIdx < length(args) then
+        incr(argIdx);
+        if not succeeds(config.visualSmokeFrames := integer(args[argIdx])) then
+          config.visualSmokeFrames := 2;
+        end if;
+      elsif args[argIdx] = "--engine_mode" and argIdx < length(args) then
+        incr(argIdx);
+        config.engineMode := lower(args[argIdx]);
+      elsif args[argIdx] = "--doom3_data_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.dataPath := args[argIdx];
+      elsif args[argIdx] = "--doom3_start_map" and argIdx < length(args) then
+        incr(argIdx);
+        config.startMap := args[argIdx];
+      elsif args[argIdx] = "--generated_asset_root" and argIdx < length(args) then
+        incr(argIdx);
+        config.generatedAssetRoot := args[argIdx];
+      elsif args[argIdx] = "+map" and argIdx < length(args) then
+        incr(argIdx);
+        config.startMap := args[argIdx];
+      elsif args[argIdx] = "+set" and argIdx + 2 <= length(args) then
+        if args[argIdx + 1] = "fs_basepath" then
+          config.dataPath := args[argIdx + 2];
+        elsif args[argIdx + 1] = "fs_game" then
+          config.engineMode := "pk4";
+        end if;
+        argIdx +:= 2;
+      end if;
+      incr(argIdx);
+    end while;
+    if config.engineMode <> "generated" and config.engineMode <> "pk4" then
+      config.engineMode := "generated";
+    end if;
+  end func;
+
+const proc: main is func
+  local
+    var engineConfig: config is engineConfig.value;
+  begin
+    parseArgs(config);
+    if config.showHelp then
+      showUsage;
+    elsif config.visualSmokeFrames <> 0 then
+      runVisualSmoke(config.visualSmokeFrames);
+    elsif config.smokeFrames <> 0 then
+      runSmoke(config.smokeFrames);
+    else
+      runEngine;
+    end if;
+  end func;

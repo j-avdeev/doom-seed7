@@ -1,0 +1,8 @@
+doom3_seed7_generated_assets=1
+license=generated-free-placeholder
+mode=generated
+map=maps/seed7/mars_city1.map
+materials=materials/seed7_tech4.mtr
+monster_model=models/monsters/generated_imp.md5mesh
+hud=guis/hud_seed7.gui
+notes=Deterministic replacement assets for the Seed7 id Tech 4 compatibility shell. No commercial Doom 3 data is included.

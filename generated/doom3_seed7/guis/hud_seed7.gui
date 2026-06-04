@@ -1,0 +1,17 @@
+windowDef Desktop
+{
+  rect 0, 0, 640, 480
+  visible 1
+  windowDef Health
+  {
+    rect 20, 430, 140, 22
+    forecolor 0.9, 0.1, 0.05, 1
+    text "HEALTH"
+  }
+  windowDef Ammo
+  {
+    rect 500, 430, 120, 22
+    forecolor 1, 0.55, 0.1, 1
+    text "AMMO"
+  }
+}

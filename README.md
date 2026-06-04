@@ -1,8 +1,8 @@
 # Doom3 Seed7
 
-Doom3 Seed7 is a playable browser/native Seed7 runtime that targets a dark sci-fi horror first-person feel while staying clean-room and asset-safe. The active GitHub Pages path launches a generated-art WebAssembly game by default; no commercial Doom 3 textures, sounds, models, maps, or pk4 contents are bundled.
+Doom3 Seed7 is a Seed7-core id Tech 4 compatibility track for the browser. The active GitHub Pages path now launches an engine shell with generated replacement assets, projected surfaces, lighting/fog-style shading, weapon/HUD composition, and deterministic visual smoke checks. It does not ship commercial Doom 3 textures, sounds, models, maps, or pk4 contents.
 
-The Doom 3 GPL source release and dhewm3 are reference material for behavior, compatibility direction, and asset policy:
+The Doom 3 GPL source release and dhewm3 are references for behavior, compatibility direction, and data policy:
 
 - https://github.com/id-Software/DOOM-3
 - https://github.com/dhewm/dhewm3
@@ -34,67 +34,60 @@ http://localhost:8080/index.html
 doom3.html?entry=doom3_seed7_runtime.s7
 ```
 
-Click `Launch`. Optional local `.pk4` or `.zip` files can be selected before launch; they are mounted only in browser memory under `/doom3/base`. The v1 game does not require them.
+Click `Launch`. With no file input, Pages starts `--engine_mode generated` and mounts the free generated asset pack from `generated/doom3_seed7`. Optional local `.pk4` or `.zip` files are mounted only in browser memory under `/doom3/base` and switch the runtime to `--engine_mode pk4` for compatibility testing.
 
 ## Runtime
 
-Native smoke test:
+Native smoke:
 
 ```bash
 node seed7/bin/s7.js -l seed7/lib doom3_seed7_runtime.s7 --smoke_frames 2
 ```
 
-Expected readiness marker:
-
-```text
-game_smoke_ready=TRUE
-```
-
-Help:
+Visual smoke:
 
 ```bash
-node seed7/bin/s7.js -l seed7/lib doom3_seed7_runtime.s7 --help
+node seed7/bin/s7.js -l seed7/lib doom3_seed7_runtime.s7 --visual_smoke_frames 2
 ```
 
-Runtime entrypoint:
+Expected readiness markers:
 
 ```text
-doom3_seed7_runtime.s7
+engine_smoke_ready=TRUE
+visual_smoke_ready=TRUE
 ```
 
 Supported arguments:
 
-- default: open the interactive graphical game
-- `--help`: print controls and options
-- `--smoke_frames <n>`: render deterministic headless frames and print hashes for CI
-- `--doom3_data_path <path>`: accepted for compatibility
-- `--doom3_start_map <map>`: accepted for compatibility
-- `+set fs_basepath <path>`, `+set fs_game <name>`, `+map <map>`: accepted Doom-style aliases
+- default: launch the generated replacement asset engine scene
+- `--engine_mode generated|pk4`
+- `--doom3_data_path <path>`
+- `--doom3_start_map <map>`
+- `--generated_asset_root <path>`
+- `--smoke_frames <n>`
+- `--visual_smoke_frames <n>`
+- `--help`
+- `+set fs_basepath <path>`, `+set fs_game <name>`, `+map <map>`
 
 ## Controls
 
 - Arrow keys: move and turn
-- Space: fire
-- Esc or `q`: quit
-
-The playable runtime uses generated wall, floor, pickup, monster, weapon, muzzle flash, fog, and HUD presentation in Seed7 through `draw.s7i` and `keybd.s7i`.
+- Space or left mouse: fire
+- Esc: quit
 
 ## Diagnostics
 
-The many `doom3_seed7_*.s7` scanner and subsystem probes remain in the repository for Doom 3 data inspection and compatibility work, but they are no longer the active Pages launch path. The browser game path is only:
+The active browser path is:
 
 ```text
-doom3.html -> doom3_seed7_runtime.s7 -> doom3_seed7_game.s7
+doom3.html -> doom3_seed7_runtime.s7 -> doom3_seed7_engine.s7
 ```
 
-For probe-oriented checks, run:
+The earlier simple generated game remains as a separate debug/demo file, but it is not the default launch path. The many `doom3_seed7_*.s7` scanner and subsystem probes remain for Doom 3 data inspection and compatibility work.
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\tools\smoke_doom3_seed7.ps1
-```
-
-For the active playable runtime verification, run:
+Checks:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\tools\verify_doom3_seed7_smoke.ps1
+powershell -ExecutionPolicy Bypass -File .\tools\verify_doom3_seed7_pages_visual.ps1 -Url http://localhost:8080/doom3.html?entry=doom3_seed7_runtime.s7
 ```

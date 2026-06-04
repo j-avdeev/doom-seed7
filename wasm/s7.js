@@ -53,6 +53,9 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
   var seed7OriginalOpen = window.open;
   window.open = function(url, name, features) {
     var openedWindow = null;
+    if (typeof Module !== "undefined" && Module.seed7UseDocumentCanvas) {
+      return window;
+    }
     if (typeof seed7OriginalOpen === "function") {
       openedWindow = seed7OriginalOpen.call(window, url, name, features);
     }
