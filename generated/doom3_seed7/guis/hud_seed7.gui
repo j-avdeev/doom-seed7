@@ -4,14 +4,26 @@ windowDef Desktop
   visible 1
   windowDef Health
   {
-    rect 20, 430, 140, 22
+    rect 126, 430, 150, 44
     forecolor 0.9, 0.1, 0.05, 1
     text "HEALTH"
   }
   windowDef Ammo
   {
-    rect 500, 430, 120, 22
+    rect 20, 430, 120, 44
     forecolor 1, 0.55, 0.1, 1
     text "AMMO"
+  }
+  windowDef Armor
+  {
+    rect 420, 430, 150, 44
+    forecolor 0.1, 0.75, 0.45, 1
+    text "ARMOR"
+  }
+  windowDef Face
+  {
+    rect 300, 424, 80, 56
+    forecolor 0.8, 0.45, 0.24, 1
+    text "FACE"
   }
 }
