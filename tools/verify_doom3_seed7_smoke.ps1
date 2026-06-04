@@ -46,7 +46,7 @@ function Assert-TextContains {
   }
 }
 
-Write-Host "== Doom3 Seed7 engine-shell verification =="
+Write-Host "== Doom3 Seed7 generated episode verification =="
 
 $activeFiles = @(
   "README.md",
@@ -65,6 +65,9 @@ $generatedFiles = @(
   "generated\doom3_seed7\manifest.txt",
   "generated\doom3_seed7\materials\seed7_tech4.mtr",
   "generated\doom3_seed7\maps\seed7\mars_city1.map",
+  "generated\doom3_seed7\maps\seed7\e1m1.map",
+  "generated\doom3_seed7\maps\seed7\e1m2.map",
+  "generated\doom3_seed7\maps\seed7\e1m3.map",
   "generated\doom3_seed7\models\monsters\generated_imp.md5mesh",
   "generated\doom3_seed7\guis\hud_seed7.gui"
 )
@@ -92,10 +95,13 @@ foreach ($file in $activeFiles) {
 }
 
 Write-Host "Checking browser launcher wiring..."
-Assert-FileContains -Path "doom3.html" -Needle "Doom3 Seed7 Engine Shell" -Label "browser launcher"
+Assert-FileContains -Path "doom3.html" -Needle "Doom3 Seed7 Generated Episode" -Label "browser launcher"
 Assert-FileContains -Path "doom3.html" -Needle "doom3_seed7_runtime.s7" -Label "browser launcher"
 Assert-FileContains -Path "doom3.html" -Needle "doom3_seed7_engine.s7" -Label "browser launcher"
 Assert-FileContains -Path "doom3.html" -Needle "generated/doom3_seed7/manifest.txt" -Label "browser launcher"
+Assert-FileContains -Path "doom3.html" -Needle "generated/doom3_seed7/maps/seed7/e1m1.map" -Label "browser launcher"
+Assert-FileContains -Path "doom3.html" -Needle "generated/doom3_seed7/maps/seed7/e1m2.map" -Label "browser launcher"
+Assert-FileContains -Path "doom3.html" -Needle "generated/doom3_seed7/maps/seed7/e1m3.map" -Label "browser launcher"
 Assert-FileContains -Path "doom3.html" -Needle "wasm/s7.js" -Label "browser launcher"
 Assert-FileContains -Path "doom3.html" -Needle "'--engine_mode', engineMode" -Label "browser launcher"
 Assert-FileContains -Path "doom3.html" -Needle "'--generated_asset_root', '/' + GENERATED_ASSET_ROOT" -Label "browser launcher"
@@ -118,35 +124,53 @@ Assert-FileNotMatches -Path ".github\workflows\deploy-pages.yml" -Pattern "\bfix
 
 Write-Host "Checking generated replacement asset pack..."
 Assert-FileContains -Path "generated\doom3_seed7\manifest.txt" -Needle "doom3_seed7_generated_assets=1" -Label "generated assets"
-Assert-FileContains -Path "generated\doom3_seed7\manifest.txt" -Needle "rooms=start_hall,side_lab,rear_bay" -Label "generated assets"
+Assert-FileContains -Path "generated\doom3_seed7\manifest.txt" -Needle "episode_maps=3" -Label "generated assets"
+Assert-FileContains -Path "generated\doom3_seed7\manifest.txt" -Needle "maps=e1m1,e1m2,e1m3" -Label "generated assets"
+Assert-FileContains -Path "generated\doom3_seed7\manifest.txt" -Needle "monster_types=rust_trooper,ember_crawler,iron_brute" -Label "generated assets"
+Assert-FileContains -Path "generated\doom3_seed7\manifest.txt" -Needle "doors=3" -Label "generated assets"
+Assert-FileContains -Path "generated\doom3_seed7\manifest.txt" -Needle "keys=red,blue,yellow" -Label "generated assets"
 Assert-FileContains -Path "generated\doom3_seed7\materials\seed7_tech4.mtr" -Needle "textures/seed7/emissive_cyan" -Label "generated assets"
 Assert-FileContains -Path "generated\doom3_seed7\maps\seed7\mars_city1.map" -Needle '"classname" "info_player_start"' -Label "generated assets"
-Assert-FileContains -Path "generated\doom3_seed7\maps\seed7\mars_city1.map" -Needle '"name" "generated_side_lab"' -Label "generated assets"
-Assert-FileContains -Path "generated\doom3_seed7\maps\seed7\mars_city1.map" -Needle '"name" "generated_rear_bay"' -Label "generated assets"
-Assert-FileContains -Path "generated\doom3_seed7\maps\seed7\mars_city1.map" -Needle '"name" "generated_lab_stalker"' -Label "generated assets"
+Assert-FileContains -Path "generated\doom3_seed7\maps\seed7\mars_city1.map" -Needle '"episode_alias" "e1m1"' -Label "generated assets"
+Assert-FileContains -Path "generated\doom3_seed7\maps\seed7\e1m1.map" -Needle '"name" "E1M1 Foundry Gate"' -Label "generated assets"
+Assert-FileContains -Path "generated\doom3_seed7\maps\seed7\e1m1.map" -Needle '"locked_door" "red_key_gate"' -Label "generated assets"
+Assert-FileContains -Path "generated\doom3_seed7\maps\seed7\e1m2.map" -Needle '"name" "E1M2 Processing Core"' -Label "generated assets"
+Assert-FileContains -Path "generated\doom3_seed7\maps\seed7\e1m2.map" -Needle '"locked_door" "blue_key_gate"' -Label "generated assets"
+Assert-FileContains -Path "generated\doom3_seed7\maps\seed7\e1m3.map" -Needle '"name" "E1M3 Reactor Exit"' -Label "generated assets"
+Assert-FileContains -Path "generated\doom3_seed7\maps\seed7\e1m3.map" -Needle '"locked_door" "yellow_key_gate"' -Label "generated assets"
 Assert-FileContains -Path "generated\doom3_seed7\models\monsters\generated_imp.md5mesh" -Needle "MD5Version 10" -Label "generated assets"
 Assert-FileContains -Path "generated\doom3_seed7\guis\hud_seed7.gui" -Needle "windowDef Desktop" -Label "generated assets"
 Assert-FileContains -Path "generated\doom3_seed7\guis\hud_seed7.gui" -Needle "windowDef Face" -Label "generated assets"
+Assert-FileContains -Path "generated\doom3_seed7\guis\hud_seed7.gui" -Needle "windowDef KeySlots" -Label "generated assets"
+Assert-FileContains -Path "generated\doom3_seed7\guis\hud_seed7.gui" -Needle "windowDef WeaponSlots" -Label "generated assets"
 
 Write-Host "Checking generated multi-room scene and HUD contracts..."
 Assert-FileContains -Path "doom3_seed7_engine.s7" -Needle 'surf("side_lab_floor"' -Label "engine generated scene"
-Assert-FileContains -Path "doom3_seed7_engine.s7" -Needle 'surf("bay_floor"' -Label "engine generated scene"
-Assert-FileContains -Path "doom3_seed7_engine.s7" -Needle 'actor("generated_lab_stalker"' -Label "engine generated scene"
+Assert-FileContains -Path "doom3_seed7_engine.s7" -Needle "appendEpisodeRoom(surfaces, `"e1m2_processing_core`"" -Label "engine generated scene"
+Assert-FileContains -Path "doom3_seed7_engine.s7" -Needle "appendEpisodeRoom(surfaces, `"e1m3_reactor_ring`"" -Label "engine generated scene"
+Assert-FileContains -Path "doom3_seed7_engine.s7" -Needle 'actor("rust_trooper"' -Label "engine generated scene"
+Assert-FileContains -Path "doom3_seed7_engine.s7" -Needle 'actor("ember_crawler"' -Label "engine generated scene"
+Assert-FileContains -Path "doom3_seed7_engine.s7" -Needle 'actor("iron_brute"' -Label "engine generated scene"
 Assert-FileContains -Path "doom3_seed7_engine.s7" -Needle "drawNumber3" -Label "engine generated HUD"
 Assert-FileContains -Path "doom3_seed7_engine.s7" -Needle "drawStatusFace" -Label "engine generated HUD"
 Assert-FileContains -Path "doom3_seed7_engine.s7" -Needle "HUD_GLASSES" -Label "engine generated HUD face"
 Assert-FileContains -Path "doom3_seed7_engine.s7" -Needle "HUD_HAIR" -Label "engine generated HUD face"
+Assert-FileContains -Path "doom3_seed7_engine.s7" -Needle "state.redKey" -Label "engine generated HUD key slots"
 Assert-FileNotMatches -Path "doom3_seed7_engine.s7" -Pattern "state\.ammo \* 2" -Label "right-side HUD ammo duplicate"
 Assert-FileNotMatches -Path "doom3_seed7_engine.s7" -Pattern "ammoWidth := clampInt\(state\.ammo" -Label "right-side HUD ammo duplicate"
 
 Write-Host "Checking interactive control mapping..."
 $engineSource = Get-Content -LiteralPath "doom3_seed7_engine.s7" -Raw
-if ($engineSource -notmatch "KEY_RIGHT[\s\S]{0,120}rotatePlayer\(state, ROT_SPEED\)") {
+if ($engineSource -notmatch "KEY_RIGHT[\s\S]{0,240}rotatePlayer\(state, ROT_SPEED\)") {
   throw "Right arrow must rotate with positive engine yaw."
 }
-if ($engineSource -notmatch "KEY_LEFT[\s\S]{0,120}rotatePlayer\(state, -ROT_SPEED\)") {
+if ($engineSource -notmatch "KEY_LEFT[\s\S]{0,240}rotatePlayer\(state, -ROT_SPEED\)") {
   throw "Left arrow must rotate with negative engine yaw."
 }
+Assert-FileContains -Path "doom3_seed7_engine.s7" -Needle "state.lastKey = 'w'" -Label "WASD controls"
+Assert-FileContains -Path "doom3_seed7_engine.s7" -Needle "state.lastKey = 'a'" -Label "WASD controls"
+Assert-FileContains -Path "doom3_seed7_engine.s7" -Needle "state.lastKey = 's'" -Label "WASD controls"
+Assert-FileContains -Path "doom3_seed7_engine.s7" -Needle "state.lastKey = 'd'" -Label "WASD controls"
 
 Write-Host "Running engine native smoke..."
 $smokeOutput = cmd /c "node seed7/bin/s7.js -l seed7/lib doom3_seed7_runtime.s7 --smoke_frames 2 2>&1"
@@ -158,6 +182,14 @@ Assert-TextContains -Text $smokeText -Needle "smoke_frame_1" -Label "engine smok
 Assert-TextContains -Text $smokeText -Needle "smoke_frame_2" -Label "engine smoke"
 Assert-TextContains -Text $smokeText -Needle "smoke_hashes=" -Label "engine smoke"
 Assert-TextContains -Text $smokeText -Needle "engine_smoke_ready=TRUE" -Label "engine smoke"
+Assert-TextContains -Text $smokeText -Needle "episode_maps=3" -Label "engine smoke"
+Assert-TextContains -Text $smokeText -Needle "monster_types=3" -Label "engine smoke"
+Assert-TextContains -Text $smokeText -Needle "keys=3" -Label "engine smoke"
+Assert-TextContains -Text $smokeText -Needle "doors=3" -Label "engine smoke"
+Assert-TextContains -Text $smokeText -Needle "episode_smoke_ready=TRUE" -Label "engine smoke"
+Assert-TextContains -Text $smokeText -Needle "scripted_path=pickup_key>open_door>kill_monster>exit" -Label "engine smoke"
+Assert-TextContains -Text $smokeText -Needle "scripted_kills=1" -Label "engine smoke"
+Assert-TextContains -Text $smokeText -Needle "scripted_transition_map=e1m2" -Label "engine smoke"
 Assert-TextContains -Text $smokeText -Needle "flat_columns=FALSE" -Label "engine smoke"
 Write-Host $smokeText
 
@@ -170,6 +202,7 @@ if ($LASTEXITCODE -ne 0) {
 Assert-TextContains -Text $visualText -Needle "visual_smoke_ready=TRUE" -Label "visual smoke"
 Assert-TextContains -Text $visualText -Needle "visual_smoke_renderer=projected_surfaces" -Label "visual smoke"
 Assert-TextContains -Text $visualText -Needle "visual_smoke_canvas=main_document_expected" -Label "visual smoke"
+Assert-TextContains -Text $visualText -Needle "visual_smoke_episode=classic_generated" -Label "visual smoke"
 
 Write-Host "Running runtime help..."
 $helpOutput = cmd /c "node seed7/bin/s7.js -l seed7/lib doom3_seed7_runtime.s7 --help 2>&1"
@@ -179,6 +212,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 Assert-TextContains -Text $helpText -Needle "--engine_mode generated" -Label "runtime help"
 Assert-TextContains -Text $helpText -Needle "--visual_smoke_frames" -Label "runtime help"
-Assert-TextContains -Text $helpText -Needle "generated replacement assets" -Label "runtime help"
+Assert-TextContains -Text $helpText -Needle "--doom3_start_map e1m1|e1m2|e1m3" -Label "runtime help"
+Assert-TextContains -Text $helpText -Needle "replacement assets" -Label "runtime help"
 
-Write-Host "Verification complete. Active path is the Seed7 engine shell with generated replacement assets."
+Write-Host "Verification complete. Active path is the Seed7 generated episode."

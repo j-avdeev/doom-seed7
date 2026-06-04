@@ -1,6 +1,6 @@
 # Doom3 Seed7
 
-Doom3 Seed7 is a Seed7-core id Tech 4 compatibility track for the browser. The active GitHub Pages path now launches an engine shell with generated replacement assets, projected surfaces, lighting/fog-style shading, weapon/HUD composition, and deterministic visual smoke checks. It does not ship commercial Doom 3 textures, sounds, models, maps, or pk4 contents.
+Doom3 Seed7 is a Seed7-core generated-assets shooter for the browser, with an id Tech 4 compatibility track kept alive through diagnostics. The active GitHub Pages path now launches a Classic DOOM-like generated episode with three maps, generated map metadata, projected surfaces, simple monster AI, keys/locked doors, pickups, map exits, weapon/HUD composition, and deterministic smoke checks. It does not ship commercial Doom, Doom 3, WAD, pk4, texture, sprite, sound, model, or map data.
 
 The Doom 3 GPL source release and dhewm3 are references for behavior, compatibility direction, and data policy:
 
@@ -34,7 +34,13 @@ http://localhost:8080/index.html
 doom3.html?entry=doom3_seed7_runtime.s7
 ```
 
-Click `Launch`. With no file input, Pages starts `--engine_mode generated` and mounts the free generated asset pack from `generated/doom3_seed7`. Optional local `.pk4` or `.zip` files are mounted only in browser memory under `/doom3/base` and switch the runtime to `--engine_mode pk4` for compatibility testing.
+Click `Launch`. With no file input, Pages starts `--engine_mode generated --doom3_start_map e1m1` and mounts the free generated asset pack from `generated/doom3_seed7`. Optional local `.pk4` or `.zip` files are mounted only in browser memory under `/doom3/base` and switch the runtime to `--engine_mode pk4` for compatibility testing.
+
+Generated episode maps:
+
+- `e1m1`: E1M1 Foundry Gate
+- `e1m2`: E1M2 Processing Core
+- `e1m3`: E1M3 Reactor Exit
 
 ## Runtime
 
@@ -54,15 +60,18 @@ Expected readiness markers:
 
 ```text
 engine_smoke_ready=TRUE
+episode_smoke_ready=TRUE
+episode_maps=3
+monster_types=3
 visual_smoke_ready=TRUE
 ```
 
 Supported arguments:
 
-- default: launch the generated replacement asset engine scene
+- default: launch E1M1 Foundry Gate in the generated episode
 - `--engine_mode generated|pk4`
 - `--doom3_data_path <path>`
-- `--doom3_start_map <map>`
+- `--doom3_start_map e1m1|e1m2|e1m3`
 - `--generated_asset_root <path>`
 - `--smoke_frames <n>`
 - `--visual_smoke_frames <n>`
@@ -71,8 +80,9 @@ Supported arguments:
 
 ## Controls
 
-- Arrow keys: move and turn
+- Arrow keys or WASD: move and turn
 - Space or left mouse: fire
+- R: restart after death
 - Esc: quit
 
 ## Diagnostics
@@ -83,7 +93,7 @@ The active browser path is:
 doom3.html -> doom3_seed7_runtime.s7 -> doom3_seed7_engine.s7
 ```
 
-The earlier simple generated game remains as a separate debug/demo file, but it is not the default launch path. The many `doom3_seed7_*.s7` scanner and subsystem probes remain for Doom 3 data inspection and compatibility work.
+The earlier simple generated scene is now only a compatibility fallback/debug reference and is not the default launch path. The many `doom3_seed7_*.s7` scanner and subsystem probes remain for Doom 3 data inspection and compatibility work; they are diagnostics, not the Pages user experience.
 
 Checks:
 

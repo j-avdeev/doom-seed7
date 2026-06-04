@@ -1,10 +1,14 @@
 Version 2
 {
 "classname" "worldspawn"
-"name" "seed7_generated_world"
-"editor_description" "Generated replacement id Tech 4 style multi-room seed scene for Seed7 engine shell"
-"room_count" "3"
-"rooms" "start_hall side_lab rear_bay"
+"name" "seed7_generated_world_compat_alias"
+"editor_description" "Compatibility alias for the generated Classic DOOM-like episode. Runtime maps legacy mars_city1 to e1m1."
+"episode_alias" "e1m1"
+"room_count" "7"
+"rooms" "entry_corridor side_lab red_key_alcove main_hall locked_bulkhead rear_bay exit_switch"
+"doors" "red_key_gate"
+"keys" "red"
+"monsters" "rust_trooper ember_crawler rust_trooper"
 }
 {
 "classname" "info_player_start"
@@ -13,33 +17,14 @@ Version 2
 "angle" "0"
 }
 {
-"classname" "light"
-"name" "generated_flashlight_proxy"
-"origin" "0 1.5 2.0"
-"light_radius" "320 320 320"
-"_color" "0.55 0.82 0.95"
+"classname" "func_door"
+"name" "red_key_gate"
+"requires" "red"
+"origin" "0 1.1 20.0"
 }
 {
-"classname" "monster_seed7_proxy"
-"name" "generated_imp_proxy"
-"origin" "-1.15 0.55 9.7"
-"model" "models/monsters/generated_imp.md5mesh"
-}
-{
-"classname" "monster_seed7_proxy"
-"name" "generated_lab_stalker"
-"origin" "6.35 0.55 12.6"
-"model" "models/monsters/generated_imp.md5mesh"
-}
-{
-"classname" "func_static"
-"name" "generated_side_lab"
-"origin" "6.5 0 12.5"
-"model" "generated_geometry_side_lab"
-}
-{
-"classname" "func_static"
-"name" "generated_rear_bay"
-"origin" "0 0 26.5"
-"model" "generated_geometry_rear_bay"
+"classname" "trigger_exit"
+"name" "e1m1_exit_switch"
+"target_map" "e1m2"
+"origin" "0 0.72 32.0"
 }

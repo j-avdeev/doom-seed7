@@ -6,7 +6,7 @@
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate, max-age=0" />
   <meta http-equiv="Pragma" content="no-cache" />
   <meta http-equiv="Expires" content="0" />
-  <title>Doom3 Seed7 Engine Shell</title>
+  <title>Doom3 Seed7 Generated Episode</title>
   <style>
     :root {
       color-scheme: dark;
@@ -217,9 +217,9 @@
 <body>
   <main id="launcher">
     <header>
-      <h1>Doom3 Seed7</h1>
+      <h1>Doom3 Seed7 Generated Episode</h1>
       <p class="subtitle">
-        Seed7-core id Tech 4 compatibility shell with generated replacement assets. Optional local pk4 files are mounted in browser memory only; no commercial data is bundled.
+        Seed7-core generated Classic DOOM-like episode with free replacement assets. Optional local pk4 files are mounted in browser memory only; no commercial data is bundled.
       </p>
     </header>
 
@@ -231,7 +231,7 @@
         </div>
         <div>
           <label for="startMap">Start map token</label>
-          <input id="startMap" type="text" value="game/mars_city1" />
+          <input id="startMap" type="text" value="e1m1" />
         </div>
       </div>
 
@@ -240,7 +240,7 @@
         <button id="runButton" type="button">Launch</button>
       </div>
 
-      <div id="status" class="status-line">Ready. Launch runs the generated replacement asset engine scene.</div>
+      <div id="status" class="status-line">Ready. Launch starts E1M1 Foundry Gate.</div>
 
       <details>
         <summary>Runtime log</summary>
@@ -260,6 +260,9 @@
         'generated/doom3_seed7/manifest.txt',
         'generated/doom3_seed7/materials/seed7_tech4.mtr',
         'generated/doom3_seed7/maps/seed7/mars_city1.map',
+        'generated/doom3_seed7/maps/seed7/e1m1.map',
+        'generated/doom3_seed7/maps/seed7/e1m2.map',
+        'generated/doom3_seed7/maps/seed7/e1m3.map',
         'generated/doom3_seed7/models/monsters/generated_imp.md5mesh',
         'generated/doom3_seed7/guis/hud_seed7.gui'
       ];
@@ -515,7 +518,7 @@
           installGameCanvasLayout();
         }
         var entry = activeEntry();
-        var startMap = startMapInput.value.trim() || 'game/mars_city1';
+        var startMap = startMapInput.value.trim() || 'e1m1';
         var engineMode = mountedFiles.length > 0 ? 'pk4' : 'generated';
         var finalArgs = args || [
           '-l', '/seed7/lib',
@@ -580,7 +583,7 @@
         setStatus('Preparing Seed7 engine runtime.');
         selectedPk4Files()
           .then(function(files) {
-            setStatus('Launching generated replacement asset engine scene.');
+            setStatus('Launching generated episode.');
             return startSeed7(null, files);
           })
           .catch(function(error) {
