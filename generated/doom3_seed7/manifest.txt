@@ -12,5 +12,5 @@ monster_types=rust_trooper,ember_crawler,iron_brute
 materials=materials/seed7_tech4.mtr
 monster_model=models/monsters/generated_imp.md5mesh
 hud=guis/hud_seed7.gui
-hud_contract=ammo,health,armor,face,key_slots,weapon_slots
+hud_contract=ammo,health,armor,face,key_icons,weapon_icons
 notes=Deterministic generated Classic DOOM-like episode assets. No commercial Doom, Doom 3, WAD, pk4, texture, sprite, map, sound, or model data is included.

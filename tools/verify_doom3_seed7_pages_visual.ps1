@@ -213,9 +213,31 @@ const pixels = await evaluate(`(() => {
   return { width: c.width, height: c.height, nonblank, red, green, blue, bright, transitions, samples: Math.floor(data.length / 128) };
 })()`);
 
+const hudPixels = await evaluate(`(() => {
+  const c = document.querySelector('canvas');
+  const ctx = c.getContext('2d');
+  const data = ctx.getImageData(724, 452, 230, 86).data;
+  let nonblank = 0, red = 0, cyan = 0, amber = 0, transitions = 0;
+  let last = -1;
+  for (let i = 0; i < data.length; i += 16) {
+    const r = data[i], g = data[i + 1], b = data[i + 2], a = data[i + 3];
+    const bucket = (r >> 4) * 256 + (g >> 4) * 16 + (b >> 4);
+    if (a && (r || g || b)) nonblank++;
+    if (r > g * 1.25 && r > b * 1.25) red++;
+    if (g > r * 1.08 && b > r * 1.08) cyan++;
+    if (r > 120 && g > 55 && b < 65) amber++;
+    if (last !== -1 && bucket !== last) transitions++;
+    last = bucket;
+  }
+  return { nonblank, red, cyan, amber, transitions, samples: Math.floor(data.length / 16) };
+})()`);
+
 if (pixels.nonblank < pixels.samples * 0.90) throw new Error('Canvas appears blank: ' + JSON.stringify(pixels));
 if (pixels.transitions < 900) throw new Error('Frame entropy is too low for projected engine scene: ' + JSON.stringify(pixels));
 if (pixels.red < 20 || pixels.green < 8 || pixels.blue < 8) throw new Error('Expected colored industrial/emissive detail is missing: ' + JSON.stringify(pixels));
+if (hudPixels.nonblank < hudPixels.samples * 0.80 || hudPixels.transitions < 120) {
+  throw new Error('Right HUD key/weapon icon region is too empty or flat: ' + JSON.stringify(hudPixels));
+}
 
 const realBadResponses = badResponses.filter(item => !item.url.endsWith('/favicon.ico'));
 if (realBadResponses.length !== 0) {
@@ -232,7 +254,7 @@ if (screenshotPath) {
   writeFileSync(screenshotPath, Buffer.from(screenshot.data, 'base64'));
 }
 
-console.log(JSON.stringify({ before, observed, pixels, badResponses, screenshotPath }, null, 2));
+console.log(JSON.stringify({ before, observed, pixels, hudPixels, badResponses, screenshotPath }, null, 2));
 ws.close();
 '@
 
