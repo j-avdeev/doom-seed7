@@ -118,10 +118,22 @@ Assert-FileNotMatches -Path ".github\workflows\deploy-pages.yml" -Pattern "\bfix
 
 Write-Host "Checking generated replacement asset pack..."
 Assert-FileContains -Path "generated\doom3_seed7\manifest.txt" -Needle "doom3_seed7_generated_assets=1" -Label "generated assets"
+Assert-FileContains -Path "generated\doom3_seed7\manifest.txt" -Needle "rooms=start_hall,side_lab,rear_bay" -Label "generated assets"
 Assert-FileContains -Path "generated\doom3_seed7\materials\seed7_tech4.mtr" -Needle "textures/seed7/emissive_cyan" -Label "generated assets"
 Assert-FileContains -Path "generated\doom3_seed7\maps\seed7\mars_city1.map" -Needle '"classname" "info_player_start"' -Label "generated assets"
+Assert-FileContains -Path "generated\doom3_seed7\maps\seed7\mars_city1.map" -Needle '"name" "generated_side_lab"' -Label "generated assets"
+Assert-FileContains -Path "generated\doom3_seed7\maps\seed7\mars_city1.map" -Needle '"name" "generated_rear_bay"' -Label "generated assets"
+Assert-FileContains -Path "generated\doom3_seed7\maps\seed7\mars_city1.map" -Needle '"name" "generated_lab_stalker"' -Label "generated assets"
 Assert-FileContains -Path "generated\doom3_seed7\models\monsters\generated_imp.md5mesh" -Needle "MD5Version 10" -Label "generated assets"
 Assert-FileContains -Path "generated\doom3_seed7\guis\hud_seed7.gui" -Needle "windowDef Desktop" -Label "generated assets"
+Assert-FileContains -Path "generated\doom3_seed7\guis\hud_seed7.gui" -Needle "windowDef Face" -Label "generated assets"
+
+Write-Host "Checking generated multi-room scene and HUD contracts..."
+Assert-FileContains -Path "doom3_seed7_engine.s7" -Needle 'surf("side_lab_floor"' -Label "engine generated scene"
+Assert-FileContains -Path "doom3_seed7_engine.s7" -Needle 'surf("bay_floor"' -Label "engine generated scene"
+Assert-FileContains -Path "doom3_seed7_engine.s7" -Needle 'actor("generated_lab_stalker"' -Label "engine generated scene"
+Assert-FileContains -Path "doom3_seed7_engine.s7" -Needle "drawNumber3" -Label "engine generated HUD"
+Assert-FileContains -Path "doom3_seed7_engine.s7" -Needle "drawStatusFace" -Label "engine generated HUD"
 
 Write-Host "Checking interactive control mapping..."
 $engineSource = Get-Content -LiteralPath "doom3_seed7_engine.s7" -Raw

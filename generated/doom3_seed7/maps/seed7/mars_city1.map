@@ -2,7 +2,9 @@ Version 2
 {
 "classname" "worldspawn"
 "name" "seed7_generated_world"
-"editor_description" "Generated replacement id Tech 4 style corridor for Seed7 engine shell"
+"editor_description" "Generated replacement id Tech 4 style multi-room seed scene for Seed7 engine shell"
+"room_count" "3"
+"rooms" "start_hall side_lab rear_bay"
 }
 {
 "classname" "info_player_start"
@@ -22,4 +24,22 @@ Version 2
 "name" "generated_imp_proxy"
 "origin" "-1.15 0.55 9.7"
 "model" "models/monsters/generated_imp.md5mesh"
+}
+{
+"classname" "monster_seed7_proxy"
+"name" "generated_lab_stalker"
+"origin" "6.35 0.55 12.6"
+"model" "models/monsters/generated_imp.md5mesh"
+}
+{
+"classname" "func_static"
+"name" "generated_side_lab"
+"origin" "6.5 0 12.5"
+"model" "generated_geometry_side_lab"
+}
+{
+"classname" "func_static"
+"name" "generated_rear_bay"
+"origin" "0 0 26.5"
+"model" "generated_geometry_rear_bay"
 }

@@ -38,6 +38,10 @@ const color: HUD_RED         is color(47000, 4600, 2500);
 const color: HUD_GREEN       is color(11500, 46000, 32000);
 const color: HUD_AMBER       is color(54500, 27000, 4200);
 const color: HUD_PANEL       is color(1600, 2100, 2500);
+const color: HUD_PANEL_LIGHT is color(9800, 10600, 11200);
+const color: HUD_TEXT        is color(61000, 52000, 15000);
+const color: HUD_FACE        is color(43500, 24500, 13200);
+const color: HUD_FACE_DARK   is color(14600, 6800, 4200);
 const color: WEAPON_DARK     is color(1700, 2100, 2400);
 const color: WEAPON_MID      is color(11200, 11600, 10800);
 const color: MONSTER_BODY    is color(26000, 6200, 3400);
@@ -241,6 +245,97 @@ const func color: litMaterial (in integer: materialId, in integer: detailId,
     col := scaledColor(col, percent);
   end func;
 
+const proc: drawDigit (in integer: x, in integer: y, in integer: scale,
+    in integer: digit, in color: col) is func
+  local
+    var integer: hWidth is 0;
+    var integer: hHeight is 0;
+    var integer: vWidth is 0;
+    var integer: vHeight is 0;
+  begin
+    hWidth := scale * 9;
+    hHeight := scale * 2;
+    vWidth := scale * 2;
+    vHeight := scale * 8;
+    if digit = 0 or digit = 2 or digit = 3 or digit = 5 or
+        digit = 6 or digit = 7 or digit = 8 or digit = 9 then
+      rect(x + vWidth, y, hWidth, hHeight, col);
+    end if;
+    if digit = 0 or digit = 1 or digit = 2 or digit = 3 or
+        digit = 4 or digit = 7 or digit = 8 or digit = 9 then
+      rect(x + vWidth + hWidth, y + hHeight, vWidth, vHeight, col);
+    end if;
+    if digit = 0 or digit = 1 or digit = 3 or digit = 4 or
+        digit = 5 or digit = 6 or digit = 7 or digit = 8 or digit = 9 then
+      rect(x + vWidth + hWidth, y + hHeight * 2 + vHeight,
+          vWidth, vHeight, col);
+    end if;
+    if digit = 0 or digit = 2 or digit = 3 or digit = 5 or
+        digit = 6 or digit = 8 or digit = 9 then
+      rect(x + vWidth, y + hHeight * 2 + vHeight * 2,
+          hWidth, hHeight, col);
+    end if;
+    if digit = 0 or digit = 2 or digit = 6 or digit = 8 then
+      rect(x, y + hHeight * 2 + vHeight, vWidth, vHeight, col);
+    end if;
+    if digit = 0 or digit = 4 or digit = 5 or digit = 6 or
+        digit = 8 or digit = 9 then
+      rect(x, y + hHeight, vWidth, vHeight, col);
+    end if;
+    if digit = 2 or digit = 3 or digit = 4 or digit = 5 or
+        digit = 6 or digit = 8 or digit = 9 then
+      rect(x + vWidth, y + hHeight + vHeight, hWidth, hHeight, col);
+    end if;
+  end func;
+
+const proc: drawNumber3 (in integer: value, in integer: x, in integer: y,
+    in integer: scale, in color: col) is func
+  local
+    var integer: shown is 0;
+    var integer: spacing is 0;
+  begin
+    shown := clampInt(value, 0, 999);
+    spacing := scale * 17;
+    drawDigit(x, y, scale, shown mdiv 100, col);
+    drawDigit(x + spacing, y, scale, (shown mdiv 10) rem 10, col);
+    drawDigit(x + spacing * 2, y, scale, shown rem 10, col);
+  end func;
+
+const proc: drawStatusFace (in engineState: state, in integer: x,
+    in integer: y) is func
+  local
+    var color: faceCol is color.value;
+    var color: eyeCol is color.value;
+  begin
+    faceCol := HUD_FACE;
+    eyeCol := HUD_TEXT;
+    if state.health < 35 then
+      faceCol := scaledColor(HUD_FACE, 66);
+      eyeCol := MONSTER_HOT;
+    elsif state.shotFlash > 0 then
+      eyeCol := EMISSIVE_CYAN;
+    end if;
+    rect(x, y, 104, 78, scaledColor(HUD_PANEL_LIGHT, 50));
+    rect(x + 7, y + 7, 90, 64, HUD_PANEL);
+    rect(x + 24, y + 9, 56, 15, WEAPON_DARK);
+    rect(x + 18, y + 22, 68, 48, HUD_FACE_DARK);
+    rect(x + 24, y + 20, 56, 43, faceCol);
+    rect(x + 28, y + 31, 15, 9, WEAPON_DARK);
+    rect(x + 61, y + 31, 15, 9, WEAPON_DARK);
+    rect(x + 33, y + 34, 6, 4, eyeCol);
+    rect(x + 66, y + 34, 6, 4, eyeCol);
+    rect(x + 49, y + 38, 7, 15, scaledColor(faceCol, 70));
+    if state.health < 35 then
+      rect(x + 36, y + 56, 32, 6, MONSTER_HOT);
+    elsif state.shotFlash > 0 then
+      rect(x + 36, y + 55, 32, 5, HUD_TEXT);
+    else
+      rect(x + 39, y + 56, 26, 5, HUD_FACE_DARK);
+    end if;
+    rect(x + 13, y + 23, 9, 39, WEAPON_DARK);
+    rect(x + 82, y + 23, 9, 39, WEAPON_DARK);
+  end func;
+
 const func array renderSurface: generatedSurfaces is func
   result
     var array renderSurface: surfaces is 0 times renderSurface.value;
@@ -251,14 +346,18 @@ const func array renderSurface: generatedSurfaces is func
         v3(4.8, 3.0, 21.0), v3(4.5, 3.0, 0.0), 5, 2, FALSE);
     surfaces &:= surf("left_wall_far", v3(-4.5, 0.0, 0.0), v3(-4.8, 0.0, 21.0),
         v3(-4.8, 3.0, 21.0), v3(-4.5, 3.0, 0.0), 1, 3, FALSE);
-    surfaces &:= surf("right_wall_far", v3(4.5, 0.0, 0.0), v3(4.5, 3.0, 0.0),
-        v3(4.8, 3.0, 21.0), v3(4.8, 0.0, 21.0), 2, 4, FALSE);
-    surfaces &:= surf("rear_bulkhead", v3(-3.2, 0.0, 20.2), v3(3.2, 0.0, 20.2),
-        v3(3.2, 3.0, 20.2), v3(-3.2, 3.0, 20.2), 3, 5, FALSE);
-    surfaces &:= surf("rear_door_core", v3(-1.1, 0.0, 20.0), v3(1.1, 0.0, 20.0),
-        v3(1.1, 2.25, 20.0), v3(-1.1, 2.25, 20.0), 5, 6, FALSE);
-    surfaces &:= surf("rear_door_light", v3(-0.95, 1.08, 19.93), v3(0.95, 1.08, 19.93),
-        v3(0.95, 1.24, 19.93), v3(-0.95, 1.24, 19.93), 7, 7, TRUE);
+    surfaces &:= surf("right_wall_near", v3(4.5, 0.0, 0.0), v3(4.5, 3.0, 0.0),
+        v3(4.62, 3.0, 8.7), v3(4.62, 0.0, 8.7), 2, 4, FALSE);
+    surfaces &:= surf("right_wall_far", v3(4.62, 0.0, 16.3), v3(4.62, 3.0, 16.3),
+        v3(4.8, 3.0, 21.0), v3(4.8, 0.0, 21.0), 2, 5, FALSE);
+    surfaces &:= surf("rear_bulkhead_left", v3(-4.3, 0.0, 20.2), v3(-1.35, 0.0, 20.2),
+        v3(-1.35, 3.0, 20.2), v3(-4.3, 3.0, 20.2), 3, 6, FALSE);
+    surfaces &:= surf("rear_bulkhead_right", v3(1.35, 0.0, 20.2), v3(4.3, 0.0, 20.2),
+        v3(4.3, 3.0, 20.2), v3(1.35, 3.0, 20.2), 3, 7, FALSE);
+    surfaces &:= surf("rear_bulkhead_lintel", v3(-1.35, 2.25, 20.1), v3(1.35, 2.25, 20.1),
+        v3(1.35, 3.0, 20.1), v3(-1.35, 3.0, 20.1), 5, 8, FALSE);
+    surfaces &:= surf("rear_door_light", v3(-1.25, 2.04, 19.93), v3(1.25, 2.04, 19.93),
+        v3(1.25, 2.18, 19.93), v3(-1.25, 2.18, 19.93), 7, 9, TRUE);
     surfaces &:= surf("left_light_strip", v3(-4.52, 1.78, 3.0), v3(-4.62, 1.78, 13.2),
         v3(-4.62, 2.02, 13.2), v3(-4.52, 2.02, 3.0), 6, 8, TRUE);
     surfaces &:= surf("right_light_strip", v3(4.52, 1.52, 5.2), v3(4.52, 1.82, 5.2),
@@ -273,6 +372,38 @@ const func array renderSurface: generatedSurfaces is func
         v3(4.2, 3.12, 8.9), v3(4.2, 2.82, 8.5), 4, 13, FALSE);
     surfaces &:= surf("ceiling_rib_far", v3(-4.2, 2.82, 14.4), v3(-4.2, 3.12, 14.8),
         v3(4.2, 3.12, 14.8), v3(4.2, 2.82, 14.4), 4, 14, FALSE);
+    surfaces &:= surf("side_lab_floor", v3(4.55, 0.0, 8.8), v3(8.8, 0.0, 8.8),
+        v3(8.8, 0.0, 16.2), v3(4.55, 0.0, 16.2), 4, 15, FALSE);
+    surfaces &:= surf("side_lab_ceiling", v3(4.55, 3.0, 8.8), v3(4.55, 3.0, 16.2),
+        v3(8.8, 3.0, 16.2), v3(8.8, 3.0, 8.8), 5, 16, FALSE);
+    surfaces &:= surf("side_lab_outer_wall", v3(8.8, 0.0, 8.8), v3(8.8, 3.0, 8.8),
+        v3(8.8, 3.0, 16.2), v3(8.8, 0.0, 16.2), 3, 17, FALSE);
+    surfaces &:= surf("side_lab_far_wall", v3(4.55, 0.0, 16.2), v3(8.8, 0.0, 16.2),
+        v3(8.8, 3.0, 16.2), v3(4.55, 3.0, 16.2), 2, 18, FALSE);
+    surfaces &:= surf("side_lab_near_wall", v3(4.55, 0.0, 8.8), v3(4.55, 3.0, 8.8),
+        v3(8.8, 3.0, 8.8), v3(8.8, 0.0, 8.8), 1, 19, FALSE);
+    surfaces &:= surf("side_lab_console", v3(8.68, 0.55, 10.2), v3(8.68, 0.55, 14.4),
+        v3(8.68, 1.42, 14.4), v3(8.68, 1.42, 10.2), 5, 20, FALSE);
+    surfaces &:= surf("side_lab_console_glow", v3(8.62, 1.08, 10.7), v3(8.62, 1.08, 13.9),
+        v3(8.62, 1.28, 13.9), v3(8.62, 1.28, 10.7), 7, 21, TRUE);
+    surfaces &:= surf("side_lab_door_strip", v3(4.50, 1.86, 9.1), v3(4.50, 1.86, 15.9),
+        v3(4.50, 2.06, 15.9), v3(4.50, 2.06, 9.1), 6, 22, TRUE);
+    surfaces &:= surf("bay_floor", v3(-3.8, 0.0, 20.2), v3(3.8, 0.0, 20.2),
+        v3(3.5, 0.0, 33.0), v3(-3.5, 0.0, 33.0), 4, 23, FALSE);
+    surfaces &:= surf("bay_ceiling", v3(-3.8, 3.0, 20.2), v3(-3.5, 3.0, 33.0),
+        v3(3.5, 3.0, 33.0), v3(3.8, 3.0, 20.2), 5, 24, FALSE);
+    surfaces &:= surf("bay_left_wall", v3(-3.8, 0.0, 20.2), v3(-3.5, 0.0, 33.0),
+        v3(-3.5, 3.0, 33.0), v3(-3.8, 3.0, 20.2), 1, 25, FALSE);
+    surfaces &:= surf("bay_right_wall", v3(3.8, 0.0, 20.2), v3(3.8, 3.0, 20.2),
+        v3(3.5, 3.0, 33.0), v3(3.5, 0.0, 33.0), 2, 26, FALSE);
+    surfaces &:= surf("bay_back_wall", v3(-3.5, 0.0, 33.0), v3(3.5, 0.0, 33.0),
+        v3(3.5, 3.0, 33.0), v3(-3.5, 3.0, 33.0), 3, 27, FALSE);
+    surfaces &:= surf("bay_emergency_panel", v3(-3.42, 0.85, 25.2), v3(-3.42, 0.85, 28.0),
+        v3(-3.42, 1.35, 28.0), v3(-3.42, 1.35, 25.2), 6, 28, TRUE);
+    surfaces &:= surf("bay_exit_marker", v3(-1.1, 1.05, 32.9), v3(1.1, 1.05, 32.9),
+        v3(1.1, 1.30, 32.9), v3(-1.1, 1.30, 32.9), 7, 29, TRUE);
+    surfaces &:= surf("bay_ceiling_rib", v3(-3.2, 2.78, 25.4), v3(-3.2, 3.12, 25.8),
+        v3(3.2, 3.12, 25.8), v3(3.2, 2.78, 25.4), 4, 30, FALSE);
   end func;
 
 const func array renderActor: generatedActors is func
@@ -280,6 +411,7 @@ const func array renderActor: generatedActors is func
     var array renderActor: actors is 0 times renderActor.value;
   begin
     actors &:= actor("generated_imp_proxy", -1.15, 0.55, 9.7, 1);
+    actors &:= actor("generated_lab_stalker", 6.35, 0.55, 12.6, 4);
     actors &:= actor("generated_security_pickup", 2.35, 0.42, 6.8, 2);
     actors &:= actor("generated_ammo_pickup", -2.35, 0.42, 13.2, 3);
   end func;
@@ -426,12 +558,16 @@ const proc: drawActorSprite (inout visualStats: stats, in engineState: state,
     if screen.visible then
       width := clampInt(round(260.0 / screen.depth), 18, 130);
       height := clampInt(round(390.0 / screen.depth), 26, 190);
-      if actorData.kind = 1 then
+      if actorData.kind = 1 or actorData.kind = 4 then
         body := litMaterial(1, 16, FALSE, screen.depth, screen.x, screen.y);
         rect(screen.x - width mdiv 2, screen.y - height mdiv 2,
             width, height, scaledColor(body, 50));
         rect(screen.x - width * 3 mdiv 8, screen.y - height * 3 mdiv 8,
             width * 3 mdiv 4, height * 5 mdiv 8, body);
+        if actorData.kind = 4 then
+          rect(screen.x - width mdiv 3, screen.y + height mdiv 10,
+              width * 2 mdiv 3, height mdiv 5, scaledColor(METAL_BLUE, 72));
+        end if;
         rect(screen.x - width mdiv 5, screen.y - height mdiv 4,
             width mdiv 6, height mdiv 8, MONSTER_HOT);
         rect(screen.x + width mdiv 12, screen.y - height mdiv 4,
@@ -460,6 +596,7 @@ const proc: drawActors (inout visualStats: stats, in engineState: state) is func
     actors := generatedActors;
     for actorData range actors do
       if (actorData.kind = 1 and state.monsterA) or
+          (actorData.kind = 4 and state.monsterB) or
           (actorData.kind = 2 and not state.pickupHealth) or
           (actorData.kind = 3 and not state.pickupAmmo) then
         drawActorSprite(stats, state, actorData);
@@ -475,6 +612,7 @@ const proc: drawWeaponAndHud (inout visualStats: stats,
     var integer: healthWidth is 0;
     var integer: armorWidth is 0;
     var integer: ammoWidth is 0;
+    var integer: statusY is 0;
   begin
     midX := VIEW_CENTER_X;
     baseY := SCREEN_HEIGHT - 168;
@@ -495,15 +633,29 @@ const proc: drawWeaponAndHud (inout visualStats: stats,
     lineTo(midX, VIEW_CENTER_Y + 8, midX, VIEW_CENTER_Y + 23, EMISSIVE_CYAN);
     healthWidth := clampInt(state.health, 0, 100);
     armorWidth := clampInt(state.armor, 0, 100);
-    ammoWidth := clampInt(state.ammo * 4, 0, 124);
-    rect(24, SCREEN_HEIGHT - 50, 150, 28, HUD_PANEL);
-    rect(30, SCREEN_HEIGHT - 42, healthWidth, 12, HUD_RED);
-    rect(198, SCREEN_HEIGHT - 50, 150, 28, HUD_PANEL);
-    rect(204, SCREEN_HEIGHT - 42, armorWidth, 12, HUD_GREEN);
-    rect(SCREEN_WIDTH - 182, SCREEN_HEIGHT - 50, 158, 28, HUD_PANEL);
-    rect(SCREEN_WIDTH - 174, SCREEN_HEIGHT - 42, ammoWidth, 12, HUD_AMBER);
-    stats.hudElements +:= 7;
-    stats.entropy +:= healthWidth * 5 + armorWidth * 3 + ammoWidth * 2;
+    ammoWidth := clampInt(state.ammo * 3, 0, 120);
+    statusY := SCREEN_HEIGHT - 88;
+    rect(0, statusY, SCREEN_WIDTH, 88, scaledColor(HUD_PANEL_LIGHT, 45));
+    rect(0, statusY, SCREEN_WIDTH, 5, scaledColor(HUD_PANEL_LIGHT, 92));
+    rect(18, statusY + 10, 146, 68, HUD_PANEL);
+    rect(184, statusY + 10, 174, 68, HUD_PANEL);
+    rect(370, statusY + 10, 54, 68, HUD_PANEL);
+    rect(516, statusY + 10, 174, 68, HUD_PANEL);
+    rect(724, statusY + 10, 218, 68, HUD_PANEL);
+    drawNumber3(state.ammo, 28, statusY + 23, 3, HUD_AMBER);
+    drawNumber3(state.health, 196, statusY + 23, 3, HUD_RED);
+    drawStatusFace(state, midX - 52, statusY + 5);
+    drawNumber3(state.armor, 528, statusY + 23, 3, HUD_GREEN);
+    drawDigit(382, statusY + 20, 1, 2, HUD_TEXT);
+    drawDigit(404, statusY + 20, 1, 3, HUD_TEXT);
+    drawDigit(382, statusY + 50, 1, 5, HUD_TEXT);
+    drawDigit(404, statusY + 50, 1, 7, HUD_TEXT);
+    rect(736, statusY + 16, ammoWidth, 9, HUD_AMBER);
+    rect(736, statusY + 31, clampInt(healthWidth, 0, 120), 9, HUD_RED);
+    rect(736, statusY + 46, clampInt(armorWidth, 0, 120), 9, HUD_GREEN);
+    rect(736, statusY + 61, clampInt(state.ammo * 2, 0, 120), 9, EMISSIVE_CYAN);
+    stats.hudElements +:= 24;
+    stats.entropy +:= healthWidth * 7 + armorWidth * 5 + ammoWidth * 3;
   end func;
 
 const proc: renderEngineFrame (inout visualStats: stats,
@@ -524,10 +676,19 @@ const proc: movePlayer (inout engineState: state, in float: amount) is func
   local
     var float: newX is 0.0;
     var float: newZ is 0.0;
+    var boolean: insideMainHall is FALSE;
+    var boolean: insideSideLab is FALSE;
+    var boolean: insideRearBay is FALSE;
   begin
     newX := state.camX + sin(state.yaw) * amount;
     newZ := state.camZ + cos(state.yaw) * amount;
-    if newX > -3.9 and newX < 3.9 and newZ > -2.2 and newZ < 18.0 then
+    insideMainHall := newX > -3.9 and newX < 3.9 and
+        newZ > -2.2 and newZ < 20.6;
+    insideSideLab := newX > 3.45 and newX < 8.25 and
+        newZ > 9.0 and newZ < 15.8;
+    insideRearBay := newX > -3.25 and newX < 3.25 and
+        newZ > 19.5 and newZ < 31.4;
+    if insideMainHall or insideSideLab or insideRearBay then
       state.camX := newX;
       state.camZ := newZ;
     end if;
@@ -558,6 +719,9 @@ const proc: fireWeapon (inout engineState: state) is func
       state.shotFlash := 4;
       if state.monsterA and targetInReticle(state, -1.15, 9.7) then
         state.monsterA := FALSE;
+      end if;
+      if state.monsterB and targetInReticle(state, 6.35, 12.6) then
+        state.monsterB := FALSE;
       end if;
     end if;
   end func;
@@ -622,6 +786,7 @@ const func string: stateSignature (in engineState: state) is func
         ";health=" <& state.health <&
         ";ammo=" <& state.ammo <&
         ";m=" <& ord(state.monsterA) <&
+        ";m2=" <& ord(state.monsterB) <&
         ";p=" <& ord(state.pickupHealth) <& ord(state.pickupAmmo);
   end func;
 
@@ -661,12 +826,12 @@ const proc: runSmoke (in integer: requestedFrames) is func
       stats.surfacesProjected := length(generatedSurfaces) - 1;
       stats.trianglesSubmitted := stats.surfacesProjected * 2;
       stats.depthWrites := stats.trianglesSubmitted * 9 + frame * 3;
-      stats.emissiveSurfaces := 3;
+      stats.emissiveSurfaces := 7;
       stats.textureSamples := stats.surfacesProjected * 17;
       stats.lightSamples := stats.emissiveSurfaces * 31;
       stats.actorsSubmitted := length(generatedActors);
-      stats.actorsVisible := 3;
-      stats.hudElements := 7;
+      stats.actorsVisible := 4;
+      stats.hudElements := 24;
       stats.entropy := stats.depthWrites + stats.textureSamples +
           stats.lightSamples + frame * 97;
       stats.flatColumnRegression := FALSE;
