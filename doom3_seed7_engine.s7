@@ -42,6 +42,9 @@ const color: HUD_PANEL_LIGHT is color(9800, 10600, 11200);
 const color: HUD_TEXT        is color(61000, 52000, 15000);
 const color: HUD_FACE        is color(43500, 24500, 13200);
 const color: HUD_FACE_DARK   is color(14600, 6800, 4200);
+const color: HUD_HAIR        is color(25500, 21000, 14200);
+const color: HUD_HAIR_DARK   is color(10600, 7600, 4600);
+const color: HUD_GLASSES     is color(5200, 6100, 6500);
 const color: WEAPON_DARK     is color(1700, 2100, 2400);
 const color: WEAPON_MID      is color(11200, 11600, 10800);
 const color: MONSTER_BODY    is color(26000, 6200, 3400);
@@ -306,34 +309,48 @@ const proc: drawStatusFace (in engineState: state, in integer: x,
   local
     var color: faceCol is color.value;
     var color: eyeCol is color.value;
+    var color: hairCol is color.value;
   begin
     faceCol := HUD_FACE;
     eyeCol := HUD_TEXT;
+    hairCol := HUD_HAIR;
     if state.health < 35 then
       faceCol := scaledColor(HUD_FACE, 66);
+      hairCol := scaledColor(HUD_HAIR, 70);
       eyeCol := MONSTER_HOT;
     elsif state.shotFlash > 0 then
       eyeCol := EMISSIVE_CYAN;
     end if;
     rect(x, y, 104, 78, scaledColor(HUD_PANEL_LIGHT, 50));
     rect(x + 7, y + 7, 90, 64, HUD_PANEL);
-    rect(x + 24, y + 9, 56, 15, WEAPON_DARK);
-    rect(x + 18, y + 22, 68, 48, HUD_FACE_DARK);
-    rect(x + 24, y + 20, 56, 43, faceCol);
-    rect(x + 28, y + 31, 15, 9, WEAPON_DARK);
-    rect(x + 61, y + 31, 15, 9, WEAPON_DARK);
-    rect(x + 33, y + 34, 6, 4, eyeCol);
-    rect(x + 66, y + 34, 6, 4, eyeCol);
-    rect(x + 49, y + 38, 7, 15, scaledColor(faceCol, 70));
+    rect(x + 13, y + 13, 78, 55, HUD_HAIR_DARK);
+    fcircle(x + 31, y + 27, 16, hairCol);
+    fcircle(x + 72, y + 30, 18, hairCol);
+    rect(x + 17, y + 22, 18, 44, hairCol);
+    rect(x + 72, y + 22, 14, 42, hairCol);
+    rect(x + 20, y + 14, 61, 13, scaledColor(hairCol, 118));
+    rect(x + 24, y + 24, 56, 40, faceCol);
+    rect(x + 62, y + 34, 17, 14, scaledColor(faceCol, 88));
+    rect(x + 77, y + 38, 7, 8, faceCol);
+    rect(x + 20, y + 25, 12, 39, hairCol);
+    rect(x + 24, y + 18, 52, 8, scaledColor(HUD_HAIR_DARK, 88));
+    rect(x + 29, y + 35, 17, 11, HUD_GLASSES);
+    rect(x + 59, y + 35, 17, 11, HUD_GLASSES);
+    rect(x + 46, y + 39, 13, 3, HUD_GLASSES);
+    rect(x + 33, y + 38, 8, 5, eyeCol);
+    rect(x + 63, y + 38, 8, 5, eyeCol);
+    rect(x + 51, y + 41, 7, 14, scaledColor(faceCol, 70));
+    rect(x + 34, y + 51, 35, 7, HUD_HAIR_DARK);
+    rect(x + 39, y + 54, 26, 5, scaledColor(HUD_HAIR_DARK, 72));
     if state.health < 35 then
-      rect(x + 36, y + 56, 32, 6, MONSTER_HOT);
+      rect(x + 37, y + 61, 31, 5, MONSTER_HOT);
     elsif state.shotFlash > 0 then
-      rect(x + 36, y + 55, 32, 5, HUD_TEXT);
+      rect(x + 38, y + 61, 29, 4, HUD_TEXT);
     else
-      rect(x + 39, y + 56, 26, 5, HUD_FACE_DARK);
+      rect(x + 41, y + 61, 22, 4, HUD_FACE_DARK);
     end if;
-    rect(x + 13, y + 23, 9, 39, WEAPON_DARK);
-    rect(x + 82, y + 23, 9, 39, WEAPON_DARK);
+    rect(x + 12, y + 27, 8, 39, HUD_HAIR_DARK);
+    rect(x + 84, y + 28, 8, 37, HUD_HAIR_DARK);
   end func;
 
 const func array renderSurface: generatedSurfaces is func
@@ -611,7 +628,7 @@ const proc: drawWeaponAndHud (inout visualStats: stats,
     var integer: baseY is 0;
     var integer: healthWidth is 0;
     var integer: armorWidth is 0;
-    var integer: ammoWidth is 0;
+    var integer: auxWidth is 0;
     var integer: statusY is 0;
   begin
     midX := VIEW_CENTER_X;
@@ -633,7 +650,7 @@ const proc: drawWeaponAndHud (inout visualStats: stats,
     lineTo(midX, VIEW_CENTER_Y + 8, midX, VIEW_CENTER_Y + 23, EMISSIVE_CYAN);
     healthWidth := clampInt(state.health, 0, 100);
     armorWidth := clampInt(state.armor, 0, 100);
-    ammoWidth := clampInt(state.ammo * 3, 0, 120);
+    auxWidth := 96;
     statusY := SCREEN_HEIGHT - 88;
     rect(0, statusY, SCREEN_WIDTH, 88, scaledColor(HUD_PANEL_LIGHT, 45));
     rect(0, statusY, SCREEN_WIDTH, 5, scaledColor(HUD_PANEL_LIGHT, 92));
@@ -650,12 +667,11 @@ const proc: drawWeaponAndHud (inout visualStats: stats,
     drawDigit(404, statusY + 20, 1, 3, HUD_TEXT);
     drawDigit(382, statusY + 50, 1, 5, HUD_TEXT);
     drawDigit(404, statusY + 50, 1, 7, HUD_TEXT);
-    rect(736, statusY + 16, ammoWidth, 9, HUD_AMBER);
-    rect(736, statusY + 31, clampInt(healthWidth, 0, 120), 9, HUD_RED);
-    rect(736, statusY + 46, clampInt(armorWidth, 0, 120), 9, HUD_GREEN);
-    rect(736, statusY + 61, clampInt(state.ammo * 2, 0, 120), 9, EMISSIVE_CYAN);
+    rect(736, statusY + 22, clampInt(healthWidth, 0, 120), 9, HUD_RED);
+    rect(736, statusY + 42, clampInt(armorWidth, 0, 120), 9, HUD_GREEN);
+    rect(736, statusY + 62, auxWidth, 9, EMISSIVE_CYAN);
     stats.hudElements +:= 24;
-    stats.entropy +:= healthWidth * 7 + armorWidth * 5 + ammoWidth * 3;
+    stats.entropy +:= healthWidth * 7 + armorWidth * 5 + auxWidth * 3;
   end func;
 
 const proc: renderEngineFrame (inout visualStats: stats,

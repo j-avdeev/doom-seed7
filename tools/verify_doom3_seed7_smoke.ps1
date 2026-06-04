@@ -134,6 +134,10 @@ Assert-FileContains -Path "doom3_seed7_engine.s7" -Needle 'surf("bay_floor"' -La
 Assert-FileContains -Path "doom3_seed7_engine.s7" -Needle 'actor("generated_lab_stalker"' -Label "engine generated scene"
 Assert-FileContains -Path "doom3_seed7_engine.s7" -Needle "drawNumber3" -Label "engine generated HUD"
 Assert-FileContains -Path "doom3_seed7_engine.s7" -Needle "drawStatusFace" -Label "engine generated HUD"
+Assert-FileContains -Path "doom3_seed7_engine.s7" -Needle "HUD_GLASSES" -Label "engine generated HUD face"
+Assert-FileContains -Path "doom3_seed7_engine.s7" -Needle "HUD_HAIR" -Label "engine generated HUD face"
+Assert-FileNotMatches -Path "doom3_seed7_engine.s7" -Pattern "state\.ammo \* 2" -Label "right-side HUD ammo duplicate"
+Assert-FileNotMatches -Path "doom3_seed7_engine.s7" -Pattern "ammoWidth := clampInt\(state\.ammo" -Label "right-side HUD ammo duplicate"
 
 Write-Host "Checking interactive control mapping..."
 $engineSource = Get-Content -LiteralPath "doom3_seed7_engine.s7" -Raw
