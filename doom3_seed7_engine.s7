@@ -13,11 +13,11 @@ $ include "float.s7i";
 $ include "math.s7i";
 $ include "duration.s7i";
 
-const integer: SCREEN_WIDTH  is 960;
-const integer: SCREEN_HEIGHT is 540;
+const integer: SCREEN_WIDTH  is 640;
+const integer: SCREEN_HEIGHT is 360;
 const integer: VIEW_CENTER_X is SCREEN_WIDTH mdiv 2;
 const integer: VIEW_CENTER_Y is SCREEN_HEIGHT mdiv 2;
-const float:   FOCAL_LENGTH  is 390.0;
+const float:   FOCAL_LENGTH  is 260.0;
 const float:   NEAR_PLANE    is 0.18;
 const float:   FAR_DEPTH     is 38.0;
 const float:   MOVE_SPEED    is 0.115;
@@ -89,6 +89,12 @@ const type: screenPoint is new struct
     var integer: y is 0;
     var float: depth is 0.0;
     var boolean: visible is FALSE;
+  end struct;
+
+const type: cameraPoint is new struct
+    var float: side is 0.0;
+    var float: vertical is 0.0;
+    var float: forward is 0.0;
   end struct;
 
 const type: renderSurface is new struct
@@ -169,6 +175,14 @@ const type: visualStats is new struct
     var boolean: mainDocumentCanvasExpected is TRUE;
   end struct;
 
+const type: renderContext is new struct
+    var float: camX is 0.0;
+    var float: camY is 0.0;
+    var float: camZ is 0.0;
+    var float: sinYaw is 0.0;
+    var float: cosYaw is 1.0;
+  end struct;
+
 const func vec3: v3 (in float: x, in float: y, in float: z) is func
   result
     var vec3: outVec is vec3.value;
@@ -176,6 +190,17 @@ const func vec3: v3 (in float: x, in float: y, in float: z) is func
     outVec.x := x;
     outVec.y := y;
     outVec.z := z;
+  end func;
+
+const func renderContext: makeRenderContext (in engineState: state) is func
+  result
+    var renderContext: ctx is renderContext.value;
+  begin
+    ctx.camX := state.camX;
+    ctx.camY := state.camY;
+    ctx.camZ := state.camZ;
+    ctx.sinYaw := sin(state.yaw);
+    ctx.cosYaw := cos(state.yaw);
   end func;
 
 const func renderSurface: surf (in string: name, in vec3: a, in vec3: b,
@@ -790,138 +815,163 @@ const func array renderActor: generatedActors is func
     actors := generatedActorsFor(state);
   end func;
 
+const func cameraPoint: cameraSpacePoint (in renderContext: ctx,
+    in vec3: point3) is func
+  result
+    var cameraPoint: outPoint is cameraPoint.value;
+  local
+    var float: dx is 0.0;
+    var float: dy is 0.0;
+    var float: dz is 0.0;
+  begin
+    dx := point3.x - ctx.camX;
+    dy := point3.y - ctx.camY;
+    dz := point3.z - ctx.camZ;
+    outPoint.side := dx * ctx.cosYaw - dz * ctx.sinYaw;
+    outPoint.vertical := dy;
+    outPoint.forward := dx * ctx.sinYaw + dz * ctx.cosYaw;
+  end func;
+
+const func screenPoint: projectCameraPoint (in cameraPoint: point3) is func
+  result
+    var screenPoint: outPoint is screenPoint.value;
+  local
+    var float: forward is NEAR_PLANE;
+  begin
+    forward := point3.forward;
+    if forward >= NEAR_PLANE then
+      outPoint.visible := TRUE;
+      outPoint.x := clampInt(round(flt(VIEW_CENTER_X) +
+          point3.side / forward * FOCAL_LENGTH), -SCREEN_WIDTH,
+          SCREEN_WIDTH * 2);
+      outPoint.y := clampInt(round(flt(VIEW_CENTER_Y) -
+          point3.vertical / forward * FOCAL_LENGTH), -SCREEN_HEIGHT,
+          SCREEN_HEIGHT * 2);
+    end if;
+    outPoint.depth := point3.forward;
+  end func;
+
 const func screenPoint: projectPoint (in engineState: state, in vec3: point3) is func
   result
     var screenPoint: outPoint is screenPoint.value;
   local
-    var float: dx is 0.0;
-    var float: dy is 0.0;
-    var float: dz is 0.0;
-    var float: cosYaw is 0.0;
-    var float: sinYaw is 0.0;
-    var float: side is 0.0;
-    var float: forward is 0.0;
+    var renderContext: ctx is renderContext.value;
   begin
-    dx := point3.x - state.camX;
-    dy := point3.y - state.camY;
-    dz := point3.z - state.camZ;
-    cosYaw := cos(state.yaw);
-    sinYaw := sin(state.yaw);
-    side := dx * cosYaw - dz * sinYaw;
-    forward := dx * sinYaw + dz * cosYaw;
-    outPoint.depth := forward;
-    if forward > NEAR_PLANE then
-      outPoint.visible := TRUE;
-      outPoint.x := round(flt(VIEW_CENTER_X) + side / forward * FOCAL_LENGTH);
-      outPoint.y := round(flt(VIEW_CENTER_Y) - dy / forward * FOCAL_LENGTH);
-    end if;
+    ctx := makeRenderContext(state);
+    outPoint := projectCameraPoint(cameraSpacePoint(ctx, point3));
   end func;
 
-const func screenPoint: projectPointClamped (in engineState: state,
-    in vec3: point3) is func
+const func cameraPoint: clipEdgeToNear (in cameraPoint: fromPoint,
+    in cameraPoint: toPoint) is func
   result
-    var screenPoint: outPoint is screenPoint.value;
+    var cameraPoint: outPoint is cameraPoint.value;
   local
-    var float: dx is 0.0;
-    var float: dy is 0.0;
-    var float: dz is 0.0;
-    var float: cosYaw is 0.0;
-    var float: sinYaw is 0.0;
-    var float: side is 0.0;
-    var float: forward is 0.0;
-    var float: projectedForward is 0.0;
+    var float: denom is 0.0;
+    var float: t is 0.0;
   begin
-    dx := point3.x - state.camX;
-    dy := point3.y - state.camY;
-    dz := point3.z - state.camZ;
-    cosYaw := cos(state.yaw);
-    sinYaw := sin(state.yaw);
-    side := dx * cosYaw - dz * sinYaw;
-    forward := dx * sinYaw + dz * cosYaw;
-    projectedForward := forward;
-    if projectedForward < NEAR_PLANE then
-      projectedForward := NEAR_PLANE;
+    denom := toPoint.forward - fromPoint.forward;
+    if abs(denom) < 0.00001 then
+      t := 0.0;
+    else
+      t := (NEAR_PLANE - fromPoint.forward) / denom;
     end if;
-    outPoint.depth := forward;
-    outPoint.visible := TRUE;
-    outPoint.x := clampInt(round(flt(VIEW_CENTER_X) +
-        side / projectedForward * FOCAL_LENGTH), -SCREEN_WIDTH,
-        SCREEN_WIDTH * 2);
-    outPoint.y := clampInt(round(flt(VIEW_CENTER_Y) -
-        dy / projectedForward * FOCAL_LENGTH), -SCREEN_HEIGHT,
-        SCREEN_HEIGHT * 2);
+    outPoint.side := fromPoint.side + (toPoint.side - fromPoint.side) * t;
+    outPoint.vertical := fromPoint.vertical +
+        (toPoint.vertical - fromPoint.vertical) * t;
+    outPoint.forward := NEAR_PLANE;
   end func;
 
-const func float: surfaceDepth (in engineState: state,
+const func array cameraPoint: clipPolygonNear (
+    in array cameraPoint: inputPoints) is func
+  result
+    var array cameraPoint: outputPoints is 0 times cameraPoint.value;
+  local
+    var integer: idx is 0;
+    var cameraPoint: prevPoint is cameraPoint.value;
+    var cameraPoint: currPoint is cameraPoint.value;
+    var boolean: prevInside is FALSE;
+    var boolean: currInside is FALSE;
+  begin
+    if length(inputPoints) <> 0 then
+      prevPoint := inputPoints[length(inputPoints)];
+      prevInside := prevPoint.forward >= NEAR_PLANE;
+      for idx range 1 to length(inputPoints) do
+        currPoint := inputPoints[idx];
+        currInside := currPoint.forward >= NEAR_PLANE;
+        if currInside then
+          if not prevInside then
+            outputPoints &:= clipEdgeToNear(prevPoint, currPoint);
+          end if;
+          outputPoints &:= currPoint;
+        elsif prevInside then
+          outputPoints &:= clipEdgeToNear(prevPoint, currPoint);
+        end if;
+        prevPoint := currPoint;
+        prevInside := currInside;
+      end for;
+    end if;
+  end func;
+
+const func float: surfaceOrderDepth (in renderContext: ctx,
     in renderSurface: surface) is func
   result
     var float: depth is 0.0;
   local
-    var screenPoint: pa is screenPoint.value;
-    var screenPoint: pb is screenPoint.value;
-    var screenPoint: pc is screenPoint.value;
-    var screenPoint: pd is screenPoint.value;
+    var cameraPoint: pa is cameraPoint.value;
+    var cameraPoint: pb is cameraPoint.value;
+    var cameraPoint: pc is cameraPoint.value;
+    var cameraPoint: pd is cameraPoint.value;
   begin
-    pa := projectPoint(state, surface.a);
-    pb := projectPoint(state, surface.b);
-    pc := projectPoint(state, surface.c);
-    pd := projectPoint(state, surface.d);
-    depth := (pa.depth + pb.depth + pc.depth + pd.depth) / 4.0;
-  end func;
-
-const func float: surfaceOrderDepth (in engineState: state,
-    in renderSurface: surface) is func
-  result
-    var float: depth is 0.0;
-  local
-    var screenPoint: pa is screenPoint.value;
-    var screenPoint: pb is screenPoint.value;
-    var screenPoint: pc is screenPoint.value;
-    var screenPoint: pd is screenPoint.value;
-  begin
-    pa := projectPoint(state, surface.a);
-    pb := projectPoint(state, surface.b);
-    pc := projectPoint(state, surface.c);
-    pd := projectPoint(state, surface.d);
-    depth := pa.depth;
-    if pb.depth > depth then depth := pb.depth; end if;
-    if pc.depth > depth then depth := pc.depth; end if;
-    if pd.depth > depth then depth := pd.depth; end if;
+    pa := cameraSpacePoint(ctx, surface.a);
+    pb := cameraSpacePoint(ctx, surface.b);
+    pc := cameraSpacePoint(ctx, surface.c);
+    pd := cameraSpacePoint(ctx, surface.d);
+    depth := pa.forward;
+    if pb.forward > depth then depth := pb.forward; end if;
+    if pc.forward > depth then depth := pc.forward; end if;
+    if pd.forward > depth then depth := pd.forward; end if;
   end func;
 
 const proc: drawProjectedSurface (inout visualStats: stats,
-    in engineState: state, in renderSurface: surface) is func
+    in renderContext: ctx, in renderSurface: surface) is func
   local
-    var screenPoint: pa is screenPoint.value;
-    var screenPoint: pb is screenPoint.value;
-    var screenPoint: pc is screenPoint.value;
-    var screenPoint: pd is screenPoint.value;
+    var array cameraPoint: cameraPoly is 0 times cameraPoint.value;
+    var array cameraPoint: clippedPoly is 0 times cameraPoint.value;
+    var array screenPoint: screenPoly is 0 times screenPoint.value;
+    var array integer: coordinates is 0 times 0;
+    var screenPoint: point2 is screenPoint.value;
     var pointList: poly is pointList.value;
     var color: col is color.value;
     var float: depth is 0.0;
     var integer: centerX is 0;
     var integer: centerY is 0;
-    var integer: detailStep is 0;
-    var integer: stripe is 0;
+    var integer: idx is 0;
+    var integer: detailLines is 0;
   begin
     stats.surfacesSubmitted +:= 1;
-    pa := projectPointClamped(state, surface.a);
-    pb := projectPointClamped(state, surface.b);
-    pc := projectPointClamped(state, surface.c);
-    pd := projectPointClamped(state, surface.d);
-    if pa.depth > NEAR_PLANE or pb.depth > NEAR_PLANE or
-        pc.depth > NEAR_PLANE or pd.depth > NEAR_PLANE then
+    cameraPoly &:= cameraSpacePoint(ctx, surface.a);
+    cameraPoly &:= cameraSpacePoint(ctx, surface.b);
+    cameraPoly &:= cameraSpacePoint(ctx, surface.c);
+    cameraPoly &:= cameraSpacePoint(ctx, surface.d);
+    clippedPoly := clipPolygonNear(cameraPoly);
+    if length(clippedPoly) >= 3 then
       stats.surfacesProjected +:= 1;
-      stats.trianglesSubmitted +:= 2;
-      centerX := (pa.x + pb.x + pc.x + pd.x) mdiv 4;
-      centerY := (pa.y + pb.y + pc.y + pd.y) mdiv 4;
-      depth := (pa.depth + pb.depth + pc.depth + pd.depth) / 4.0;
-      if depth < NEAR_PLANE then
-        depth := NEAR_PLANE;
-      end if;
+      stats.trianglesSubmitted +:= length(clippedPoly) - 2;
+      for idx range 1 to length(clippedPoly) do
+        point2 := projectCameraPoint(clippedPoly[idx]);
+        screenPoly &:= point2;
+        coordinates &:= point2.x;
+        coordinates &:= point2.y;
+        centerX +:= point2.x;
+        centerY +:= point2.y;
+        depth +:= clippedPoly[idx].forward;
+      end for;
+      centerX := centerX div length(clippedPoly);
+      centerY := centerY div length(clippedPoly);
+      depth := depth / flt(length(clippedPoly));
       col := litMaterial(surface.materialId, surface.detailId, surface.emissive,
           depth, centerX, centerY);
-      poly := genPointList([] (pa.x, pa.y, pb.x, pb.y, pc.x, pc.y, pd.x, pd.y));
+      poly := genPointList(coordinates);
       fpolyLine(0, 0, poly, col);
       polyLine(0, 0, poly, scaledColor(col, 55));
       stats.depthWrites +:= 2 + surface.detailId;
@@ -932,52 +982,60 @@ const proc: drawProjectedSurface (inout visualStats: stats,
       else
         stats.lightSamples +:= 5;
       end if;
-      detailStep := 3 + surface.detailId rem 5;
-      for stripe range 1 to detailStep do
-        if stripe rem 2 = 0 then
-          lineTo(pa.x + (pb.x - pa.x) * stripe div succ(detailStep),
-              pa.y + (pb.y - pa.y) * stripe div succ(detailStep),
-              pd.x + (pc.x - pd.x) * stripe div succ(detailStep),
-              pd.y + (pc.y - pd.y) * stripe div succ(detailStep),
-              scaledColor(col, 128));
-        else
-          lineTo(pa.x + (pd.x - pa.x) * stripe div succ(detailStep),
-              pa.y + (pd.y - pa.y) * stripe div succ(detailStep),
-              pb.x + (pc.x - pb.x) * stripe div succ(detailStep),
-              pb.y + (pc.y - pb.y) * stripe div succ(detailStep),
-              scaledColor(col, 70));
+      if depth < 14.0 and length(screenPoly) >= 4 then
+        detailLines := 1 + surface.detailId rem 2;
+        lineTo(screenPoly[1].x, screenPoly[1].y, screenPoly[3].x,
+            screenPoly[3].y, scaledColor(col, 112));
+        if detailLines = 2 then
+          lineTo(screenPoly[2].x, screenPoly[2].y, screenPoly[4].x,
+              screenPoly[4].y, scaledColor(col, 74));
         end if;
-      end for;
-      stats.entropy +:= abs(pa.x - pc.x) + abs(pa.y - pc.y) +
-          surface.detailId * 19 + ord(surface.emissive) * 37;
+      end if;
+      stats.entropy +:= abs(screenPoly[1].x - screenPoly[length(screenPoly)].x) +
+          abs(screenPoly[1].y - screenPoly[length(screenPoly)].y) +
+          surface.detailId * 19 + ord(surface.emissive) * 37 +
+          length(clippedPoly) * 11;
     end if;
   end func;
 
 const proc: drawGeneratedScene (inout visualStats: stats,
-    in engineState: state) is func
+    in engineState: state, in renderContext: ctx,
+    in array renderSurface: surfaces) is func
   local
-    var array renderSurface: surfaces is 0 times renderSurface.value;
-    var integer: pass is 0;
-    var renderSurface: surface is renderSurface.value;
-    var float: depth is 0.0;
+    var array boolean: drawn is 0 times FALSE;
+    var array float: orderDepths is 0 times 0.0;
+    var integer: idx is 0;
+    var integer: order is 0;
+    var integer: bestIdx is 0;
+    var float: bestDepth is -1000000.0;
   begin
     clear(BLACK_VOID);
     rect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT mdiv 2, CEILING_DARK);
     rect(0, SCREEN_HEIGHT mdiv 2, SCREEN_WIDTH, SCREEN_HEIGHT mdiv 2,
         FLOOR_DARK);
-    surfaces := generatedSurfacesFor(state.mapIndex);
-    for pass range 42 downto 1 do
-      for surface range surfaces do
-        depth := surfaceOrderDepth(state, surface);
-        if depth >= flt(pass) - 1.0 and depth < flt(pass) + 1.0 then
-          drawProjectedSurface(stats, state, surface);
+    drawn := length(surfaces) times FALSE;
+    orderDepths := length(surfaces) times 0.0;
+    for idx range 1 to length(surfaces) do
+      orderDepths[idx] := surfaceOrderDepth(ctx, surfaces[idx]);
+    end for;
+    for order range 1 to length(surfaces) do
+      bestIdx := 0;
+      bestDepth := -1000000.0;
+      for idx range 1 to length(surfaces) do
+        if not drawn[idx] and orderDepths[idx] > bestDepth then
+          bestIdx := idx;
+          bestDepth := orderDepths[idx];
         end if;
       end for;
+      if bestIdx <> 0 then
+        drawn[bestIdx] := TRUE;
+        drawProjectedSurface(stats, ctx, surfaces[bestIdx]);
+      end if;
     end for;
   end func;
 
 const proc: drawActorSprite (inout visualStats: stats, in engineState: state,
-    in renderActor: actorData) is func
+    in renderContext: ctx, in renderActor: actorData) is func
   local
     var vec3: actorPoint is vec3.value;
     var screenPoint: screen is screenPoint.value;
@@ -989,7 +1047,7 @@ const proc: drawActorSprite (inout visualStats: stats, in engineState: state,
   begin
     stats.actorsSubmitted +:= 1;
     actorPoint := v3(actorData.x, actorData.y, actorData.z);
-    screen := projectPoint(state, actorPoint);
+    screen := projectCameraPoint(cameraSpacePoint(ctx, actorPoint));
     if screen.visible then
       width := clampInt(round(260.0 / screen.depth), 18, 130);
       height := clampInt(round(390.0 / screen.depth), 26, 190);
@@ -1126,14 +1184,15 @@ const proc: drawActorSprite (inout visualStats: stats, in engineState: state,
     end if;
   end func;
 
-const proc: drawActors (inout visualStats: stats, in engineState: state) is func
+const proc: drawActors (inout visualStats: stats, in engineState: state,
+    in renderContext: ctx) is func
   local
     var array renderActor: actors is 0 times renderActor.value;
     var renderActor: actorData is renderActor.value;
   begin
     actors := generatedActorsFor(state);
     for actorData range actors do
-      drawActorSprite(stats, state, actorData);
+      drawActorSprite(stats, state, ctx, actorData);
     end for;
   end func;
 
@@ -1149,10 +1208,10 @@ const proc: drawKeyCardIcon (in integer: x, in integer: y, in color: keyColor,
       frameCol := scaledColor(keyColor, 130);
       fillCol := keyColor;
     end if;
-    rect(x, y, 38, 26, scaledColor(PANEL_BLACK, 210));
-    rect(x + 3, y + 3, 32, 20, frameCol);
-    rect(x + 8, y + 7, 24, 12, fillCol);
-    rect(x + 25, y + 9, 5, 4, scaledColor(PANEL_BLACK, 180));
+    rect(x, y, 36, 22, scaledColor(PANEL_BLACK, 210));
+    rect(x + 3, y + 3, 30, 16, frameCol);
+    rect(x + 8, y + 6, 22, 10, fillCol);
+    rect(x + 24, y + 8, 5, 4, scaledColor(PANEL_BLACK, 180));
   end func;
 
 const proc: drawWeaponSlotIcon (in integer: x, in integer: y,
@@ -1167,21 +1226,21 @@ const proc: drawWeaponSlotIcon (in integer: x, in integer: y,
       frameCol := HUD_AMBER;
       iconCol := scaledColor(EMISSIVE_AMBER, 118);
     end if;
-    rect(x, y, 46, 30, scaledColor(PANEL_BLACK, 210));
-    rect(x + 3, y + 3, 40, 24, scaledColor(frameCol, 52));
+    rect(x, y, 38, 24, scaledColor(PANEL_BLACK, 210));
+    rect(x + 3, y + 3, 32, 18, scaledColor(frameCol, 52));
     if slot = 1 then
-      rect(x + 12, y + 15, 22, 7, iconCol);
-      rect(x + 25, y + 10, 8, 11, scaledColor(iconCol, 74));
-      rect(x + 8, y + 18, 8, 6, scaledColor(HUD_PANEL_LIGHT, 45));
+      rect(x + 10, y + 12, 18, 5, iconCol);
+      rect(x + 22, y + 8, 6, 9, scaledColor(iconCol, 74));
+      rect(x + 7, y + 15, 7, 5, scaledColor(HUD_PANEL_LIGHT, 45));
     elsif slot = 2 then
-      rect(x + 8, y + 13, 31, 6, iconCol);
-      rect(x + 10, y + 19, 14, 5, scaledColor(iconCol, 70));
-      rect(x + 33, y + 11, 5, 10, scaledColor(HUD_PANEL_LIGHT, 60));
+      rect(x + 7, y + 10, 26, 5, iconCol);
+      rect(x + 9, y + 15, 12, 4, scaledColor(iconCol, 70));
+      rect(x + 29, y + 8, 4, 9, scaledColor(HUD_PANEL_LIGHT, 60));
     else
-      rect(x + 11, y + 9, 9, 16, iconCol);
-      rect(x + 24, y + 9, 9, 16, iconCol);
-      rect(x + 16, y + 13, 17, 5, scaledColor(EMISSIVE_CYAN, 98));
-      rect(x + 19, y + 20, 10, 4, scaledColor(HUD_PANEL_LIGHT, 55));
+      rect(x + 10, y + 7, 7, 13, iconCol);
+      rect(x + 21, y + 7, 7, 13, iconCol);
+      rect(x + 14, y + 11, 15, 4, scaledColor(EMISSIVE_CYAN, 98));
+      rect(x + 17, y + 17, 8, 3, scaledColor(HUD_PANEL_LIGHT, 55));
     end if;
   end func;
 
@@ -1195,20 +1254,20 @@ const proc: drawWeaponAndHud (inout visualStats: stats,
     var integer: statusY is 0;
   begin
     midX := VIEW_CENTER_X;
-    baseY := SCREEN_HEIGHT - 180;
+    baseY := SCREEN_HEIGHT - 126;
     if state.shotFlash > 0 then
       baseY +:= 10;
     end if;
-    rect(midX - 112, baseY + 66, 224, 94, WEAPON_DARK);
-    rect(midX - 82, baseY + 34, 164, 74, WEAPON_MID);
-    rect(midX - 44, baseY - 2, 88, 70, scaledColor(WEAPON_MID, 135));
-    rect(midX - 13, baseY - 58, 26, 70, scaledColor(EMISSIVE_CYAN, 58));
-    rect(midX - 92, baseY + 56, 32, 18, HUD_AMBER);
-    rect(midX + 60, baseY + 56, 32, 18, HUD_AMBER);
+    rect(midX - 78, baseY + 46, 156, 66, WEAPON_DARK);
+    rect(midX - 58, baseY + 24, 116, 52, WEAPON_MID);
+    rect(midX - 31, baseY - 2, 62, 50, scaledColor(WEAPON_MID, 135));
+    rect(midX - 9, baseY - 42, 18, 50, scaledColor(EMISSIVE_CYAN, 58));
+    rect(midX - 64, baseY + 40, 24, 12, HUD_AMBER);
+    rect(midX + 40, baseY + 40, 24, 12, HUD_AMBER);
     if state.shotFlash > 0 then
-      rect(midX - 38, baseY - 68, 76, 30, HUD_AMBER);
-      rect(midX - 18, baseY - 98, 36, 32, MONSTER_HOT);
-      rect(midX - 6, baseY - 122, 12, 28, scaledColor(EMISSIVE_CYAN, 125));
+      rect(midX - 28, baseY - 50, 56, 22, HUD_AMBER);
+      rect(midX - 13, baseY - 72, 26, 24, MONSTER_HOT);
+      rect(midX - 4, baseY - 92, 8, 20, scaledColor(EMISSIVE_CYAN, 125));
     end if;
     if state.hitFlash > 0 then
       rect(0, 0, SCREEN_WIDTH, 18, scaledColor(HUD_RED, 95));
@@ -1221,25 +1280,24 @@ const proc: drawWeaponAndHud (inout visualStats: stats,
     lineTo(midX, VIEW_CENTER_Y + 8, midX, VIEW_CENTER_Y + 23, EMISSIVE_CYAN);
     healthWidth := clampInt(state.health, 0, 100);
     armorWidth := clampInt(state.armor, 0, 100);
-    statusY := SCREEN_HEIGHT - 88;
-    rect(0, statusY, SCREEN_WIDTH, 88, scaledColor(HUD_PANEL_LIGHT, 45));
+    statusY := SCREEN_HEIGHT - 78;
+    rect(0, statusY, SCREEN_WIDTH, 78, scaledColor(HUD_PANEL_LIGHT, 45));
     rect(0, statusY, SCREEN_WIDTH, 5, scaledColor(HUD_PANEL_LIGHT, 92));
-    rect(18, statusY + 10, 146, 68, HUD_PANEL);
-    rect(184, statusY + 10, 174, 68, HUD_PANEL);
-    rect(370, statusY + 10, 54, 68, HUD_PANEL);
-    rect(516, statusY + 10, 174, 68, HUD_PANEL);
-    rect(724, statusY + 10, 218, 68, HUD_PANEL);
-    drawNumber3(state.ammo, 28, statusY + 23, 3, HUD_AMBER);
-    drawNumber3(state.health, 196, statusY + 23, 3, HUD_RED);
-    drawStatusFace(state, midX - 52, statusY + 5);
-    drawNumber3(state.armor, 528, statusY + 23, 3, HUD_GREEN);
-    drawWeaponSlotIcon(375, statusY + 18, 1, TRUE);
-    drawKeyCardIcon(736, statusY + 16, HUD_RED, state.redKey);
-    drawKeyCardIcon(782, statusY + 16, EMISSIVE_CYAN, state.blueKey);
-    drawKeyCardIcon(828, statusY + 16, HUD_TEXT, state.yellowKey);
-    drawWeaponSlotIcon(736, statusY + 48, 1, TRUE);
-    drawWeaponSlotIcon(792, statusY + 48, 2, state.ammo >= 18);
-    drawWeaponSlotIcon(848, statusY + 48, 3, state.blueKey or state.yellowKey);
+    rect(8, statusY + 8, 100, 62, HUD_PANEL);
+    rect(116, statusY + 8, 120, 62, HUD_PANEL);
+    rect(268, statusY, 104, 78, HUD_PANEL);
+    rect(384, statusY + 8, 112, 62, HUD_PANEL);
+    rect(506, statusY + 8, 130, 62, HUD_PANEL);
+    drawNumber3(state.ammo, 18, statusY + 22, 2, HUD_AMBER);
+    drawNumber3(state.health, 128, statusY + 22, 2, HUD_RED);
+    drawStatusFace(state, 268, statusY);
+    drawNumber3(state.armor, 394, statusY + 22, 2, HUD_GREEN);
+    drawKeyCardIcon(512, statusY + 12, HUD_RED, state.redKey);
+    drawKeyCardIcon(552, statusY + 12, EMISSIVE_CYAN, state.blueKey);
+    drawKeyCardIcon(592, statusY + 12, HUD_TEXT, state.yellowKey);
+    drawWeaponSlotIcon(512, statusY + 42, 1, TRUE);
+    drawWeaponSlotIcon(554, statusY + 42, 2, state.ammo >= 18);
+    drawWeaponSlotIcon(596, statusY + 42, 3, state.blueKey or state.yellowKey);
     if state.dead then
       rect(240, 202, 480, 80, scaledColor(PANEL_BLACK, 225));
       rect(250, 212, 460, 60, HUD_RED);
@@ -1254,10 +1312,13 @@ const proc: drawWeaponAndHud (inout visualStats: stats,
   end func;
 
 const proc: renderEngineFrame (inout visualStats: stats,
-    in engineState: state) is func
+    in engineState: state, in array renderSurface: surfaces) is func
+  local
+    var renderContext: ctx is renderContext.value;
   begin
-    drawGeneratedScene(stats, state);
-    drawActors(stats, state);
+    ctx := makeRenderContext(state);
+    drawGeneratedScene(stats, state, ctx, surfaces);
+    drawActors(stats, state, ctx);
     drawWeaponAndHud(stats, state);
     flushGraphic;
   end func;
@@ -1595,30 +1656,27 @@ const proc: updateInput (inout engineState: state) is func
         state.lastKey := ch;
       end if;
     end while;
-    if state.dead and ((state.lastKey = 'r' and buttonPressed(KEYBOARD, 'r')) or
-        (state.lastKey = 'R' and buttonPressed(KEYBOARD, 'R')) or
-        (state.lastKey = ' ' and buttonPressed(KEYBOARD, ' '))) then
+    if state.dead and (buttonPressed(KEYBOARD, 'r') or
+        buttonPressed(KEYBOARD, 'R') or buttonPressed(KEYBOARD, ' ')) then
       resetMapState(state, state.mapIndex, TRUE);
     end if;
-    if ((state.lastKey = KEY_UP) and buttonPressed(KEYBOARD, KEY_UP)) or
-        ((state.lastKey = 'w') and buttonPressed(KEYBOARD, 'w')) or
-        ((state.lastKey = 'W') and buttonPressed(KEYBOARD, 'W')) then
+    if buttonPressed(KEYBOARD, KEY_UP) or buttonPressed(KEYBOARD, 'w') or
+        buttonPressed(KEYBOARD, 'W') then
       movePlayer(state, MOVE_SPEED);
-    elsif ((state.lastKey = KEY_DOWN) and buttonPressed(KEYBOARD, KEY_DOWN)) or
-        ((state.lastKey = 's') and buttonPressed(KEYBOARD, 's')) or
-        ((state.lastKey = 'S') and buttonPressed(KEYBOARD, 'S')) then
+    end if;
+    if buttonPressed(KEYBOARD, KEY_DOWN) or buttonPressed(KEYBOARD, 's') or
+        buttonPressed(KEYBOARD, 'S') then
       movePlayer(state, -MOVE_SPEED);
-    elsif ((state.lastKey = KEY_RIGHT) and buttonPressed(KEYBOARD, KEY_RIGHT)) or
-        ((state.lastKey = 'd') and buttonPressed(KEYBOARD, 'd')) or
-        ((state.lastKey = 'D') and buttonPressed(KEYBOARD, 'D')) then
+    end if;
+    if buttonPressed(KEYBOARD, KEY_RIGHT) or buttonPressed(KEYBOARD, 'd') or
+        buttonPressed(KEYBOARD, 'D') then
       rotatePlayer(state, ROT_SPEED);
-    elsif ((state.lastKey = KEY_LEFT) and buttonPressed(KEYBOARD, KEY_LEFT)) or
-        ((state.lastKey = 'a') and buttonPressed(KEYBOARD, 'a')) or
-        ((state.lastKey = 'A') and buttonPressed(KEYBOARD, 'A')) then
+    end if;
+    if buttonPressed(KEYBOARD, KEY_LEFT) or buttonPressed(KEYBOARD, 'a') or
+        buttonPressed(KEYBOARD, 'A') then
       rotatePlayer(state, -ROT_SPEED);
     end if;
-    if ((state.lastKey = ' ') and buttonPressed(KEYBOARD, ' ')) or
-        ((state.lastKey = KEY_MOUSE1) and buttonPressed(KEYBOARD, KEY_MOUSE1)) then
+    if buttonPressed(KEYBOARD, ' ') or buttonPressed(KEYBOARD, KEY_MOUSE1) then
       fireWeapon(state);
     end if;
     collectPickups(state);
@@ -1763,6 +1821,10 @@ const proc: runSmoke (in integer: requestedFrames, in string: startMap) is func
         episodeMapToken(scriptState.mapIndex));
     writeln("[engine] monster_sprite_detail=procedural_silhouettes");
     writeln("[engine] hud_contract=ammo,health,armor,face,key_icons,weapon_icons");
+    writeln("[engine] render_resolution=640x360");
+    writeln("[engine] wall_clip=polygon_near_plane");
+    writeln("[engine] render_passes=single_sorted");
+    writeln("[engine] input_polling=continuous");
     writeln("[engine] wall_clip_ready=TRUE");
     writeln("[engine] engine_smoke_ready=TRUE");
     writeln("[engine] episode_smoke_ready=TRUE");
@@ -1780,7 +1842,10 @@ const proc: runVisualSmoke (in integer: requestedFrames, in string: startMap) is
     writeln("[engine] visual_smoke_assets=generated_replacement_pack");
     writeln("[engine] visual_smoke_episode=classic_generated");
     writeln("[engine] visual_smoke_hud=key_icons_weapon_icons");
-    writeln("[engine] visual_smoke_wall_clip=near_plane_clamped");
+    writeln("[engine] visual_smoke_resolution=640x360");
+    writeln("[engine] visual_smoke_wall_clip=polygon_near_plane");
+    writeln("[engine] visual_smoke_render_passes=single_sorted");
+    writeln("[engine] visual_smoke_input_polling=continuous");
     writeln("[engine] visual_smoke_ready=TRUE");
   end func;
 
@@ -1788,20 +1853,34 @@ const proc: runEngine (in engineConfig: config) is func
   local
     var engineState: state is engineState.value;
     var visualStats: stats is visualStats.value;
+    var array renderSurface: cachedSurfaces is 0 times renderSurface.value;
+    var integer: cachedMapIndex is 0;
     var boolean: quit is FALSE;
+    var time: frameStart is time.value;
+    var duration: frameElapsed is duration.value;
+    var integer: frameWaitMicros is 0;
   begin
     resetMapState(state, mapIndexForToken(config.startMap), TRUE);
     screen(SCREEN_WIDTH, SCREEN_HEIGHT);
     KEYBOARD := GRAPH_KEYBOARD;
     repeat
+      frameStart := time(NOW);
       stats := visualStats.value;
-      renderEngineFrame(stats, state);
       updateInput(state);
+      if cachedMapIndex <> state.mapIndex then
+        cachedSurfaces := generatedSurfacesFor(state.mapIndex);
+        cachedMapIndex := state.mapIndex;
+      end if;
+      renderEngineFrame(stats, state, cachedSurfaces);
       if (state.lastKey = KEY_ESC and buttonPressed(KEYBOARD, KEY_ESC)) or
           state.lastKey = KEY_CLOSE then
         quit := TRUE;
       end if;
-      wait(33000 . MICRO_SECONDS);
+      frameElapsed := time(NOW) - frameStart;
+      frameWaitMicros := 16000 - toMicroSeconds(frameElapsed);
+      if frameWaitMicros > 0 and not quit then
+        wait(frameWaitMicros . MICRO_SECONDS);
+      end if;
     until quit;
   end func;
 
