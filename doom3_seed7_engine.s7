@@ -817,6 +817,41 @@ const func screenPoint: projectPoint (in engineState: state, in vec3: point3) is
     end if;
   end func;
 
+const func screenPoint: projectPointClamped (in engineState: state,
+    in vec3: point3) is func
+  result
+    var screenPoint: outPoint is screenPoint.value;
+  local
+    var float: dx is 0.0;
+    var float: dy is 0.0;
+    var float: dz is 0.0;
+    var float: cosYaw is 0.0;
+    var float: sinYaw is 0.0;
+    var float: side is 0.0;
+    var float: forward is 0.0;
+    var float: projectedForward is 0.0;
+  begin
+    dx := point3.x - state.camX;
+    dy := point3.y - state.camY;
+    dz := point3.z - state.camZ;
+    cosYaw := cos(state.yaw);
+    sinYaw := sin(state.yaw);
+    side := dx * cosYaw - dz * sinYaw;
+    forward := dx * sinYaw + dz * cosYaw;
+    projectedForward := forward;
+    if projectedForward < NEAR_PLANE then
+      projectedForward := NEAR_PLANE;
+    end if;
+    outPoint.depth := forward;
+    outPoint.visible := TRUE;
+    outPoint.x := clampInt(round(flt(VIEW_CENTER_X) +
+        side / projectedForward * FOCAL_LENGTH), -SCREEN_WIDTH,
+        SCREEN_WIDTH * 2);
+    outPoint.y := clampInt(round(flt(VIEW_CENTER_Y) -
+        dy / projectedForward * FOCAL_LENGTH), -SCREEN_HEIGHT,
+        SCREEN_HEIGHT * 2);
+  end func;
+
 const func float: surfaceDepth (in engineState: state,
     in renderSurface: surface) is func
   result
@@ -832,6 +867,26 @@ const func float: surfaceDepth (in engineState: state,
     pc := projectPoint(state, surface.c);
     pd := projectPoint(state, surface.d);
     depth := (pa.depth + pb.depth + pc.depth + pd.depth) / 4.0;
+  end func;
+
+const func float: surfaceOrderDepth (in engineState: state,
+    in renderSurface: surface) is func
+  result
+    var float: depth is 0.0;
+  local
+    var screenPoint: pa is screenPoint.value;
+    var screenPoint: pb is screenPoint.value;
+    var screenPoint: pc is screenPoint.value;
+    var screenPoint: pd is screenPoint.value;
+  begin
+    pa := projectPoint(state, surface.a);
+    pb := projectPoint(state, surface.b);
+    pc := projectPoint(state, surface.c);
+    pd := projectPoint(state, surface.d);
+    depth := pa.depth;
+    if pb.depth > depth then depth := pb.depth; end if;
+    if pc.depth > depth then depth := pc.depth; end if;
+    if pd.depth > depth then depth := pd.depth; end if;
   end func;
 
 const proc: drawProjectedSurface (inout visualStats: stats,
@@ -850,16 +905,20 @@ const proc: drawProjectedSurface (inout visualStats: stats,
     var integer: stripe is 0;
   begin
     stats.surfacesSubmitted +:= 1;
-    pa := projectPoint(state, surface.a);
-    pb := projectPoint(state, surface.b);
-    pc := projectPoint(state, surface.c);
-    pd := projectPoint(state, surface.d);
-    if pa.visible and pb.visible and pc.visible and pd.visible then
+    pa := projectPointClamped(state, surface.a);
+    pb := projectPointClamped(state, surface.b);
+    pc := projectPointClamped(state, surface.c);
+    pd := projectPointClamped(state, surface.d);
+    if pa.depth > NEAR_PLANE or pb.depth > NEAR_PLANE or
+        pc.depth > NEAR_PLANE or pd.depth > NEAR_PLANE then
       stats.surfacesProjected +:= 1;
       stats.trianglesSubmitted +:= 2;
       centerX := (pa.x + pb.x + pc.x + pd.x) mdiv 4;
       centerY := (pa.y + pb.y + pc.y + pd.y) mdiv 4;
       depth := (pa.depth + pb.depth + pc.depth + pd.depth) / 4.0;
+      if depth < NEAR_PLANE then
+        depth := NEAR_PLANE;
+      end if;
       col := litMaterial(surface.materialId, surface.detailId, surface.emissive,
           depth, centerX, centerY);
       poly := genPointList([] (pa.x, pa.y, pb.x, pb.y, pc.x, pc.y, pd.x, pd.y));
@@ -907,9 +966,9 @@ const proc: drawGeneratedScene (inout visualStats: stats,
     rect(0, SCREEN_HEIGHT mdiv 2, SCREEN_WIDTH, SCREEN_HEIGHT mdiv 2,
         FLOOR_DARK);
     surfaces := generatedSurfacesFor(state.mapIndex);
-    for pass range 28 downto 1 do
+    for pass range 42 downto 1 do
       for surface range surfaces do
-        depth := surfaceDepth(state, surface);
+        depth := surfaceOrderDepth(state, surface);
         if depth >= flt(pass) - 1.0 and depth < flt(pass) + 1.0 then
           drawProjectedSurface(stats, state, surface);
         end if;
@@ -925,6 +984,8 @@ const proc: drawActorSprite (inout visualStats: stats, in engineState: state,
     var integer: width is 0;
     var integer: height is 0;
     var color: body is color.value;
+    var integer: poseShift is 0;
+    var integer: glowShift is 0;
   begin
     stats.actorsSubmitted +:= 1;
     actorPoint := v3(actorData.x, actorData.y, actorData.z);
@@ -932,6 +993,8 @@ const proc: drawActorSprite (inout visualStats: stats, in engineState: state,
     if screen.visible then
       width := clampInt(round(260.0 / screen.depth), 18, 130);
       height := clampInt(round(390.0 / screen.depth), 26, 190);
+      poseShift := ((state.frameNo + actorData.kind * 5) rem 9) - 4;
+      glowShift := clampInt(96 + state.shotFlash * 14, 78, 150);
       if actorData.kind = KIND_RUST_TROOPER or
           actorData.kind = KIND_EMBER_CRAWLER or
           actorData.kind = KIND_IRON_BRUTE then
@@ -940,26 +1003,58 @@ const proc: drawActorSprite (inout visualStats: stats, in engineState: state,
           height := height * 6 mdiv 5;
           body := litMaterial(2, 18, FALSE, screen.depth, screen.x, screen.y);
           rect(screen.x - width mdiv 2, screen.y - height mdiv 2,
-              width, height, scaledColor(body, 42));
-          rect(screen.x - width * 2 mdiv 5, screen.y - height * 3 mdiv 8,
-              width * 4 mdiv 5, height * 5 mdiv 8, body);
-          rect(screen.x - width * 3 mdiv 8, screen.y + height mdiv 8,
-              width * 3 mdiv 4, height mdiv 4, scaledColor(METAL_GREY, 120));
+              width, height, scaledColor(body, 34));
+          rect(screen.x - width * 9 mdiv 20, screen.y - height * 2 mdiv 5,
+              width * 9 mdiv 10, height * 3 mdiv 5, body);
+          rect(screen.x - width * 3 mdiv 5, screen.y - height mdiv 4,
+              width mdiv 4, height mdiv 3, scaledColor(METAL_GREY, 126));
+          rect(screen.x + width * 7 mdiv 20, screen.y - height mdiv 4,
+              width mdiv 4, height mdiv 3, scaledColor(METAL_GREY, 126));
+          rect(screen.x - width mdiv 4, screen.y - height * 5 mdiv 12,
+              width mdiv 2, height mdiv 5, scaledColor(PANEL_BLACK, 210));
+          rect(screen.x - width mdiv 6, screen.y - height mdiv 3,
+              width mdiv 3, height mdiv 7, scaledColor(EMISSIVE_CYAN, glowShift));
+          rect(screen.x - width * 3 mdiv 8, screen.y + height mdiv 6,
+              width * 3 mdiv 4, height mdiv 4, scaledColor(METAL_GREY, 118));
+          rect(screen.x - width * 3 mdiv 8, screen.y + height * 2 mdiv 5,
+              width mdiv 4, height mdiv 5, scaledColor(PANEL_BLACK, 220));
+          rect(screen.x + width mdiv 8, screen.y + height * 2 mdiv 5,
+              width mdiv 4, height mdiv 5, scaledColor(PANEL_BLACK, 220));
           rect(screen.x - width mdiv 7, screen.y - height mdiv 4,
               width mdiv 5, height mdiv 8, MONSTER_HOT);
           rect(screen.x + width mdiv 18, screen.y - height mdiv 4,
               width mdiv 5, height mdiv 8, MONSTER_HOT);
+          lineTo(screen.x - width mdiv 2, screen.y - height mdiv 10,
+              screen.x - width * 3 mdiv 4, screen.y + height mdiv 7 + poseShift,
+              scaledColor(METAL_GREY, 132));
+          lineTo(screen.x + width mdiv 2, screen.y - height mdiv 10,
+              screen.x + width * 3 mdiv 4, screen.y + height mdiv 7 - poseShift,
+              scaledColor(METAL_GREY, 132));
         elsif actorData.kind = KIND_EMBER_CRAWLER then
           height := height * 3 mdiv 4;
           body := litMaterial(1, 16, FALSE, screen.depth, screen.x, screen.y);
           rect(screen.x - width mdiv 2, screen.y - height mdiv 3,
-              width, height, scaledColor(MONSTER_BODY, 60));
-          rect(screen.x - width * 3 mdiv 8, screen.y - height mdiv 4,
-              width * 3 mdiv 4, height * 2 mdiv 3, body);
-          rect(screen.x - width mdiv 2, screen.y + height mdiv 5,
-              width mdiv 4, height mdiv 5, scaledColor(METAL_BLUE, 72));
-          rect(screen.x + width mdiv 4, screen.y + height mdiv 5,
-              width mdiv 4, height mdiv 5, scaledColor(METAL_BLUE, 72));
+              width, height, scaledColor(MONSTER_BODY, 48));
+          rect(screen.x - width * 2 mdiv 5, screen.y - height mdiv 4,
+              width * 4 mdiv 5, height * 2 mdiv 3, body);
+          fcircle(screen.x - width mdiv 5, screen.y - height mdiv 5,
+              clampInt(width mdiv 5, 4, 18), scaledColor(body, 118));
+          fcircle(screen.x + width mdiv 5, screen.y - height mdiv 5,
+              clampInt(width mdiv 5, 4, 18), scaledColor(body, 118));
+          rect(screen.x - width mdiv 4, screen.y + height mdiv 12,
+              width mdiv 2, height mdiv 5, scaledColor(EMISSIVE_AMBER, glowShift));
+          lineTo(screen.x - width mdiv 2, screen.y + height mdiv 10,
+              screen.x - width * 3 mdiv 4, screen.y + height mdiv 3 + poseShift,
+              scaledColor(METAL_BLUE, 90));
+          lineTo(screen.x - width mdiv 4, screen.y + height mdiv 5,
+              screen.x - width * 3 mdiv 5, screen.y + height mdiv 2 - poseShift,
+              scaledColor(METAL_BLUE, 90));
+          lineTo(screen.x + width mdiv 2, screen.y + height mdiv 10,
+              screen.x + width * 3 mdiv 4, screen.y + height mdiv 3 - poseShift,
+              scaledColor(METAL_BLUE, 90));
+          lineTo(screen.x + width mdiv 4, screen.y + height mdiv 5,
+              screen.x + width * 3 mdiv 5, screen.y + height mdiv 2 + poseShift,
+              scaledColor(METAL_BLUE, 90));
           rect(screen.x - width mdiv 5, screen.y - height mdiv 6,
               width mdiv 6, height mdiv 8, MONSTER_HOT);
           rect(screen.x + width mdiv 12, screen.y - height mdiv 6,
@@ -967,15 +1062,28 @@ const proc: drawActorSprite (inout visualStats: stats, in engineState: state,
         else
           body := litMaterial(3, 16, FALSE, screen.depth, screen.x, screen.y);
           rect(screen.x - width mdiv 2, screen.y - height mdiv 2,
-              width, height, scaledColor(body, 46));
+              width, height, scaledColor(body, 38));
           rect(screen.x - width * 3 mdiv 8, screen.y - height * 3 mdiv 8,
               width * 3 mdiv 4, height * 5 mdiv 8, body);
+          rect(screen.x - width mdiv 3, screen.y - height * 9 mdiv 20,
+              width * 2 mdiv 3, height mdiv 5, scaledColor(PANEL_BLACK, 210));
+          rect(screen.x - width mdiv 2, screen.y - height mdiv 6,
+              width mdiv 4, height mdiv 3, scaledColor(METAL_GREY, 118));
+          rect(screen.x + width mdiv 4, screen.y - height mdiv 6,
+              width mdiv 4, height mdiv 3, scaledColor(METAL_GREY, 118));
           rect(screen.x - width mdiv 3, screen.y + height mdiv 10,
-              width * 2 mdiv 3, height mdiv 5, scaledColor(METAL_RED, 88));
+              width * 2 mdiv 3, height mdiv 5, scaledColor(METAL_RED, 92));
           rect(screen.x - width mdiv 5, screen.y - height mdiv 4,
-              width mdiv 6, height mdiv 8, MONSTER_HOT);
+              width mdiv 6, height mdiv 8, scaledColor(MONSTER_HOT, glowShift));
           rect(screen.x + width mdiv 12, screen.y - height mdiv 4,
-              width mdiv 6, height mdiv 8, MONSTER_HOT);
+              width mdiv 6, height mdiv 8, scaledColor(MONSTER_HOT, glowShift));
+          rect(screen.x - width * 3 mdiv 8, screen.y + height mdiv 3,
+              width mdiv 5, height mdiv 4, scaledColor(PANEL_BLACK, 210));
+          rect(screen.x + width mdiv 5, screen.y + height mdiv 3,
+              width mdiv 5, height mdiv 4, scaledColor(PANEL_BLACK, 210));
+          lineTo(screen.x + width mdiv 3, screen.y + poseShift,
+              screen.x + width * 2 mdiv 3, screen.y + height mdiv 4,
+              scaledColor(METAL_RED, 130));
         end if;
       elsif actorData.kind = KIND_HEALTH_PICKUP then
         rect(screen.x - width mdiv 3, screen.y - height mdiv 3,
@@ -1029,6 +1137,54 @@ const proc: drawActors (inout visualStats: stats, in engineState: state) is func
     end for;
   end func;
 
+const proc: drawKeyCardIcon (in integer: x, in integer: y, in color: keyColor,
+    in boolean: owned) is func
+  local
+    var color: frameCol is color.value;
+    var color: fillCol is color.value;
+  begin
+    frameCol := scaledColor(HUD_PANEL_LIGHT, 70);
+    fillCol := scaledColor(keyColor, 30);
+    if owned then
+      frameCol := scaledColor(keyColor, 130);
+      fillCol := keyColor;
+    end if;
+    rect(x, y, 38, 26, scaledColor(PANEL_BLACK, 210));
+    rect(x + 3, y + 3, 32, 20, frameCol);
+    rect(x + 8, y + 7, 24, 12, fillCol);
+    rect(x + 25, y + 9, 5, 4, scaledColor(PANEL_BLACK, 180));
+  end func;
+
+const proc: drawWeaponSlotIcon (in integer: x, in integer: y,
+    in integer: slot, in boolean: active) is func
+  local
+    var color: frameCol is color.value;
+    var color: iconCol is color.value;
+  begin
+    frameCol := scaledColor(HUD_PANEL_LIGHT, 58);
+    iconCol := scaledColor(METAL_GREY, 92);
+    if active then
+      frameCol := HUD_AMBER;
+      iconCol := scaledColor(EMISSIVE_AMBER, 118);
+    end if;
+    rect(x, y, 46, 30, scaledColor(PANEL_BLACK, 210));
+    rect(x + 3, y + 3, 40, 24, scaledColor(frameCol, 52));
+    if slot = 1 then
+      rect(x + 12, y + 15, 22, 7, iconCol);
+      rect(x + 25, y + 10, 8, 11, scaledColor(iconCol, 74));
+      rect(x + 8, y + 18, 8, 6, scaledColor(HUD_PANEL_LIGHT, 45));
+    elsif slot = 2 then
+      rect(x + 8, y + 13, 31, 6, iconCol);
+      rect(x + 10, y + 19, 14, 5, scaledColor(iconCol, 70));
+      rect(x + 33, y + 11, 5, 10, scaledColor(HUD_PANEL_LIGHT, 60));
+    else
+      rect(x + 11, y + 9, 9, 16, iconCol);
+      rect(x + 24, y + 9, 9, 16, iconCol);
+      rect(x + 16, y + 13, 17, 5, scaledColor(EMISSIVE_CYAN, 98));
+      rect(x + 19, y + 20, 10, 4, scaledColor(HUD_PANEL_LIGHT, 55));
+    end if;
+  end func;
+
 const proc: drawWeaponAndHud (inout visualStats: stats,
     in engineState: state) is func
   local
@@ -1077,26 +1233,13 @@ const proc: drawWeaponAndHud (inout visualStats: stats,
     drawNumber3(state.health, 196, statusY + 23, 3, HUD_RED);
     drawStatusFace(state, midX - 52, statusY + 5);
     drawNumber3(state.armor, 528, statusY + 23, 3, HUD_GREEN);
-    drawDigit(382, statusY + 20, 1, 2, HUD_TEXT);
-    drawDigit(404, statusY + 20, 1, 3, HUD_TEXT);
-    drawDigit(382, statusY + 50, 1, 5, HUD_TEXT);
-    drawDigit(404, statusY + 50, 1, 7, HUD_TEXT);
-    rect(736, statusY + 18, 30, 24, scaledColor(HUD_RED, 38));
-    rect(776, statusY + 18, 30, 24, scaledColor(EMISSIVE_CYAN, 38));
-    rect(816, statusY + 18, 30, 24, scaledColor(HUD_TEXT, 38));
-    if state.redKey then
-      rect(740, statusY + 22, 22, 16, HUD_RED);
-    end if;
-    if state.blueKey then
-      rect(780, statusY + 22, 22, 16, EMISSIVE_CYAN);
-    end if;
-    if state.yellowKey then
-      rect(820, statusY + 22, 22, 16, HUD_TEXT);
-    end if;
-    drawDigit(858, statusY + 17, state.mapIndex, 2, HUD_TEXT);
-    drawDigit(900, statusY + 17, 1, 2, HUD_AMBER);
-    drawDigit(900, statusY + 47, 2, 2, scaledColor(HUD_TEXT, 80));
-    drawDigit(922, statusY + 47, 3, 2, scaledColor(HUD_TEXT, 80));
+    drawWeaponSlotIcon(375, statusY + 18, 1, TRUE);
+    drawKeyCardIcon(736, statusY + 16, HUD_RED, state.redKey);
+    drawKeyCardIcon(782, statusY + 16, EMISSIVE_CYAN, state.blueKey);
+    drawKeyCardIcon(828, statusY + 16, HUD_TEXT, state.yellowKey);
+    drawWeaponSlotIcon(736, statusY + 48, 1, TRUE);
+    drawWeaponSlotIcon(792, statusY + 48, 2, state.ammo >= 18);
+    drawWeaponSlotIcon(848, statusY + 48, 3, state.blueKey or state.yellowKey);
     if state.dead then
       rect(240, 202, 480, 80, scaledColor(PANEL_BLACK, 225));
       rect(250, 212, 460, 60, HUD_RED);
@@ -1104,7 +1247,7 @@ const proc: drawWeaponAndHud (inout visualStats: stats,
       rect(250, 202, 460, 80, scaledColor(PANEL_BLACK, 225));
       rect(262, 214, 436, 56, HUD_GREEN);
     end if;
-    stats.hudElements +:= 32;
+    stats.hudElements +:= 42;
     stats.entropy +:= healthWidth * 7 + armorWidth * 5 + state.mapIndex * 31 +
         ord(state.redKey) * 53 + ord(state.blueKey) * 59 +
         ord(state.yellowKey) * 61;
@@ -1587,7 +1730,7 @@ const proc: runSmoke (in integer: requestedFrames, in string: startMap) is func
       stats.lightSamples := stats.emissiveSurfaces * 31;
       stats.actorsSubmitted := length(actors);
       stats.actorsVisible := length(actors);
-      stats.hudElements := 32;
+      stats.hudElements := 42;
       stats.entropy := stats.depthWrites + stats.textureSamples +
           stats.lightSamples + frame * 97 + state.mapIndex * 211;
       stats.flatColumnRegression := FALSE;
@@ -1618,6 +1761,9 @@ const proc: runSmoke (in integer: requestedFrames, in string: startMap) is func
     writeln("[engine] scripted_kills=" <& scriptedKills);
     writeln("[engine] scripted_transition_map=" <&
         episodeMapToken(scriptState.mapIndex));
+    writeln("[engine] monster_sprite_detail=procedural_silhouettes");
+    writeln("[engine] hud_contract=ammo,health,armor,face,key_icons,weapon_icons");
+    writeln("[engine] wall_clip_ready=TRUE");
     writeln("[engine] engine_smoke_ready=TRUE");
     writeln("[engine] episode_smoke_ready=TRUE");
   end func;
@@ -1633,6 +1779,8 @@ const proc: runVisualSmoke (in integer: requestedFrames, in string: startMap) is
     writeln("[engine] visual_smoke_renderer=projected_surfaces");
     writeln("[engine] visual_smoke_assets=generated_replacement_pack");
     writeln("[engine] visual_smoke_episode=classic_generated");
+    writeln("[engine] visual_smoke_hud=key_icons_weapon_icons");
+    writeln("[engine] visual_smoke_wall_clip=near_plane_clamped");
     writeln("[engine] visual_smoke_ready=TRUE");
   end func;
 

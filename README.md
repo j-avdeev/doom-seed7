@@ -1,6 +1,6 @@
 # Doom3 Seed7
 
-Doom3 Seed7 is a Seed7-core generated-assets shooter for the browser, with an id Tech 4 compatibility track kept alive through diagnostics. The active GitHub Pages path now launches a Classic DOOM-like generated episode with three maps, generated map metadata, projected surfaces, simple monster AI, keys/locked doors, pickups, map exits, weapon/HUD composition, and deterministic smoke checks. It does not ship commercial Doom, Doom 3, WAD, pk4, texture, sprite, sound, model, or map data.
+Doom3 Seed7 is a Seed7-core generated-assets shooter for the browser, with an id Tech 4 compatibility track kept alive through diagnostics. The active GitHub Pages path now launches a Classic DOOM-like generated episode with three maps, generated map metadata, projected surfaces with near-plane wall clipping, simple monster AI, keys/locked doors, pickups, map exits, procedural monster silhouettes, key/weapon HUD icons, and deterministic smoke checks. It does not ship commercial Doom, Doom 3, WAD, pk4, texture, sprite, sound, model, or map data.
 
 The Doom 3 GPL source release and dhewm3 are references for behavior, compatibility direction, and data policy:
 
@@ -63,6 +63,8 @@ engine_smoke_ready=TRUE
 episode_smoke_ready=TRUE
 episode_maps=3
 monster_types=3
+hud_contract=ammo,health,armor,face,key_icons,weapon_icons
+wall_clip_ready=TRUE
 visual_smoke_ready=TRUE
 ```
 
