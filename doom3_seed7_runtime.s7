@@ -3,15 +3,13 @@
 (*                                                                  *)
 (*  Doom3 Seed7 runtime entrypoint.                                 *)
 (*                                                                  *)
-(*  This is the browser/native launch entry for the current            *)
-(*  Stage-1/2 readiness runtime path. It delegates to the current      *)
-(*  integrated playable-loop module while keeping a clean top-level      *)
-(*  runtime name for end users and launchers.                         *)
+(*  This is the browser/native launch entry for the playable           *)
+(*  WebAssembly game path. Diagnostic probe modules remain available   *)
+(*  separately, but this entry opens the generated-art graphical game. *)
 (*                                                                  *)
 (*  Note: this project is still a clean-room, asset-backed                *)
 (*  compatibility/probing implementation and intentionally avoids any    *)
 (*  bundled commercial data.                                         *)
 (********************************************************************)
 
-$ include "doom3_seed7_playloop.s7";
-
+$ include "doom3_seed7_game.s7";

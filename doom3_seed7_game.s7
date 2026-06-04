@@ -1,0 +1,831 @@
+(********************************************************************)
+(*  doom3_seed7_game.s7                                             *)
+(*                                                                  *)
+(*  Browser-first Doom 3 style playable runtime for Seed7.          *)
+(*  This module uses generated art only. Retail Doom 3 data can be  *)
+(*  mounted by the launcher for later compatibility work, but it is *)
+(*  not required for this playable WebAssembly path.                 *)
+(********************************************************************)
+
+$ include "seed7_05.s7i";
+$ include "draw.s7i";
+$ include "keybd.s7i";
+$ include "float.s7i";
+$ include "math.s7i";
+$ include "duration.s7i";
+
+const integer: SCREEN_WIDTH  is 640;
+const integer: SCREEN_HEIGHT is 400;
+const integer: MAP_WIDTH     is 24;
+const integer: MAP_HEIGHT    is 24;
+const float:   MOVE_SPEED    is 0.075;
+const float:   ROT_SPEED     is 0.055;
+
+const array array integer: UAC_MAP is [] (
+    [] (1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1),
+    [] (1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,3,1),
+    [] (1,0,2,2,2,0,0,0,0,4,4,4,4,0,0,0,2,2,2,0,0,0,3,1),
+    [] (1,0,2,0,2,0,0,0,0,4,0,0,4,0,0,0,2,0,2,0,0,0,3,1),
+    [] (1,0,2,0,2,0,0,0,0,4,0,0,4,0,0,0,2,0,2,0,0,0,3,1),
+    [] (1,0,2,0,2,2,2,0,0,4,0,0,4,0,0,0,2,0,2,2,2,0,3,1),
+    [] (1,0,0,0,0,0,2,0,0,4,0,0,4,0,0,0,0,0,0,0,2,0,3,1),
+    [] (1,0,0,0,0,0,2,0,0,4,0,0,4,0,0,0,0,0,0,0,2,0,0,1),
+    [] (1,5,5,0,0,0,2,0,0,4,4,0,4,4,0,0,0,5,5,0,2,0,0,1),
+    [] (1,5,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,5,0,0,0,0,1),
+    [] (1,5,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,5,0,0,0,0,1),
+    [] (1,5,0,0,2,2,2,0,0,0,3,3,3,0,0,0,2,2,2,0,0,0,0,1),
+    [] (1,0,0,0,2,0,2,0,0,0,3,0,3,0,0,0,2,0,2,0,0,0,0,1),
+    [] (1,0,0,0,2,0,2,0,0,0,3,0,3,0,0,0,2,0,2,0,0,0,0,1),
+    [] (1,0,0,0,2,2,2,0,0,0,3,0,3,0,0,0,2,2,2,0,0,0,0,1),
+    [] (1,0,0,0,0,0,0,0,0,0,3,0,3,0,0,0,0,0,0,0,0,5,5,1),
+    [] (1,0,4,4,4,4,0,0,0,0,3,3,3,0,0,0,4,4,4,4,0,5,0,1),
+    [] (1,0,4,0,0,4,0,0,0,0,0,0,0,0,0,0,4,0,0,4,0,5,0,1),
+    [] (1,0,4,0,0,4,0,0,2,2,2,0,2,2,2,0,4,0,0,4,0,5,0,1),
+    [] (1,0,4,4,4,4,0,0,2,0,0,0,0,0,2,0,4,4,4,4,0,5,0,1),
+    [] (1,0,0,0,0,0,0,0,2,0,0,0,0,0,2,0,0,0,0,0,0,5,0,1),
+    [] (1,3,3,3,3,3,3,0,2,2,2,0,2,2,2,0,3,3,3,3,3,5,0,1),
+    [] (1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1),
+    [] (1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1)
+  );
+
+const color: VOID_COLOR       is color(300, 450, 520);
+const color: CEILING_BASE     is color(1100, 1500, 1900);
+const color: CEILING_RIB      is color(3600, 4600, 5600);
+const color: FLOOR_BASE       is color(2900, 2500, 2100);
+const color: FLOOR_HOT        is color(12600, 8600, 4200);
+const color: HUD_GREEN        is color(16500, 51000, 38000);
+const color: HUD_AMBER        is color(54000, 28500, 5800);
+const color: HUD_RED          is color(48000, 5200, 2600);
+const color: HUD_PANEL        is color(3600, 4600, 5200);
+const color: CROSSHAIR        is color(25000, 51000, 59000);
+const color: METAL_DARK       is color(3200, 3900, 4500);
+const color: METAL_MID        is color(9800, 11200, 12600);
+const color: METAL_LIGHT      is color(26000, 27000, 26000);
+const color: MONSTER_SHADOW   is color(6200, 1700, 1300);
+const color: MONSTER_BODY     is color(27000, 6900, 3800);
+const color: MONSTER_HOT      is color(58000, 14600, 5300);
+
+const type: gameConfig is new struct
+    var boolean: showHelp is FALSE;
+    var integer: smokeFrames is 0;
+    var string: dataPath is "";
+    var string: startMap is "game/mars_city1";
+  end struct;
+
+const type: gameState is new struct
+    var float: posX is 2.5;
+    var float: posY is 9.5;
+    var float: dirX is 1.0;
+    var float: dirY is 0.0;
+    var float: planeX is 0.0;
+    var float: planeY is -0.66;
+    var char: lastKey is ' ';
+    var integer: health is 100;
+    var integer: armor is 38;
+    var integer: ammo is 24;
+    var integer: shotCooldown is 0;
+    var integer: shotFlash is 0;
+    var boolean: monster1Alive is TRUE;
+    var boolean: monster2Alive is TRUE;
+    var boolean: monster3Alive is TRUE;
+    var boolean: pickup1Taken is FALSE;
+    var boolean: pickup2Taken is FALSE;
+  end struct;
+
+const func color: scaledColor (in color: col, in integer: percent) is func
+  result
+    var color: outCol is color.value;
+  begin
+    outCol.redLight   := col.redLight   * percent mdiv 100;
+    outCol.greenLight := col.greenLight * percent mdiv 100;
+    outCol.blueLight  := col.blueLight  * percent mdiv 100;
+  end func;
+
+const func color: wallBaseColor (in integer: wallId) is func
+  result
+    var color: col is color.value;
+  begin
+    case wallId of
+      when {1}: col := color(21000, 5400, 3600);
+      when {2}: col := color(7600, 21000, 15000);
+      when {3}: col := color(5200, 9000, 26000);
+      when {4}: col := color(29000, 28500, 25500);
+      when {5}: col := color(52000, 23000, 4200);
+      otherwise: col := color(15000, 15000, 15000);
+    end case;
+  end func;
+
+const func integer: clampPercent (in integer: value) is func
+  result
+    var integer: clamped is 0;
+  begin
+    clamped := value;
+    if clamped < 8 then
+      clamped := 8;
+    elsif clamped > 115 then
+      clamped := 115;
+    end if;
+  end func;
+
+const func integer: distancePercent (in float: distance) is func
+  result
+    var integer: percent is 100;
+  begin
+    if distance > 18.0 then
+      percent := 16;
+    elsif distance > 14.0 then
+      percent := 22;
+    elsif distance > 10.0 then
+      percent := 31;
+    elsif distance > 7.0 then
+      percent := 43;
+    elsif distance > 4.5 then
+      percent := 58;
+    elsif distance > 2.8 then
+      percent := 76;
+    else
+      percent := 98;
+    end if;
+  end func;
+
+const func integer: flashlightPercent (in integer: screenX) is func
+  result
+    var integer: percent is 0;
+  local
+    var integer: dist is 0;
+  begin
+    dist := abs(screenX - SCREEN_WIDTH mdiv 2);
+    if dist < 46 then
+      percent := 32;
+    elsif dist < 92 then
+      percent := 18;
+    elsif dist < 150 then
+      percent := 8;
+    else
+      percent := 0;
+    end if;
+  end func;
+
+const func color: shadedWallColor (in integer: wallId, in integer: side,
+    in float: distance, in integer: screenX) is func
+  result
+    var color: col is color.value;
+  local
+    var integer: percent is 0;
+  begin
+    percent := distancePercent(distance) + flashlightPercent(screenX);
+    if side = 1 then
+      percent := percent * 72 mdiv 100;
+    end if;
+    col := scaledColor(wallBaseColor(wallId), clampPercent(percent));
+  end func;
+
+const func boolean: isEmptyTile (in integer: mapX, in integer: mapY) is func
+  result
+    var boolean: empty is FALSE;
+  begin
+    if (mapX >= 0) and (mapX < MAP_WIDTH) and
+        (mapY >= 0) and (mapY < MAP_HEIGHT) then
+      empty := UAC_MAP[succ(mapX)][succ(mapY)] = 0;
+    end if;
+  end func;
+
+const func boolean: hasLineOfSight (in float: posX, in float: posY,
+    in float: targetX, in float: targetY) is func
+  result
+    var boolean: visible is TRUE;
+  local
+    var float: dx is 0.0;
+    var float: dy is 0.0;
+    var float: sample is 0.0;
+    var integer: steps is 0;
+    var integer: sampleIdx is 1;
+  begin
+    dx := targetX - posX;
+    dy := targetY - posY;
+    steps := trunc((abs(dx) + abs(dy)) * 10.0) + 1;
+    while sampleIdx < steps and visible do
+      sample := flt(sampleIdx) / flt(steps);
+      if not isEmptyTile(trunc(posX + dx * sample),
+          trunc(posY + dy * sample)) then
+        visible := FALSE;
+      end if;
+      incr(sampleIdx);
+    end while;
+  end func;
+
+const func boolean: targetInReticle (in gameState: state,
+    in float: targetX, in float: targetY) is func
+  result
+    var boolean: targeted is FALSE;
+  local
+    var float: dx is 0.0;
+    var float: dy is 0.0;
+    var float: forward is 0.0;
+    var float: sideways is 0.0;
+  begin
+    dx := targetX - state.posX;
+    dy := targetY - state.posY;
+    forward := dx * state.dirX + dy * state.dirY;
+    sideways := abs(dx * state.dirY - dy * state.dirX);
+    targeted := forward > 0.25 and sideways / forward < 0.23 and
+        hasLineOfSight(state.posX, state.posY, targetX, targetY);
+  end func;
+
+const proc: drawBackground is func
+  local
+    var integer: y is 0;
+    var integer: band is 0;
+  begin
+    rect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT mdiv 2, CEILING_BASE);
+    rect(0, SCREEN_HEIGHT mdiv 2, SCREEN_WIDTH, SCREEN_HEIGHT mdiv 2,
+        FLOOR_BASE);
+    for y range 0 to SCREEN_HEIGHT mdiv 2 step 20 do
+      band := 100 - y mdiv 6;
+      if band < 35 then
+        band := 35;
+      end if;
+      rect(0, y, SCREEN_WIDTH, 2, scaledColor(CEILING_RIB, band));
+    end for;
+    for y range SCREEN_HEIGHT mdiv 2 to pred(SCREEN_HEIGHT) step 18 do
+      band := 28 + (y - SCREEN_HEIGHT mdiv 2) mdiv 5;
+      rect(0, y, SCREEN_WIDTH, 2, scaledColor(FLOOR_HOT, band));
+    end for;
+    rect(SCREEN_WIDTH mdiv 2 - 72, SCREEN_HEIGHT mdiv 2 - 10, 144, 20,
+        scaledColor(CROSSHAIR, 10));
+  end func;
+
+const proc: drawWallColumn (in integer: x, in integer: drawStart,
+    in integer: drawEnd, in integer: wallId, in integer: side,
+    in float: distance) is func
+  local
+    var color: col is color.value;
+    var color: trim is color.value;
+    var integer: height is 0;
+    var integer: detailY is 0;
+  begin
+    height := succ(drawEnd - drawStart);
+    col := shadedWallColor(wallId, side, distance, x);
+    if height > 0 then
+      rect(x, drawStart, 1, height, col);
+      if x rem 14 = 0 then
+        trim := scaledColor(col, 135);
+        rect(x, drawStart, 1, height, trim);
+      elsif x rem 17 = 0 then
+        rect(x, drawStart, 1, height, scaledColor(col, 58));
+      end if;
+      if height > 60 then
+        detailY := drawStart + height mdiv 3;
+        rect(x, detailY, 1, 2, scaledColor(col, 155));
+        detailY := drawStart + height * 2 mdiv 3;
+        rect(x, detailY, 1, 2, scaledColor(col, 68));
+      end if;
+      if wallId = 5 and x rem 5 = 0 then
+        rect(x, drawStart + height mdiv 2, 1, 4, HUD_AMBER);
+      end if;
+    end if;
+  end func;
+
+const proc: drawWorld (in gameState: state) is func
+  local
+    var integer: x is 0;
+    var float: cameraX is 0.0;
+    var float: rayDirX is 0.0;
+    var float: rayDirY is 0.0;
+    var integer: mapX is 0;
+    var integer: mapY is 0;
+    var float: deltaDistX is 0.0;
+    var float: deltaDistY is 0.0;
+    var float: sideDistX is 0.0;
+    var float: sideDistY is 0.0;
+    var integer: stepX is 0;
+    var integer: stepY is 0;
+    var integer: hit is 0;
+    var integer: side is 0;
+    var float: perpWallDist is 0.0;
+    var integer: lineHeight is 0;
+    var integer: drawStart is 0;
+    var integer: drawEnd is 0;
+    var integer: wallId is 0;
+  begin
+    for x range 0 to pred(SCREEN_WIDTH) do
+      cameraX := 2.0 * flt(x) / flt(SCREEN_WIDTH) - 1.0;
+      rayDirX := state.dirX + state.planeX * cameraX;
+      rayDirY := state.dirY + state.planeY * cameraX;
+      mapX := trunc(state.posX);
+      mapY := trunc(state.posY);
+
+      if rayDirX <> 0.0 then
+        deltaDistX := abs(1.0 / rayDirX);
+      else
+        deltaDistX := 1.0e30;
+      end if;
+      if rayDirY <> 0.0 then
+        deltaDistY := abs(1.0 / rayDirY);
+      else
+        deltaDistY := 1.0e30;
+      end if;
+
+      if rayDirX < 0.0 then
+        stepX := -1;
+        sideDistX := (state.posX - flt(mapX)) * deltaDistX;
+      else
+        stepX := 1;
+        sideDistX := (flt(mapX) + 1.0 - state.posX) * deltaDistX;
+      end if;
+      if rayDirY < 0.0 then
+        stepY := -1;
+        sideDistY := (state.posY - flt(mapY)) * deltaDistY;
+      else
+        stepY := 1;
+        sideDistY := (flt(mapY) + 1.0 - state.posY) * deltaDistY;
+      end if;
+
+      hit := 0;
+      while hit = 0 do
+        if sideDistX < sideDistY then
+          sideDistX +:= deltaDistX;
+          mapX +:= stepX;
+          side := 0;
+        else
+          sideDistY +:= deltaDistY;
+          mapY +:= stepY;
+          side := 1;
+        end if;
+        if mapX >= 0 and mapX < MAP_WIDTH and
+            mapY >= 0 and mapY < MAP_HEIGHT then
+          if UAC_MAP[succ(mapX)][succ(mapY)] <> 0 then
+            hit := 1;
+          end if;
+        else
+          hit := 1;
+        end if;
+      end while;
+
+      if side = 0 then
+        perpWallDist := sideDistX - deltaDistX;
+      else
+        perpWallDist := sideDistY - deltaDistY;
+      end if;
+      if perpWallDist < 0.05 then
+        perpWallDist := 0.05;
+      end if;
+
+      lineHeight := trunc(flt(SCREEN_HEIGHT) / perpWallDist);
+      drawStart := -lineHeight mdiv 2 + SCREEN_HEIGHT mdiv 2;
+      if drawStart < 0 then
+        drawStart := 0;
+      end if;
+      drawEnd := lineHeight mdiv 2 + SCREEN_HEIGHT mdiv 2;
+      if drawEnd >= SCREEN_HEIGHT then
+        drawEnd := pred(SCREEN_HEIGHT);
+      end if;
+
+      if mapX >= 0 and mapX < MAP_WIDTH and
+          mapY >= 0 and mapY < MAP_HEIGHT then
+        wallId := UAC_MAP[succ(mapX)][succ(mapY)];
+      else
+        wallId := 1;
+      end if;
+      drawWallColumn(x, drawStart, drawEnd, wallId, side, perpWallDist);
+    end for;
+  end func;
+
+const proc: drawSprite (in gameState: state, in float: spriteWorldX,
+    in float: spriteWorldY, in color: body, in color: glow,
+    in boolean: visible, in integer: kind) is func
+  local
+    var float: spriteX is 0.0;
+    var float: spriteY is 0.0;
+    var float: invDet is 0.0;
+    var float: transformX is 0.0;
+    var float: transformY is 0.0;
+    var integer: screenX is 0;
+    var integer: spriteHeight is 0;
+    var integer: spriteWidth is 0;
+    var integer: xStart is 0;
+    var integer: xEnd is 0;
+    var integer: yStart is 0;
+    var integer: yEnd is 0;
+  begin
+    if visible and hasLineOfSight(state.posX, state.posY,
+        spriteWorldX, spriteWorldY) then
+      spriteX := spriteWorldX - state.posX;
+      spriteY := spriteWorldY - state.posY;
+      invDet := 1.0 / (state.planeX * state.dirY - state.dirX * state.planeY);
+      transformX := invDet * (state.dirY * spriteX - state.dirX * spriteY);
+      transformY := invDet * (-state.planeY * spriteX + state.planeX * spriteY);
+      if transformY > 0.25 then
+        screenX := trunc(flt(SCREEN_WIDTH) * (0.5 + transformX / transformY / 2.0));
+        spriteHeight := abs(trunc(flt(SCREEN_HEIGHT) / transformY));
+        if kind = 1 then
+          spriteWidth := spriteHeight mdiv 2;
+        else
+          spriteWidth := spriteHeight mdiv 4;
+        end if;
+        if spriteWidth < 8 then
+          spriteWidth := 8;
+        end if;
+        xStart := screenX - spriteWidth mdiv 2;
+        xEnd := screenX + spriteWidth mdiv 2;
+        yStart := SCREEN_HEIGHT mdiv 2 - spriteHeight mdiv 2;
+        yEnd := SCREEN_HEIGHT mdiv 2 + spriteHeight mdiv 2;
+        if xStart < 0 then
+          xStart := 0;
+        end if;
+        if xEnd >= SCREEN_WIDTH then
+          xEnd := pred(SCREEN_WIDTH);
+        end if;
+        if yStart < 0 then
+          yStart := 0;
+        end if;
+        if yEnd >= SCREEN_HEIGHT then
+          yEnd := pred(SCREEN_HEIGHT);
+        end if;
+        if xEnd > xStart and yEnd > yStart then
+          if kind = 1 then
+            rect(xStart, yStart, succ(xEnd - xStart), succ(yEnd - yStart),
+                MONSTER_SHADOW);
+            rect(xStart + spriteWidth mdiv 8, yStart + spriteHeight mdiv 9,
+                succ(xEnd - xStart) * 3 mdiv 4,
+                succ(yEnd - yStart) * 3 mdiv 4, body);
+            rect(screenX - spriteWidth mdiv 7, yStart + spriteHeight mdiv 5,
+                spriteWidth mdiv 3, spriteHeight mdiv 6, glow);
+            rect(screenX - spriteWidth mdiv 4, yEnd - spriteHeight mdiv 4,
+                spriteWidth mdiv 2, spriteHeight mdiv 10,
+                scaledColor(body, 55));
+          else
+            rect(xStart, yStart, succ(xEnd - xStart), succ(yEnd - yStart),
+                scaledColor(body, 70));
+            rect(xStart + spriteWidth mdiv 5, yStart + spriteHeight mdiv 6,
+                spriteWidth * 3 mdiv 5, spriteHeight mdiv 3, glow);
+          end if;
+        end if;
+      end if;
+    end if;
+  end func;
+
+const proc: drawActors (in gameState: state) is func
+  begin
+    drawSprite(state, 7.4, 10.5, MONSTER_BODY, MONSTER_HOT,
+        state.monster1Alive, 1);
+    drawSprite(state, 13.5, 12.3, MONSTER_BODY, MONSTER_HOT,
+        state.monster2Alive, 1);
+    drawSprite(state, 18.5, 17.5, MONSTER_BODY, MONSTER_HOT,
+        state.monster3Alive, 1);
+    drawSprite(state, 5.6, 8.6, HUD_GREEN, CROSSHAIR,
+        not state.pickup1Taken, 2);
+    drawSprite(state, 9.4, 18.4, HUD_AMBER, HUD_RED,
+        not state.pickup2Taken, 2);
+  end func;
+
+const proc: drawCrosshair is func
+  local
+    var integer: cx is 0;
+    var integer: cy is 0;
+  begin
+    cx := SCREEN_WIDTH mdiv 2;
+    cy := SCREEN_HEIGHT mdiv 2;
+    rect(cx - 18, cy, 13, 2, CROSSHAIR);
+    rect(cx + 6, cy, 13, 2, CROSSHAIR);
+    rect(cx, cy - 18, 2, 13, CROSSHAIR);
+    rect(cx, cy + 6, 2, 13, CROSSHAIR);
+    rect(cx - 1, cy - 1, 4, 4, scaledColor(CROSSHAIR, 56));
+  end func;
+
+const proc: drawWeapon (in gameState: state) is func
+  local
+    var integer: midX is 0;
+    var integer: baseY is 0;
+  begin
+    midX := SCREEN_WIDTH mdiv 2;
+    baseY := SCREEN_HEIGHT - 130;
+    rect(midX - 70, baseY + 58, 140, 52, METAL_DARK);
+    rect(midX - 48, baseY + 34, 96, 42, METAL_MID);
+    rect(midX - 28, baseY + 12, 56, 38, METAL_LIGHT);
+    rect(midX - 12, baseY - 8, 24, 30, scaledColor(METAL_LIGHT, 72));
+    rect(midX - 5, baseY - 28, 10, 30, scaledColor(CROSSHAIR, 60));
+    rect(midX - 60, baseY + 47, 20, 10, HUD_AMBER);
+    rect(midX + 40, baseY + 47, 20, 10, HUD_AMBER);
+    if state.shotFlash > 0 then
+      rect(midX - 22, baseY - 48, 44, 20, HUD_AMBER);
+      rect(midX - 10, baseY - 66, 20, 18, MONSTER_HOT);
+      rect(midX - 4, baseY - 82, 8, 14, scaledColor(CROSSHAIR, 90));
+    end if;
+  end func;
+
+const proc: drawHud (in gameState: state) is func
+  local
+    var integer: healthWidth is 0;
+    var integer: ammoWidth is 0;
+    var integer: armorWidth is 0;
+  begin
+    healthWidth := state.health;
+    if healthWidth > 100 then
+      healthWidth := 100;
+    end if;
+    ammoWidth := state.ammo * 4;
+    if ammoWidth > 116 then
+      ammoWidth := 116;
+    end if;
+    armorWidth := state.armor;
+    if armorWidth > 100 then
+      armorWidth := 100;
+    end if;
+    rect(16, SCREEN_HEIGHT - 38, 134, 20, HUD_PANEL);
+    rect(20, SCREEN_HEIGHT - 33, healthWidth, 10, HUD_RED);
+    rect(20 + healthWidth, SCREEN_HEIGHT - 33, 100 - healthWidth, 10,
+        scaledColor(HUD_RED, 22));
+    rect(164, SCREEN_HEIGHT - 38, 118, 20, HUD_PANEL);
+    rect(168, SCREEN_HEIGHT - 33, armorWidth, 10, HUD_GREEN);
+    rect(SCREEN_WIDTH - 150, SCREEN_HEIGHT - 38, 134, 20, HUD_PANEL);
+    rect(SCREEN_WIDTH - 146, SCREEN_HEIGHT - 33, ammoWidth, 10, HUD_AMBER);
+    rect(SCREEN_WIDTH - 42, SCREEN_HEIGHT - 33, 22, 10, CROSSHAIR);
+  end func;
+
+const proc: renderFrame (in gameState: state) is func
+  begin
+    drawBackground;
+    drawWorld(state);
+    drawActors(state);
+    drawCrosshair;
+    drawWeapon(state);
+    drawHud(state);
+    flushGraphic;
+  end func;
+
+const proc: rotatePlayer (inout gameState: state, in float: amount) is func
+  local
+    var float: oldDirX is 0.0;
+    var float: oldPlaneX is 0.0;
+  begin
+    oldDirX := state.dirX;
+    state.dirX := state.dirX * cos(amount) - state.dirY * sin(amount);
+    state.dirY := oldDirX * sin(amount) + state.dirY * cos(amount);
+    oldPlaneX := state.planeX;
+    state.planeX := state.planeX * cos(amount) - state.planeY * sin(amount);
+    state.planeY := oldPlaneX * sin(amount) + state.planeY * cos(amount);
+  end func;
+
+const proc: movePlayer (inout gameState: state, in float: amount) is func
+  local
+    var integer: newMapX is 0;
+    var integer: newMapY is 0;
+  begin
+    newMapX := trunc(state.posX + state.dirX * amount);
+    newMapY := trunc(state.posY);
+    if isEmptyTile(newMapX, newMapY) then
+      state.posX +:= state.dirX * amount;
+    end if;
+    newMapX := trunc(state.posX);
+    newMapY := trunc(state.posY + state.dirY * amount);
+    if isEmptyTile(newMapX, newMapY) then
+      state.posY +:= state.dirY * amount;
+    end if;
+  end func;
+
+const proc: collectPickups (inout gameState: state) is func
+  begin
+    if not state.pickup1Taken and
+        abs(state.posX - 5.6) < 0.45 and abs(state.posY - 8.6) < 0.45 then
+      state.pickup1Taken := TRUE;
+      state.health +:= 18;
+      if state.health > 100 then
+        state.health := 100;
+      end if;
+    end if;
+    if not state.pickup2Taken and
+        abs(state.posX - 9.4) < 0.45 and abs(state.posY - 18.4) < 0.45 then
+      state.pickup2Taken := TRUE;
+      state.ammo +:= 12;
+      if state.ammo > 42 then
+        state.ammo := 42;
+      end if;
+    end if;
+  end func;
+
+const proc: fireWeapon (inout gameState: state) is func
+  begin
+    if state.ammo > 0 and state.shotCooldown = 0 then
+      decr(state.ammo);
+      state.shotCooldown := 8;
+      state.shotFlash := 4;
+      if state.monster1Alive and targetInReticle(state, 7.4, 10.5) then
+        state.monster1Alive := FALSE;
+      elsif state.monster2Alive and targetInReticle(state, 13.5, 12.3) then
+        state.monster2Alive := FALSE;
+      elsif state.monster3Alive and targetInReticle(state, 18.5, 17.5) then
+        state.monster3Alive := FALSE;
+      end if;
+    end if;
+  end func;
+
+const proc: updateInput (inout gameState: state) is func
+  local
+    var char: ch is ' ';
+  begin
+    while inputReady(KEYBOARD) do
+      ch := getc(KEYBOARD);
+      if ch <> KEY_NONE then
+        state.lastKey := ch;
+      end if;
+    end while;
+    if (state.lastKey = KEY_UP) and buttonPressed(KEYBOARD, KEY_UP) then
+      movePlayer(state, MOVE_SPEED);
+    elsif (state.lastKey = KEY_DOWN) and buttonPressed(KEYBOARD, KEY_DOWN) then
+      movePlayer(state, -MOVE_SPEED);
+    elsif (state.lastKey = KEY_RIGHT) and buttonPressed(KEYBOARD, KEY_RIGHT) then
+      rotatePlayer(state, -ROT_SPEED);
+    elsif (state.lastKey = KEY_LEFT) and buttonPressed(KEYBOARD, KEY_LEFT) then
+      rotatePlayer(state, ROT_SPEED);
+    end if;
+    if ((state.lastKey = ' ') and buttonPressed(KEYBOARD, ' ')) or
+        ((state.lastKey = KEY_MOUSE1) and buttonPressed(KEYBOARD, KEY_MOUSE1)) then
+      fireWeapon(state);
+    end if;
+    collectPickups(state);
+    if state.shotCooldown > 0 then
+      decr(state.shotCooldown);
+    end if;
+    if state.shotFlash > 0 then
+      decr(state.shotFlash);
+    end if;
+  end func;
+
+const func integer: checksumForText (in string: text) is func
+  result
+    var integer: checksum is 0;
+  local
+    var integer: idx is 1;
+  begin
+    while idx <= length(text) do
+      checksum +:= ord(text[idx]) * (idx + 17);
+      incr(idx);
+    end while;
+  end func;
+
+const func string: stateSignature (in gameState: state) is func
+  result
+    var string: signature is "";
+  begin
+    signature := "x=" <& round(state.posX * 100.0) <&
+        ";y=" <& round(state.posY * 100.0) <&
+        ";dx=" <& round(state.dirX * 100.0) <&
+        ";dy=" <& round(state.dirY * 100.0) <&
+        ";health=" <& state.health <&
+        ";ammo=" <& state.ammo <&
+        ";m=" <& ord(state.monster1Alive) <& ord(state.monster2Alive) <&
+        ord(state.monster3Alive) <&
+        ";p=" <& ord(state.pickup1Taken) <& ord(state.pickup2Taken);
+  end func;
+
+const func string: smokeMidRow (in gameState: state) is func
+  result
+    var string: row is "";
+  begin
+    row := "...P";
+    if state.monster1Alive then
+      row &:= "..M";
+    else
+      row &:= "..x";
+    end if;
+    if state.monster2Alive then
+      row &:= "...M";
+    else
+      row &:= "...x";
+    end if;
+    if state.pickup1Taken then
+      row &:= ".+";
+    else
+      row &:= ".i";
+    end if;
+    row &:= "....";
+  end func;
+
+const proc: deterministicStep (inout gameState: state, in integer: frame) is func
+  begin
+    if frame = 1 then
+      movePlayer(state, MOVE_SPEED * 2.0);
+    elsif frame = 2 then
+      fireWeapon(state);
+    elsif frame = 3 then
+      rotatePlayer(state, -ROT_SPEED * 2.0);
+    else
+      movePlayer(state, MOVE_SPEED);
+    end if;
+    collectPickups(state);
+    if state.shotCooldown > 0 then
+      decr(state.shotCooldown);
+    end if;
+    if state.shotFlash > 0 then
+      decr(state.shotFlash);
+    end if;
+  end func;
+
+const proc: runSmoke (in integer: requestedFrames) is func
+  local
+    var gameState: state is gameState.value;
+    var integer: frame is 0;
+    var integer: frames is 0;
+    var integer: frameHash is 0;
+    var string: row is "";
+    var string: hashes is "";
+  begin
+    frames := requestedFrames;
+    if frames <= 0 then
+      frames := 2;
+    end if;
+    writeln("[game] smoke_frames=" <& frames);
+    for frame range 1 to frames do
+      deterministicStep(state, frame);
+      row := smokeMidRow(state);
+      frameHash := checksumForText(row <& stateSignature(state));
+      if hashes <> "" then
+        hashes &:= ">";
+      end if;
+      hashes &:= str(frameHash);
+      writeln("[game] smoke_frame_" <& frame <& " hash=" <& frameHash <&
+          " mid_row=" <& row);
+    end for;
+    writeln("[game] smoke_hashes=" <& hashes);
+    writeln("[game] smoke_state=" <& stateSignature(state));
+    writeln("[game] game_smoke_ready=TRUE");
+  end func;
+
+const proc: runGame is func
+  local
+    var gameState: state is gameState.value;
+    var boolean: quit is FALSE;
+  begin
+    screen(SCREEN_WIDTH, SCREEN_HEIGHT);
+    KEYBOARD := GRAPH_KEYBOARD;
+    repeat
+      renderFrame(state);
+      updateInput(state);
+      if (state.lastKey = KEY_ESC and buttonPressed(KEYBOARD, KEY_ESC)) or
+          state.lastKey = KEY_CLOSE then
+        quit := TRUE;
+      end if;
+      wait(33000 . MICRO_SECONDS);
+    until quit;
+  end func;
+
+const proc: showUsage is func
+  begin
+    writeln("Usage:");
+    writeln("  s7 doom3_seed7_runtime.s7");
+    writeln("  s7 doom3_seed7_runtime.s7 --smoke_frames 2");
+    writeln("  s7 doom3_seed7_runtime.s7 --doom3_data_path <optional-root> --doom3_start_map <map>");
+    writeln("");
+    writeln("Controls: arrow keys move/turn, Space or left mouse fires, ESC quits.");
+    writeln("The browser runtime uses generated Doom 3 style assets and does not bundle retail data.");
+  end func;
+
+const proc: parseArgs (inout gameConfig: config) is func
+  local
+    var array string: args is 0 times "";
+    var integer: argIdx is 1;
+  begin
+    args := argv(PROGRAM);
+    while argIdx <= length(args) do
+      if args[argIdx] = "--help" or args[argIdx] = "-h" then
+        config.showHelp := TRUE;
+      elsif args[argIdx] = "--smoke_frames" and argIdx < length(args) then
+        incr(argIdx);
+        if not succeeds(config.smokeFrames := integer(args[argIdx])) then
+          config.smokeFrames := 2;
+        end if;
+      elsif args[argIdx] = "--doom3_data_path" and argIdx < length(args) then
+        incr(argIdx);
+        config.dataPath := args[argIdx];
+      elsif args[argIdx] = "--doom3_start_map" and argIdx < length(args) then
+        incr(argIdx);
+        config.startMap := args[argIdx];
+      elsif args[argIdx] = "+map" and argIdx < length(args) then
+        incr(argIdx);
+        config.startMap := args[argIdx];
+      elsif args[argIdx] = "+set" and argIdx + 2 <= length(args) then
+        if args[argIdx + 1] = "fs_basepath" then
+          config.dataPath := args[argIdx + 2];
+        elsif args[argIdx + 1] = "fs_game" then
+          config.startMap := args[argIdx + 2];
+        end if;
+        argIdx +:= 2;
+      end if;
+      incr(argIdx);
+    end while;
+  end func;
+
+const proc: main is func
+  local
+    var gameConfig: config is gameConfig.value;
+  begin
+    parseArgs(config);
+    if config.showHelp then
+      showUsage;
+    elsif config.smokeFrames <> 0 then
+      runSmoke(config.smokeFrames);
+    else
+      runGame;
+    end if;
+  end func;

@@ -23,7 +23,7 @@ if (-not (Test-Path "wasm/s7.js") -or -not (Test-Path "wasm/s7.wasm")) {
   python build_s7_wasm.py browser
 }
 
-Write-Host "Starting local static server for Doom3 Seed7 launcher..."
+Write-Host "Starting local static server for Doom3 Seed7 playable launcher..."
 $server = Start-Process -FilePath python -ArgumentList @("-m", "http.server", $Port) -PassThru -WindowStyle Hidden
 Start-Sleep -Seconds 1
 
@@ -34,15 +34,15 @@ try {
   Write-Host "Server running at $url"
   Write-Host "Runtime reachable at $runtimeUrl"
   Write-Host ""
-  Write-Host "Launcher smoke path:"
+  Write-Host "Playable browser smoke path:"
   Write-Host "  1) Open $url"
-  Write-Host "  2) Select legal Doom 3 *.pk4/.zip files"
-  Write-Host "  3) Click 'Run Doom3 Runtime'"
-  Write-Host "  4) Confirm logs show Doom3 runtime startup and no 'Failed to fetch entry'."
+  Write-Host "  2) Optionally select local Doom 3 *.pk4/.zip files"
+  Write-Host "  3) Click 'Launch'"
+  Write-Host "  4) Confirm the game canvas appears with wall geometry, weapon, and HUD."
   Write-Host ""
   Write-Host "For command-line sanity checks, use:"
-  Write-Host "  powershell -ExecutionPolicy Bypass -File .\\tools\\smoke_doom3_seed7.ps1"
-  Write-Host "  node seed7/bin/s7.js -l seed7/lib doom3_seed7_runtime.s7 --help"
+  Write-Host "  powershell -ExecutionPolicy Bypass -File .\\tools\\verify_doom3_seed7_smoke.ps1"
+  Write-Host "  node seed7/bin/s7.js -l seed7/lib doom3_seed7_runtime.s7 --smoke_frames 2"
   Write-Host ""
   if (-not $NoOpen) {
     Start-Process $url | Out-Null
