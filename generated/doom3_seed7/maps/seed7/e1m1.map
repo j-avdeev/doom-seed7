@@ -1,0 +1,47 @@
+"classname" "worldspawn"
+"name" "E1M1 Foundry Gate"
+"episode_map" "e1m1"
+"room_count" "7"
+"rooms" "entry_corridor side_lab red_key_alcove main_hall locked_bulkhead rear_bay exit_switch"
+"door_count" "1"
+"locked_door" "red_key_gate"
+"key" "red"
+"monsters" "rust_trooper ember_crawler rust_trooper"
+"pickups" "health ammo armor red_key"
+"exit" "e1m2"
+{
+  "classname" "info_player_start"
+  "origin" "0 0 -1.45"
+}
+{
+  "classname" "item_key_red"
+  "name" "generated_red_key"
+  "origin" "6.85 0.48 12.5"
+}
+{
+  "classname" "func_door"
+  "name" "red_key_gate"
+  "requires" "red"
+  "origin" "0 1.1 20.0"
+}
+{
+  "classname" "monster_generated"
+  "name" "rust_trooper"
+  "origin" "-1.15 0.62 9.7"
+}
+{
+  "classname" "monster_generated"
+  "name" "ember_crawler"
+  "origin" "6.35 0.54 12.6"
+}
+{
+  "classname" "monster_generated"
+  "name" "rust_trooper_bay_guard"
+  "origin" "0.35 0.62 27.4"
+}
+{
+  "classname" "trigger_exit"
+  "name" "e1m1_exit_switch"
+  "target_map" "e1m2"
+  "origin" "0 0.72 32.0"
+}

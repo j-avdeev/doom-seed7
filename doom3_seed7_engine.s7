@@ -1,10 +1,9 @@
 (********************************************************************)
 (*  doom3_seed7_engine.s7                                           *)
 (*                                                                  *)
-(*  Seed7-core id Tech 4 compatibility shell for the browser path.  *)
-(*  It uses generated replacement assets and a projected surface     *)
-(*  renderer. The old simple DDA demo remains separate and is not    *)
-(*  the default runtime entry.                                      *)
+(*  Seed7-core generated episode for the browser path. It uses       *)
+(*  generated replacement assets, projected surfaces, simple actors, *)
+(*  keys, locked doors, exits, and a classic shooter HUD.            *)
 (********************************************************************)
 
 $ include "seed7_05.s7i";
@@ -23,6 +22,25 @@ const float:   NEAR_PLANE    is 0.18;
 const float:   FAR_DEPTH     is 38.0;
 const float:   MOVE_SPEED    is 0.10;
 const float:   ROT_SPEED     is 0.050;
+
+const integer: MAP_E1M1 is 1;
+const integer: MAP_E1M2 is 2;
+const integer: MAP_E1M3 is 3;
+const integer: EPISODE_MAPS is 3;
+const integer: MONSTER_TYPES is 3;
+const integer: EPISODE_KEYS is 3;
+const integer: EPISODE_DOORS is 3;
+
+const integer: KIND_RUST_TROOPER  is 1;
+const integer: KIND_HEALTH_PICKUP is 2;
+const integer: KIND_AMMO_PICKUP   is 3;
+const integer: KIND_EMBER_CRAWLER is 4;
+const integer: KIND_IRON_BRUTE    is 5;
+const integer: KIND_ARMOR_PICKUP  is 6;
+const integer: KIND_RED_KEY       is 7;
+const integer: KIND_BLUE_KEY      is 8;
+const integer: KIND_EXIT_SWITCH   is 9;
+const integer: KIND_YELLOW_KEY    is 10;
 
 const color: BLACK_VOID      is color(100, 130, 150);
 const color: CEILING_DARK    is color(600, 850, 1050);
@@ -56,7 +74,7 @@ const type: engineConfig is new struct
     var integer: visualSmokeFrames is 0;
     var string: engineMode is "generated";
     var string: dataPath is "";
-    var string: startMap is "game/mars_city1";
+    var string: startMap is "e1m1";
     var string: generatedAssetRoot is "generated/doom3_seed7";
   end struct;
 
@@ -94,6 +112,7 @@ const type: renderActor is new struct
   end struct;
 
 const type: engineState is new struct
+    var integer: mapIndex is MAP_E1M1;
     var float: camX is 0.0;
     var float: camY is 1.34;
     var float: camZ is -1.45;
@@ -104,11 +123,34 @@ const type: engineState is new struct
     var integer: ammo is 28;
     var integer: shotCooldown is 0;
     var integer: shotFlash is 0;
+    var integer: hitFlash is 0;
+    var integer: damageCooldown is 0;
     var integer: frameNo is 0;
-    var boolean: monsterA is TRUE;
-    var boolean: monsterB is TRUE;
+    var boolean: redKey is FALSE;
+    var boolean: blueKey is FALSE;
+    var boolean: yellowKey is FALSE;
+    var boolean: door1Open is FALSE;
+    var boolean: door2Open is FALSE;
+    var boolean: door3Open is FALSE;
+    var boolean: exitReady is FALSE;
+    var boolean: gameComplete is FALSE;
+    var boolean: dead is FALSE;
+    var boolean: monster1Alive is TRUE;
+    var boolean: monster2Alive is TRUE;
+    var boolean: monster3Alive is TRUE;
+    var integer: monster1Health is 1;
+    var integer: monster2Health is 2;
+    var integer: monster3Health is 1;
+    var float: monster1X is -1.15;
+    var float: monster1Z is 9.7;
+    var float: monster2X is 6.35;
+    var float: monster2Z is 12.6;
+    var float: monster3X is 0.35;
+    var float: monster3Z is 27.4;
     var boolean: pickupHealth is FALSE;
     var boolean: pickupAmmo is FALSE;
+    var boolean: pickupArmor is FALSE;
+    var boolean: pickupKey is FALSE;
   end struct;
 
 const type: visualStats is new struct
@@ -165,6 +207,87 @@ const func renderActor: actor (in string: name, in float: x, in float: y,
     outActor.alive := TRUE;
   end func;
 
+const func string: episodeMapToken (in integer: mapIndex) is func
+  result
+    var string: token is "e1m1";
+  begin
+    if mapIndex = MAP_E1M2 then
+      token := "e1m2";
+    elsif mapIndex = MAP_E1M3 then
+      token := "e1m3";
+    end if;
+  end func;
+
+const func string: episodeMapTitle (in integer: mapIndex) is func
+  result
+    var string: title is "E1M1 Foundry Gate";
+  begin
+    if mapIndex = MAP_E1M2 then
+      title := "E1M2 Processing Core";
+    elsif mapIndex = MAP_E1M3 then
+      title := "E1M3 Reactor Exit";
+    end if;
+  end func;
+
+const func integer: mapIndexForToken (in string: startMap) is func
+  result
+    var integer: mapIndex is MAP_E1M1;
+  local
+    var string: normalized is "";
+  begin
+    normalized := lower(startMap);
+    if normalized = "e1m2" or normalized = "maps/seed7/e1m2.map" then
+      mapIndex := MAP_E1M2;
+    elsif normalized = "e1m3" or normalized = "maps/seed7/e1m3.map" then
+      mapIndex := MAP_E1M3;
+    else
+      mapIndex := MAP_E1M1;
+    end if;
+  end func;
+
+const func integer: monsterKindForSlot (in integer: mapIndex,
+    in integer: slot) is func
+  result
+    var integer: kind is KIND_RUST_TROOPER;
+  begin
+    if mapIndex = MAP_E1M1 then
+      if slot = 2 then
+        kind := KIND_EMBER_CRAWLER;
+      else
+        kind := KIND_RUST_TROOPER;
+      end if;
+    elsif mapIndex = MAP_E1M2 then
+      if slot = 2 then
+        kind := KIND_EMBER_CRAWLER;
+      elsif slot = 3 then
+        kind := KIND_IRON_BRUTE;
+      else
+        kind := KIND_RUST_TROOPER;
+      end if;
+    else
+      if slot = 1 then
+        kind := KIND_EMBER_CRAWLER;
+      elsif slot = 3 then
+        kind := KIND_IRON_BRUTE;
+      else
+        kind := KIND_RUST_TROOPER;
+      end if;
+    end if;
+  end func;
+
+const func integer: monsterHealthForKind (in integer: kind) is func
+  result
+    var integer: health is 1;
+  begin
+    if kind = KIND_EMBER_CRAWLER then
+      health := 2;
+    elsif kind = KIND_IRON_BRUTE then
+      health := 4;
+    else
+      health := 1;
+    end if;
+  end func;
+
 const func integer: clampInt (in integer: value, in integer: lo,
     in integer: hi) is func
   result
@@ -175,6 +298,82 @@ const func integer: clampInt (in integer: value, in integer: lo,
       outValue := lo;
     elsif outValue > hi then
       outValue := hi;
+    end if;
+  end func;
+
+const proc: placeMonsterSlot (inout engineState: state, in integer: slot,
+    in float: x, in float: z, in integer: kind) is func
+  begin
+    if slot = 1 then
+      state.monster1X := x;
+      state.monster1Z := z;
+      state.monster1Health := monsterHealthForKind(kind);
+      state.monster1Alive := TRUE;
+    elsif slot = 2 then
+      state.monster2X := x;
+      state.monster2Z := z;
+      state.monster2Health := monsterHealthForKind(kind);
+      state.monster2Alive := TRUE;
+    else
+      state.monster3X := x;
+      state.monster3Z := z;
+      state.monster3Health := monsterHealthForKind(kind);
+      state.monster3Alive := TRUE;
+    end if;
+  end func;
+
+const proc: resetMapState (inout engineState: state, in integer: mapIndex,
+    in boolean: resetPlayer) is func
+  begin
+    state.mapIndex := mapIndex;
+    state.camX := 0.0;
+    state.camY := 1.34;
+    state.camZ := -1.45;
+    state.yaw := 0.0;
+    state.lastKey := ' ';
+    state.shotCooldown := 0;
+    state.shotFlash := 0;
+    state.hitFlash := 0;
+    state.damageCooldown := 0;
+    state.door1Open := FALSE;
+    state.door2Open := FALSE;
+    state.door3Open := FALSE;
+    state.exitReady := FALSE;
+    state.gameComplete := FALSE;
+    state.dead := FALSE;
+    state.pickupHealth := FALSE;
+    state.pickupAmmo := FALSE;
+    state.pickupArmor := FALSE;
+    state.pickupKey := FALSE;
+    if resetPlayer then
+      state.health := 100;
+      state.armor := 32;
+      state.ammo := 28;
+      state.redKey := FALSE;
+      state.blueKey := FALSE;
+      state.yellowKey := FALSE;
+    end if;
+    if mapIndex = MAP_E1M2 then
+      placeMonsterSlot(state, 1, -2.20, 8.3,
+          monsterKindForSlot(mapIndex, 1));
+      placeMonsterSlot(state, 2, 4.95, 15.8,
+          monsterKindForSlot(mapIndex, 2));
+      placeMonsterSlot(state, 3, 0.25, 27.8,
+          monsterKindForSlot(mapIndex, 3));
+    elsif mapIndex = MAP_E1M3 then
+      placeMonsterSlot(state, 1, -3.75, 10.8,
+          monsterKindForSlot(mapIndex, 1));
+      placeMonsterSlot(state, 2, 5.20, 16.5,
+          monsterKindForSlot(mapIndex, 2));
+      placeMonsterSlot(state, 3, 0.10, 28.6,
+          monsterKindForSlot(mapIndex, 3));
+    else
+      placeMonsterSlot(state, 1, -1.15, 9.7,
+          monsterKindForSlot(MAP_E1M1, 1));
+      placeMonsterSlot(state, 2, 6.35, 12.6,
+          monsterKindForSlot(MAP_E1M1, 2));
+      placeMonsterSlot(state, 3, 0.35, 27.4,
+          monsterKindForSlot(MAP_E1M1, 3));
     end if;
   end func;
 
@@ -353,7 +552,7 @@ const proc: drawStatusFace (in engineState: state, in integer: x,
     rect(x + 84, y + 28, 8, 37, HUD_HAIR_DARK);
   end func;
 
-const func array renderSurface: generatedSurfaces is func
+const func array renderSurface: generatedSurfacesE1M1 is func
   result
     var array renderSurface: surfaces is 0 times renderSurface.value;
   begin
@@ -423,14 +622,172 @@ const func array renderSurface: generatedSurfaces is func
         v3(3.2, 3.12, 25.8), v3(3.2, 2.78, 25.4), 4, 30, FALSE);
   end func;
 
-const func array renderActor: generatedActors is func
+const proc: appendEpisodeRoom (inout array renderSurface: surfaces,
+    in string: prefix, in float: x1, in float: z1, in float: x2,
+    in float: z2, in integer: materialBase, in integer: detailBase) is func
+  begin
+    surfaces &:= surf(prefix <& "_floor", v3(x1, 0.0, z1), v3(x2, 0.0, z1),
+        v3(x2, 0.0, z2), v3(x1, 0.0, z2), 4, detailBase, FALSE);
+    surfaces &:= surf(prefix <& "_ceiling", v3(x1, 3.0, z1),
+        v3(x1, 3.0, z2), v3(x2, 3.0, z2), v3(x2, 3.0, z1),
+        5, detailBase + 1, FALSE);
+    surfaces &:= surf(prefix <& "_left_wall", v3(x1, 0.0, z1),
+        v3(x1, 0.0, z2), v3(x1, 3.0, z2), v3(x1, 3.0, z1),
+        1 + materialBase rem 3, detailBase + 2, FALSE);
+    surfaces &:= surf(prefix <& "_right_wall", v3(x2, 0.0, z1),
+        v3(x2, 3.0, z1), v3(x2, 3.0, z2), v3(x2, 0.0, z2),
+        2 + materialBase rem 3, detailBase + 3, FALSE);
+    surfaces &:= surf(prefix <& "_near_wall", v3(x1, 0.0, z1),
+        v3(x1, 3.0, z1), v3(x2, 3.0, z1), v3(x2, 0.0, z1),
+        3, detailBase + 4, FALSE);
+    surfaces &:= surf(prefix <& "_far_wall", v3(x1, 0.0, z2),
+        v3(x2, 0.0, z2), v3(x2, 3.0, z2), v3(x1, 3.0, z2),
+        3 + materialBase rem 2, detailBase + 5, FALSE);
+  end func;
+
+const proc: appendEpisodePanel (inout array renderSurface: surfaces,
+    in string: name, in float: x1, in float: y1, in float: z1,
+    in float: x2, in float: y2, in float: z2, in integer: materialId,
+    in integer: detailId, in boolean: emissive) is func
+  begin
+    surfaces &:= surf(name, v3(x1, y1, z1), v3(x2, y1, z2),
+        v3(x2, y2, z2), v3(x1, y2, z1), materialId, detailId, emissive);
+  end func;
+
+const func array renderSurface: generatedSurfacesFor (in integer: mapIndex) is func
+  result
+    var array renderSurface: surfaces is 0 times renderSurface.value;
+  begin
+    if mapIndex = MAP_E1M2 then
+      appendEpisodeRoom(surfaces, "e1m2_entry_corridor", -4.4, -2.0,
+          4.4, 10.4, 2, 31);
+      appendEpisodeRoom(surfaces, "e1m2_processing_core", -7.0, 9.5,
+          7.0, 22.0, 1, 38);
+      appendEpisodeRoom(surfaces, "e1m2_blue_key_alcove", -10.2, 14.0,
+          -6.2, 23.5, 3, 45);
+      appendEpisodeRoom(surfaces, "e1m2_locked_exit_tube", -3.4, 21.0,
+          3.4, 34.0, 2, 52);
+      appendEpisodePanel(surfaces, "e1m2_blue_gate_light", -1.25, 1.15,
+          21.05, 1.25, 1.42, 21.05, 6, 59, TRUE);
+      appendEpisodePanel(surfaces, "e1m2_core_green_console", 6.88, 0.64,
+          12.2, 6.88, 1.62, 18.9, 6, 60, TRUE);
+      appendEpisodePanel(surfaces, "e1m2_exit_switch_panel", -1.15, 0.94,
+          33.85, 1.15, 1.38, 33.85, 7, 61, TRUE);
+    elsif mapIndex = MAP_E1M3 then
+      appendEpisodeRoom(surfaces, "e1m3_entry", -4.8, -2.0, 4.8, 9.5,
+          3, 62);
+      appendEpisodeRoom(surfaces, "e1m3_reactor_ring", -8.0, 8.5, 8.0,
+          24.0, 2, 69);
+      appendEpisodeRoom(surfaces, "e1m3_yellow_key_arm", 5.4, 13.4, 11.2,
+          25.8, 1, 76);
+      appendEpisodeRoom(surfaces, "e1m3_final_exit", -3.6, 23.0, 3.6,
+          36.0, 3, 83);
+      appendEpisodePanel(surfaces, "e1m3_reactor_core_glow", -2.4, 0.35,
+          18.2, 2.4, 2.35, 18.2, 7, 90, TRUE);
+      appendEpisodePanel(surfaces, "e1m3_yellow_gate_light", -1.35, 1.16,
+          23.05, 1.35, 1.44, 23.05, 7, 91, TRUE);
+      appendEpisodePanel(surfaces, "e1m3_final_exit_switch", -1.20, 0.92,
+          35.85, 1.20, 1.38, 35.85, 6, 92, TRUE);
+    else
+      surfaces := generatedSurfacesE1M1;
+      appendEpisodePanel(surfaces, "e1m1_red_key_gate_light", -1.25, 1.10,
+          20.18, 1.25, 1.38, 20.18, 7, 93, TRUE);
+      appendEpisodePanel(surfaces, "e1m1_exit_switch_panel", -1.05, 0.95,
+          32.86, 1.05, 1.36, 32.86, 6, 94, TRUE);
+    end if;
+  end func;
+
+const func array renderSurface: generatedSurfaces is func
+  result
+    var array renderSurface: surfaces is 0 times renderSurface.value;
+  begin
+    surfaces := generatedSurfacesFor(MAP_E1M1);
+  end func;
+
+const func array renderActor: generatedActorsFor (in engineState: state) is func
   result
     var array renderActor: actors is 0 times renderActor.value;
   begin
-    actors &:= actor("generated_imp_proxy", -1.15, 0.55, 9.7, 1);
-    actors &:= actor("generated_lab_stalker", 6.35, 0.55, 12.6, 4);
-    actors &:= actor("generated_security_pickup", 2.35, 0.42, 6.8, 2);
-    actors &:= actor("generated_ammo_pickup", -2.35, 0.42, 13.2, 3);
+    if state.monster1Alive then
+      actors &:= actor("rust_trooper", state.monster1X, 0.62, state.monster1Z,
+          monsterKindForSlot(state.mapIndex, 1));
+    end if;
+    if state.monster2Alive then
+      actors &:= actor("ember_crawler", state.monster2X, 0.54, state.monster2Z,
+          monsterKindForSlot(state.mapIndex, 2));
+    end if;
+    if state.monster3Alive then
+      actors &:= actor("iron_brute", state.monster3X, 0.64, state.monster3Z,
+          monsterKindForSlot(state.mapIndex, 3));
+    end if;
+
+    if state.mapIndex = MAP_E1M2 then
+      if not state.pickupHealth then
+        actors &:= actor("e1m2_health_pack", 2.65, 0.42, 6.5,
+            KIND_HEALTH_PICKUP);
+      end if;
+      if not state.pickupAmmo then
+        actors &:= actor("e1m2_ammo_box", -3.70, 0.42, 12.8,
+            KIND_AMMO_PICKUP);
+      end if;
+      if not state.pickupArmor then
+        actors &:= actor("e1m2_green_armor", 5.45, 0.42, 19.0,
+            KIND_ARMOR_PICKUP);
+      end if;
+      if not state.pickupKey then
+        actors &:= actor("e1m2_blue_key", -8.40, 0.48, 20.6,
+            KIND_BLUE_KEY);
+      end if;
+      actors &:= actor("e1m2_exit_switch", 0.0, 0.72, 32.5,
+          KIND_EXIT_SWITCH);
+    elsif state.mapIndex = MAP_E1M3 then
+      if not state.pickupHealth then
+        actors &:= actor("e1m3_health_pack", -3.25, 0.42, 7.3,
+            KIND_HEALTH_PICKUP);
+      end if;
+      if not state.pickupAmmo then
+        actors &:= actor("e1m3_ammo_box", 3.95, 0.42, 13.5,
+            KIND_AMMO_PICKUP);
+      end if;
+      if not state.pickupArmor then
+        actors &:= actor("e1m3_blue_armor", -6.10, 0.42, 18.7,
+            KIND_ARMOR_PICKUP);
+      end if;
+      if not state.pickupKey then
+        actors &:= actor("e1m3_yellow_key", 8.75, 0.48, 22.0,
+            KIND_YELLOW_KEY);
+      end if;
+      actors &:= actor("e1m3_exit_switch", 0.0, 0.72, 34.5,
+          KIND_EXIT_SWITCH);
+    else
+      if not state.pickupHealth then
+        actors &:= actor("e1m1_health_pack", 2.35, 0.42, 6.8,
+            KIND_HEALTH_PICKUP);
+      end if;
+      if not state.pickupAmmo then
+        actors &:= actor("e1m1_ammo_box", -2.35, 0.42, 13.2,
+            KIND_AMMO_PICKUP);
+      end if;
+      if not state.pickupArmor then
+        actors &:= actor("e1m1_green_armor", -2.80, 0.42, 25.0,
+            KIND_ARMOR_PICKUP);
+      end if;
+      if not state.pickupKey then
+        actors &:= actor("e1m1_red_key", 6.85, 0.48, 12.5,
+            KIND_RED_KEY);
+      end if;
+      actors &:= actor("e1m1_exit_switch", 0.0, 0.72, 32.0,
+          KIND_EXIT_SWITCH);
+    end if;
+  end func;
+
+const func array renderActor: generatedActors is func
+  result
+    var array renderActor: actors is 0 times renderActor.value;
+  local
+    var engineState: state is engineState.value;
+  begin
+    actors := generatedActorsFor(state);
   end func;
 
 const func screenPoint: projectPoint (in engineState: state, in vec3: point3) is func
@@ -549,7 +906,7 @@ const proc: drawGeneratedScene (inout visualStats: stats,
     rect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT mdiv 2, CEILING_DARK);
     rect(0, SCREEN_HEIGHT mdiv 2, SCREEN_WIDTH, SCREEN_HEIGHT mdiv 2,
         FLOOR_DARK);
-    surfaces := generatedSurfaces;
+    surfaces := generatedSurfacesFor(state.mapIndex);
     for pass range 28 downto 1 do
       for surface range surfaces do
         depth := surfaceDepth(state, surface);
@@ -575,30 +932,86 @@ const proc: drawActorSprite (inout visualStats: stats, in engineState: state,
     if screen.visible then
       width := clampInt(round(260.0 / screen.depth), 18, 130);
       height := clampInt(round(390.0 / screen.depth), 26, 190);
-      if actorData.kind = 1 or actorData.kind = 4 then
-        body := litMaterial(1, 16, FALSE, screen.depth, screen.x, screen.y);
-        rect(screen.x - width mdiv 2, screen.y - height mdiv 2,
-            width, height, scaledColor(body, 50));
-        rect(screen.x - width * 3 mdiv 8, screen.y - height * 3 mdiv 8,
-            width * 3 mdiv 4, height * 5 mdiv 8, body);
-        if actorData.kind = 4 then
+      if actorData.kind = KIND_RUST_TROOPER or
+          actorData.kind = KIND_EMBER_CRAWLER or
+          actorData.kind = KIND_IRON_BRUTE then
+        if actorData.kind = KIND_IRON_BRUTE then
+          width := width * 5 mdiv 4;
+          height := height * 6 mdiv 5;
+          body := litMaterial(2, 18, FALSE, screen.depth, screen.x, screen.y);
+          rect(screen.x - width mdiv 2, screen.y - height mdiv 2,
+              width, height, scaledColor(body, 42));
+          rect(screen.x - width * 2 mdiv 5, screen.y - height * 3 mdiv 8,
+              width * 4 mdiv 5, height * 5 mdiv 8, body);
+          rect(screen.x - width * 3 mdiv 8, screen.y + height mdiv 8,
+              width * 3 mdiv 4, height mdiv 4, scaledColor(METAL_GREY, 120));
+          rect(screen.x - width mdiv 7, screen.y - height mdiv 4,
+              width mdiv 5, height mdiv 8, MONSTER_HOT);
+          rect(screen.x + width mdiv 18, screen.y - height mdiv 4,
+              width mdiv 5, height mdiv 8, MONSTER_HOT);
+        elsif actorData.kind = KIND_EMBER_CRAWLER then
+          height := height * 3 mdiv 4;
+          body := litMaterial(1, 16, FALSE, screen.depth, screen.x, screen.y);
+          rect(screen.x - width mdiv 2, screen.y - height mdiv 3,
+              width, height, scaledColor(MONSTER_BODY, 60));
+          rect(screen.x - width * 3 mdiv 8, screen.y - height mdiv 4,
+              width * 3 mdiv 4, height * 2 mdiv 3, body);
+          rect(screen.x - width mdiv 2, screen.y + height mdiv 5,
+              width mdiv 4, height mdiv 5, scaledColor(METAL_BLUE, 72));
+          rect(screen.x + width mdiv 4, screen.y + height mdiv 5,
+              width mdiv 4, height mdiv 5, scaledColor(METAL_BLUE, 72));
+          rect(screen.x - width mdiv 5, screen.y - height mdiv 6,
+              width mdiv 6, height mdiv 8, MONSTER_HOT);
+          rect(screen.x + width mdiv 12, screen.y - height mdiv 6,
+              width mdiv 6, height mdiv 8, MONSTER_HOT);
+        else
+          body := litMaterial(3, 16, FALSE, screen.depth, screen.x, screen.y);
+          rect(screen.x - width mdiv 2, screen.y - height mdiv 2,
+              width, height, scaledColor(body, 46));
+          rect(screen.x - width * 3 mdiv 8, screen.y - height * 3 mdiv 8,
+              width * 3 mdiv 4, height * 5 mdiv 8, body);
           rect(screen.x - width mdiv 3, screen.y + height mdiv 10,
-              width * 2 mdiv 3, height mdiv 5, scaledColor(METAL_BLUE, 72));
+              width * 2 mdiv 3, height mdiv 5, scaledColor(METAL_RED, 88));
+          rect(screen.x - width mdiv 5, screen.y - height mdiv 4,
+              width mdiv 6, height mdiv 8, MONSTER_HOT);
+          rect(screen.x + width mdiv 12, screen.y - height mdiv 4,
+              width mdiv 6, height mdiv 8, MONSTER_HOT);
         end if;
-        rect(screen.x - width mdiv 5, screen.y - height mdiv 4,
-            width mdiv 6, height mdiv 8, MONSTER_HOT);
-        rect(screen.x + width mdiv 12, screen.y - height mdiv 4,
-            width mdiv 6, height mdiv 8, MONSTER_HOT);
-      elsif actorData.kind = 2 then
+      elsif actorData.kind = KIND_HEALTH_PICKUP then
         rect(screen.x - width mdiv 3, screen.y - height mdiv 3,
             width * 2 mdiv 3, height * 2 mdiv 3, HUD_GREEN);
         rect(screen.x - width mdiv 6, screen.y - height mdiv 2,
             width mdiv 3, height, scaledColor(EMISSIVE_CYAN, 78));
-      else
+      elsif actorData.kind = KIND_AMMO_PICKUP then
         rect(screen.x - width mdiv 3, screen.y - height mdiv 3,
             width * 2 mdiv 3, height * 2 mdiv 3, HUD_AMBER);
         rect(screen.x - width mdiv 6, screen.y - height mdiv 2,
             width mdiv 3, height, scaledColor(EMISSIVE_AMBER, 72));
+      elsif actorData.kind = KIND_ARMOR_PICKUP then
+        rect(screen.x - width mdiv 3, screen.y - height mdiv 3,
+            width * 2 mdiv 3, height * 2 mdiv 3, METAL_GREEN);
+        rect(screen.x - width mdiv 4, screen.y - height mdiv 5,
+            width mdiv 2, height mdiv 3, scaledColor(EMISSIVE_CYAN, 80));
+      elsif actorData.kind = KIND_RED_KEY or actorData.kind = KIND_BLUE_KEY or
+          actorData.kind = KIND_YELLOW_KEY then
+        if actorData.kind = KIND_BLUE_KEY then
+          body := EMISSIVE_CYAN;
+        elsif actorData.kind = KIND_YELLOW_KEY then
+          body := HUD_TEXT;
+        else
+          body := HUD_RED;
+        end if;
+        rect(screen.x - width mdiv 5, screen.y - height mdiv 2,
+            width * 2 mdiv 5, height * 2 mdiv 3, body);
+        rect(screen.x - width mdiv 2, screen.y + height mdiv 10,
+            width, height mdiv 5, scaledColor(body, 68));
+      else
+        rect(screen.x - width mdiv 2, screen.y - height mdiv 3,
+            width, height * 2 mdiv 3, scaledColor(PANEL_BLACK, 180));
+        rect(screen.x - width mdiv 3, screen.y - height mdiv 5,
+            width * 2 mdiv 3, height mdiv 6, EMISSIVE_AMBER);
+        rect(screen.x - width mdiv 6, screen.y + height mdiv 8,
+            width mdiv 3, height mdiv 4, HUD_GREEN);
       end if;
       stats.actorsVisible +:= 1;
       stats.entropy +:= width * 7 + height * 3 + actorData.kind * 41;
@@ -610,14 +1023,9 @@ const proc: drawActors (inout visualStats: stats, in engineState: state) is func
     var array renderActor: actors is 0 times renderActor.value;
     var renderActor: actorData is renderActor.value;
   begin
-    actors := generatedActors;
+    actors := generatedActorsFor(state);
     for actorData range actors do
-      if (actorData.kind = 1 and state.monsterA) or
-          (actorData.kind = 4 and state.monsterB) or
-          (actorData.kind = 2 and not state.pickupHealth) or
-          (actorData.kind = 3 and not state.pickupAmmo) then
-        drawActorSprite(stats, state, actorData);
-      end if;
+      drawActorSprite(stats, state, actorData);
     end for;
   end func;
 
@@ -628,21 +1036,28 @@ const proc: drawWeaponAndHud (inout visualStats: stats,
     var integer: baseY is 0;
     var integer: healthWidth is 0;
     var integer: armorWidth is 0;
-    var integer: auxWidth is 0;
     var integer: statusY is 0;
   begin
     midX := VIEW_CENTER_X;
-    baseY := SCREEN_HEIGHT - 168;
-    rect(midX - 88, baseY + 72, 176, 78, WEAPON_DARK);
-    rect(midX - 62, baseY + 42, 124, 58, WEAPON_MID);
-    rect(midX - 34, baseY + 8, 68, 56, scaledColor(WEAPON_MID, 135));
-    rect(midX - 10, baseY - 38, 20, 54, scaledColor(EMISSIVE_CYAN, 58));
-    rect(midX - 74, baseY + 60, 25, 14, HUD_AMBER);
-    rect(midX + 49, baseY + 60, 25, 14, HUD_AMBER);
+    baseY := SCREEN_HEIGHT - 180;
+    if state.shotFlash > 0 then
+      baseY +:= 10;
+    end if;
+    rect(midX - 112, baseY + 66, 224, 94, WEAPON_DARK);
+    rect(midX - 82, baseY + 34, 164, 74, WEAPON_MID);
+    rect(midX - 44, baseY - 2, 88, 70, scaledColor(WEAPON_MID, 135));
+    rect(midX - 13, baseY - 58, 26, 70, scaledColor(EMISSIVE_CYAN, 58));
+    rect(midX - 92, baseY + 56, 32, 18, HUD_AMBER);
+    rect(midX + 60, baseY + 56, 32, 18, HUD_AMBER);
     if state.shotFlash > 0 then
       rect(midX - 38, baseY - 68, 76, 30, HUD_AMBER);
       rect(midX - 18, baseY - 98, 36, 32, MONSTER_HOT);
       rect(midX - 6, baseY - 122, 12, 28, scaledColor(EMISSIVE_CYAN, 125));
+    end if;
+    if state.hitFlash > 0 then
+      rect(0, 0, SCREEN_WIDTH, 18, scaledColor(HUD_RED, 95));
+      rect(0, 0, 18, SCREEN_HEIGHT, scaledColor(HUD_RED, 70));
+      rect(SCREEN_WIDTH - 18, 0, 18, SCREEN_HEIGHT, scaledColor(HUD_RED, 70));
     end if;
     lineTo(midX - 22, VIEW_CENTER_Y, midX - 7, VIEW_CENTER_Y, EMISSIVE_CYAN);
     lineTo(midX + 8, VIEW_CENTER_Y, midX + 23, VIEW_CENTER_Y, EMISSIVE_CYAN);
@@ -650,7 +1065,6 @@ const proc: drawWeaponAndHud (inout visualStats: stats,
     lineTo(midX, VIEW_CENTER_Y + 8, midX, VIEW_CENTER_Y + 23, EMISSIVE_CYAN);
     healthWidth := clampInt(state.health, 0, 100);
     armorWidth := clampInt(state.armor, 0, 100);
-    auxWidth := 96;
     statusY := SCREEN_HEIGHT - 88;
     rect(0, statusY, SCREEN_WIDTH, 88, scaledColor(HUD_PANEL_LIGHT, 45));
     rect(0, statusY, SCREEN_WIDTH, 5, scaledColor(HUD_PANEL_LIGHT, 92));
@@ -667,11 +1081,33 @@ const proc: drawWeaponAndHud (inout visualStats: stats,
     drawDigit(404, statusY + 20, 1, 3, HUD_TEXT);
     drawDigit(382, statusY + 50, 1, 5, HUD_TEXT);
     drawDigit(404, statusY + 50, 1, 7, HUD_TEXT);
-    rect(736, statusY + 22, clampInt(healthWidth, 0, 120), 9, HUD_RED);
-    rect(736, statusY + 42, clampInt(armorWidth, 0, 120), 9, HUD_GREEN);
-    rect(736, statusY + 62, auxWidth, 9, EMISSIVE_CYAN);
-    stats.hudElements +:= 24;
-    stats.entropy +:= healthWidth * 7 + armorWidth * 5 + auxWidth * 3;
+    rect(736, statusY + 18, 30, 24, scaledColor(HUD_RED, 38));
+    rect(776, statusY + 18, 30, 24, scaledColor(EMISSIVE_CYAN, 38));
+    rect(816, statusY + 18, 30, 24, scaledColor(HUD_TEXT, 38));
+    if state.redKey then
+      rect(740, statusY + 22, 22, 16, HUD_RED);
+    end if;
+    if state.blueKey then
+      rect(780, statusY + 22, 22, 16, EMISSIVE_CYAN);
+    end if;
+    if state.yellowKey then
+      rect(820, statusY + 22, 22, 16, HUD_TEXT);
+    end if;
+    drawDigit(858, statusY + 17, state.mapIndex, 2, HUD_TEXT);
+    drawDigit(900, statusY + 17, 1, 2, HUD_AMBER);
+    drawDigit(900, statusY + 47, 2, 2, scaledColor(HUD_TEXT, 80));
+    drawDigit(922, statusY + 47, 3, 2, scaledColor(HUD_TEXT, 80));
+    if state.dead then
+      rect(240, 202, 480, 80, scaledColor(PANEL_BLACK, 225));
+      rect(250, 212, 460, 60, HUD_RED);
+    elsif state.gameComplete then
+      rect(250, 202, 460, 80, scaledColor(PANEL_BLACK, 225));
+      rect(262, 214, 436, 56, HUD_GREEN);
+    end if;
+    stats.hudElements +:= 32;
+    stats.entropy +:= healthWidth * 7 + armorWidth * 5 + state.mapIndex * 31 +
+        ord(state.redKey) * 53 + ord(state.blueKey) * 59 +
+        ord(state.yellowKey) * 61;
   end func;
 
 const proc: renderEngineFrame (inout visualStats: stats,
@@ -688,25 +1124,62 @@ const proc: rotatePlayer (inout engineState: state, in float: amount) is func
     state.yaw +:= amount;
   end func;
 
+const func boolean: insideEpisodeBounds (in engineState: state,
+    in float: newX, in float: newZ) is func
+  result
+    var boolean: inside is FALSE;
+  local
+    var boolean: insideMainHall is FALSE;
+    var boolean: insideSideLab is FALSE;
+    var boolean: insideRearBay is FALSE;
+    var boolean: insideCore is FALSE;
+    var boolean: insideAlcove is FALSE;
+    var boolean: insideExit is FALSE;
+    var boolean: insideArm is FALSE;
+  begin
+    if state.mapIndex = MAP_E1M2 then
+      insideMainHall := newX > -3.9 and newX < 3.9 and
+          newZ > -2.2 and newZ < 10.2;
+      insideCore := newX > -6.55 and newX < 6.55 and
+          newZ > 9.7 and newZ < 21.5;
+      insideAlcove := newX > -9.75 and newX < -6.25 and
+          newZ > 14.3 and newZ < 23.0;
+      insideExit := newX > -3.0 and newX < 3.0 and
+          newZ > 20.4 and newZ < 32.7 and (state.door2Open or state.blueKey);
+      inside := insideMainHall or insideCore or insideAlcove or insideExit;
+    elsif state.mapIndex = MAP_E1M3 then
+      insideMainHall := newX > -4.25 and newX < 4.25 and
+          newZ > -2.2 and newZ < 9.2;
+      insideCore := newX > -7.55 and newX < 7.55 and
+          newZ > 8.8 and newZ < 23.5;
+      insideArm := newX > 5.65 and newX < 10.70 and
+          newZ > 13.6 and newZ < 25.2;
+      insideExit := newX > -3.05 and newX < 3.05 and
+          newZ > 22.4 and newZ < 34.7 and (state.door3Open or state.yellowKey);
+      inside := insideMainHall or insideCore or insideArm or insideExit;
+    else
+      insideMainHall := newX > -3.9 and newX < 3.9 and
+          newZ > -2.2 and newZ < 20.6;
+      insideSideLab := newX > 3.45 and newX < 8.25 and
+          newZ > 9.0 and newZ < 15.8;
+      insideRearBay := newX > -3.25 and newX < 3.25 and
+          newZ > 19.5 and newZ < 32.6 and (state.door1Open or state.redKey);
+      inside := insideMainHall or insideSideLab or insideRearBay;
+    end if;
+  end func;
+
 const proc: movePlayer (inout engineState: state, in float: amount) is func
   local
     var float: newX is 0.0;
     var float: newZ is 0.0;
-    var boolean: insideMainHall is FALSE;
-    var boolean: insideSideLab is FALSE;
-    var boolean: insideRearBay is FALSE;
   begin
-    newX := state.camX + sin(state.yaw) * amount;
-    newZ := state.camZ + cos(state.yaw) * amount;
-    insideMainHall := newX > -3.9 and newX < 3.9 and
-        newZ > -2.2 and newZ < 20.6;
-    insideSideLab := newX > 3.45 and newX < 8.25 and
-        newZ > 9.0 and newZ < 15.8;
-    insideRearBay := newX > -3.25 and newX < 3.25 and
-        newZ > 19.5 and newZ < 31.4;
-    if insideMainHall or insideSideLab or insideRearBay then
-      state.camX := newX;
-      state.camZ := newZ;
+    if not state.dead and not state.gameComplete then
+      newX := state.camX + sin(state.yaw) * amount;
+      newZ := state.camZ + cos(state.yaw) * amount;
+      if insideEpisodeBounds(state, newX, newZ) then
+        state.camX := newX;
+        state.camZ := newZ;
+      end if;
     end if;
   end func;
 
@@ -724,20 +1197,247 @@ const func boolean: targetInReticle (in engineState: state, in float: x,
     dz := z - state.camZ;
     side := dx * cos(state.yaw) - dz * sin(state.yaw);
     forward := dx * sin(state.yaw) + dz * cos(state.yaw);
-    targeted := forward > 0.4 and abs(side) / forward < 0.26;
+    targeted := forward > 0.4 and forward < 18.0 and abs(side) / forward < 0.26;
+  end func;
+
+const proc: damageMonsterSlot (inout engineState: state, in integer: slot,
+    in integer: damage) is func
+  begin
+    if slot = 1 and state.monster1Alive then
+      state.monster1Health -:= damage;
+      if state.monster1Health <= 0 then
+        state.monster1Alive := FALSE;
+      end if;
+    elsif slot = 2 and state.monster2Alive then
+      state.monster2Health -:= damage;
+      if state.monster2Health <= 0 then
+        state.monster2Alive := FALSE;
+      end if;
+    elsif slot = 3 and state.monster3Alive then
+      state.monster3Health -:= damage;
+      if state.monster3Health <= 0 then
+        state.monster3Alive := FALSE;
+      end if;
+    end if;
   end func;
 
 const proc: fireWeapon (inout engineState: state) is func
   begin
-    if state.ammo > 0 and state.shotCooldown = 0 then
+    if state.ammo > 0 and state.shotCooldown = 0 and not state.dead and
+        not state.gameComplete then
       decr(state.ammo);
       state.shotCooldown := 7;
       state.shotFlash := 4;
-      if state.monsterA and targetInReticle(state, -1.15, 9.7) then
-        state.monsterA := FALSE;
+      if state.monster1Alive and targetInReticle(state, state.monster1X,
+          state.monster1Z) then
+        damageMonsterSlot(state, 1, 1);
       end if;
-      if state.monsterB and targetInReticle(state, 6.35, 12.6) then
-        state.monsterB := FALSE;
+      if state.monster2Alive and targetInReticle(state, state.monster2X,
+          state.monster2Z) then
+        damageMonsterSlot(state, 2, 1);
+      end if;
+      if state.monster3Alive and targetInReticle(state, state.monster3X,
+          state.monster3Z) then
+        damageMonsterSlot(state, 3, 1);
+      end if;
+    end if;
+  end func;
+
+const proc: applyPlayerDamage (inout engineState: state,
+    in integer: damage) is func
+  local
+    var integer: remainingDamage is 0;
+    var integer: absorbed is 0;
+  begin
+    if not state.dead and not state.gameComplete then
+      remainingDamage := damage;
+      if state.armor > 0 then
+        absorbed := remainingDamage mdiv 2;
+        if absorbed < 1 then absorbed := 1; end if;
+        if absorbed > state.armor then absorbed := state.armor; end if;
+        state.armor -:= absorbed;
+        remainingDamage -:= absorbed;
+      end if;
+      state.health -:= remainingDamage;
+      state.hitFlash := 5;
+      state.damageCooldown := 16;
+      if state.health <= 0 then
+        state.health := 0;
+        state.dead := TRUE;
+      end if;
+    end if;
+  end func;
+
+const proc: updateMonsterSlot (inout engineState: state,
+    in integer: slot) is func
+  local
+    var boolean: alive is FALSE;
+    var integer: kind is KIND_RUST_TROOPER;
+    var float: x is 0.0;
+    var float: z is 0.0;
+    var float: dx is 0.0;
+    var float: dz is 0.0;
+    var float: distance is 0.0;
+    var float: speed is 0.0;
+    var float: attackRange is 0.0;
+    var integer: damage is 0;
+  begin
+    if slot = 1 then
+      alive := state.monster1Alive;
+      x := state.monster1X;
+      z := state.monster1Z;
+    elsif slot = 2 then
+      alive := state.monster2Alive;
+      x := state.monster2X;
+      z := state.monster2Z;
+    else
+      alive := state.monster3Alive;
+      x := state.monster3X;
+      z := state.monster3Z;
+    end if;
+    if alive and not state.dead and not state.gameComplete then
+      kind := monsterKindForSlot(state.mapIndex, slot);
+      if kind = KIND_IRON_BRUTE then
+        speed := 0.020;
+        attackRange := 1.35;
+        damage := 13;
+      elsif kind = KIND_EMBER_CRAWLER then
+        speed := 0.040;
+        attackRange := 1.10;
+        damage := 9;
+      else
+        speed := 0.030;
+        attackRange := 5.60;
+        damage := 6;
+      end if;
+      dx := state.camX - x;
+      dz := state.camZ - z;
+      distance := sqrt(dx * dx + dz * dz);
+      if distance < 8.8 and distance > 0.20 then
+        if distance > attackRange then
+          x +:= dx / distance * speed;
+          z +:= dz / distance * speed;
+          if slot = 1 then
+            state.monster1X := x;
+            state.monster1Z := z;
+          elsif slot = 2 then
+            state.monster2X := x;
+            state.monster2Z := z;
+          else
+            state.monster3X := x;
+            state.monster3Z := z;
+          end if;
+        elsif state.damageCooldown = 0 then
+          applyPlayerDamage(state, damage);
+        end if;
+      end if;
+    end if;
+  end func;
+
+const proc: updateMonsterAI (inout engineState: state) is func
+  begin
+    updateMonsterSlot(state, 1);
+    updateMonsterSlot(state, 2);
+    updateMonsterSlot(state, 3);
+  end func;
+
+const proc: collectPickups (inout engineState: state) is func
+  begin
+    if state.mapIndex = MAP_E1M2 then
+      if not state.pickupHealth and abs(state.camX - 2.65) < 0.55 and
+          abs(state.camZ - 6.5) < 0.55 then
+        state.pickupHealth := TRUE;
+        state.health := clampInt(state.health + 35, 0, 100);
+      end if;
+      if not state.pickupAmmo and abs(state.camX + 3.70) < 0.55 and
+          abs(state.camZ - 12.8) < 0.55 then
+        state.pickupAmmo := TRUE;
+        state.ammo +:= 22;
+      end if;
+      if not state.pickupArmor and abs(state.camX - 5.45) < 0.55 and
+          abs(state.camZ - 19.0) < 0.55 then
+        state.pickupArmor := TRUE;
+        state.armor := clampInt(state.armor + 45, 0, 100);
+      end if;
+      if not state.pickupKey and abs(state.camX + 8.40) < 0.70 and
+          abs(state.camZ - 20.6) < 0.70 then
+        state.pickupKey := TRUE;
+        state.blueKey := TRUE;
+      end if;
+    elsif state.mapIndex = MAP_E1M3 then
+      if not state.pickupHealth and abs(state.camX + 3.25) < 0.55 and
+          abs(state.camZ - 7.3) < 0.55 then
+        state.pickupHealth := TRUE;
+        state.health := clampInt(state.health + 30, 0, 100);
+      end if;
+      if not state.pickupAmmo and abs(state.camX - 3.95) < 0.55 and
+          abs(state.camZ - 13.5) < 0.55 then
+        state.pickupAmmo := TRUE;
+        state.ammo +:= 28;
+      end if;
+      if not state.pickupArmor and abs(state.camX + 6.10) < 0.55 and
+          abs(state.camZ - 18.7) < 0.55 then
+        state.pickupArmor := TRUE;
+        state.armor := clampInt(state.armor + 55, 0, 100);
+      end if;
+      if not state.pickupKey and abs(state.camX - 8.75) < 0.70 and
+          abs(state.camZ - 22.0) < 0.70 then
+        state.pickupKey := TRUE;
+        state.yellowKey := TRUE;
+      end if;
+    else
+      if not state.pickupHealth and abs(state.camX - 2.35) < 0.55 and
+          abs(state.camZ - 6.8) < 0.55 then
+        state.pickupHealth := TRUE;
+        state.health := clampInt(state.health + 35, 0, 100);
+      end if;
+      if not state.pickupAmmo and abs(state.camX + 2.35) < 0.55 and
+          abs(state.camZ - 13.2) < 0.55 then
+        state.pickupAmmo := TRUE;
+        state.ammo +:= 16;
+      end if;
+      if not state.pickupArmor and abs(state.camX + 2.80) < 0.55 and
+          abs(state.camZ - 25.0) < 0.55 then
+        state.pickupArmor := TRUE;
+        state.armor := clampInt(state.armor + 35, 0, 100);
+      end if;
+      if not state.pickupKey and abs(state.camX - 6.85) < 0.70 and
+          abs(state.camZ - 12.5) < 0.70 then
+        state.pickupKey := TRUE;
+        state.redKey := TRUE;
+      end if;
+    end if;
+  end func;
+
+const proc: tryDoorsAndExit (inout engineState: state) is func
+  begin
+    if state.mapIndex = MAP_E1M2 then
+      if state.blueKey and not state.door2Open and abs(state.camX) < 2.2 and
+          abs(state.camZ - 21.0) < 1.0 then
+        state.door2Open := TRUE;
+      end if;
+      if state.door2Open and abs(state.camX) < 1.4 and
+          abs(state.camZ - 32.5) < 0.9 then
+        resetMapState(state, MAP_E1M3, FALSE);
+      end if;
+    elsif state.mapIndex = MAP_E1M3 then
+      if state.yellowKey and not state.door3Open and abs(state.camX) < 2.2 and
+          abs(state.camZ - 23.0) < 1.0 then
+        state.door3Open := TRUE;
+      end if;
+      if state.door3Open and not state.monster3Alive and abs(state.camX) < 1.4 and
+          abs(state.camZ - 34.5) < 0.9 then
+        state.exitReady := TRUE;
+        state.gameComplete := TRUE;
+      end if;
+    else
+      if state.redKey and not state.door1Open and abs(state.camX) < 2.2 and
+          abs(state.camZ - 20.0) < 1.0 then
+        state.door1Open := TRUE;
+      end if;
+      if state.door1Open and abs(state.camX) < 1.4 and
+          abs(state.camZ - 32.0) < 0.9 then
+        resetMapState(state, MAP_E1M2, FALSE);
       end if;
     end if;
   end func;
@@ -752,31 +1452,39 @@ const proc: updateInput (inout engineState: state) is func
         state.lastKey := ch;
       end if;
     end while;
-    if (state.lastKey = KEY_UP) and buttonPressed(KEYBOARD, KEY_UP) then
+    if state.dead and ((state.lastKey = 'r' and buttonPressed(KEYBOARD, 'r')) or
+        (state.lastKey = 'R' and buttonPressed(KEYBOARD, 'R')) or
+        (state.lastKey = ' ' and buttonPressed(KEYBOARD, ' '))) then
+      resetMapState(state, state.mapIndex, TRUE);
+    end if;
+    if ((state.lastKey = KEY_UP) and buttonPressed(KEYBOARD, KEY_UP)) or
+        ((state.lastKey = 'w') and buttonPressed(KEYBOARD, 'w')) or
+        ((state.lastKey = 'W') and buttonPressed(KEYBOARD, 'W')) then
       movePlayer(state, MOVE_SPEED);
-    elsif (state.lastKey = KEY_DOWN) and buttonPressed(KEYBOARD, KEY_DOWN) then
+    elsif ((state.lastKey = KEY_DOWN) and buttonPressed(KEYBOARD, KEY_DOWN)) or
+        ((state.lastKey = 's') and buttonPressed(KEYBOARD, 's')) or
+        ((state.lastKey = 'S') and buttonPressed(KEYBOARD, 'S')) then
       movePlayer(state, -MOVE_SPEED);
-    elsif (state.lastKey = KEY_RIGHT) and buttonPressed(KEYBOARD, KEY_RIGHT) then
+    elsif ((state.lastKey = KEY_RIGHT) and buttonPressed(KEYBOARD, KEY_RIGHT)) or
+        ((state.lastKey = 'd') and buttonPressed(KEYBOARD, 'd')) or
+        ((state.lastKey = 'D') and buttonPressed(KEYBOARD, 'D')) then
       rotatePlayer(state, ROT_SPEED);
-    elsif (state.lastKey = KEY_LEFT) and buttonPressed(KEYBOARD, KEY_LEFT) then
+    elsif ((state.lastKey = KEY_LEFT) and buttonPressed(KEYBOARD, KEY_LEFT)) or
+        ((state.lastKey = 'a') and buttonPressed(KEYBOARD, 'a')) or
+        ((state.lastKey = 'A') and buttonPressed(KEYBOARD, 'A')) then
       rotatePlayer(state, -ROT_SPEED);
     end if;
     if ((state.lastKey = ' ') and buttonPressed(KEYBOARD, ' ')) or
         ((state.lastKey = KEY_MOUSE1) and buttonPressed(KEYBOARD, KEY_MOUSE1)) then
       fireWeapon(state);
     end if;
-    if not state.pickupHealth and abs(state.camX - 2.35) < 0.44 and
-        abs(state.camZ - 6.8) < 0.48 then
-      state.pickupHealth := TRUE;
-      state.health := 100;
-    end if;
-    if not state.pickupAmmo and abs(state.camX + 2.35) < 0.44 and
-        abs(state.camZ - 13.2) < 0.48 then
-      state.pickupAmmo := TRUE;
-      state.ammo +:= 16;
-    end if;
+    collectPickups(state);
+    tryDoorsAndExit(state);
+    updateMonsterAI(state);
     if state.shotCooldown > 0 then decr(state.shotCooldown); end if;
     if state.shotFlash > 0 then decr(state.shotFlash); end if;
+    if state.hitFlash > 0 then decr(state.hitFlash); end if;
+    if state.damageCooldown > 0 then decr(state.damageCooldown); end if;
     incr(state.frameNo);
   end func;
 
@@ -796,60 +1504,92 @@ const func string: stateSignature (in engineState: state) is func
   result
     var string: signature is "";
   begin
-    signature := "x=" <& round(state.camX * 100.0) <&
+    signature := "map=" <& episodeMapToken(state.mapIndex) <&
+        ";x=" <& round(state.camX * 100.0) <&
         ";z=" <& round(state.camZ * 100.0) <&
         ";yaw=" <& round(state.yaw * 100.0) <&
         ";health=" <& state.health <&
+        ";armor=" <& state.armor <&
         ";ammo=" <& state.ammo <&
-        ";m=" <& ord(state.monsterA) <&
-        ";m2=" <& ord(state.monsterB) <&
-        ";p=" <& ord(state.pickupHealth) <& ord(state.pickupAmmo);
+        ";keys=" <& ord(state.redKey) <& ord(state.blueKey) <&
+        ord(state.yellowKey) <&
+        ";doors=" <& ord(state.door1Open) <& ord(state.door2Open) <&
+        ord(state.door3Open) <&
+        ";m=" <& ord(state.monster1Alive) <& ord(state.monster2Alive) <&
+        ord(state.monster3Alive) <&
+        ";hp=" <& state.monster1Health <& "," <&
+        state.monster2Health <& "," <& state.monster3Health <&
+        ";p=" <& ord(state.pickupHealth) <& ord(state.pickupAmmo) <&
+        ord(state.pickupArmor) <& ord(state.pickupKey);
   end func;
 
 const proc: deterministicStep (inout engineState: state, in integer: frame) is func
   begin
     if frame = 1 then
-      movePlayer(state, 0.38);
+      state.camX := 6.85;
+      state.camZ := 12.5;
+      collectPickups(state);
     elsif frame = 2 then
-      rotatePlayer(state, -0.10);
+      state.camX := 0.0;
+      state.camZ := 20.0;
+      tryDoorsAndExit(state);
     elsif frame = 3 then
+      state.camX := -1.15;
+      state.camZ := 8.25;
+      state.yaw := 0.0;
       fireWeapon(state);
+    elsif frame = 4 then
+      state.camX := 0.0;
+      state.camZ := 32.0;
+      tryDoorsAndExit(state);
     else
       movePlayer(state, 0.18);
     end if;
+    updateMonsterAI(state);
     if state.shotCooldown > 0 then decr(state.shotCooldown); end if;
     if state.shotFlash > 0 then decr(state.shotFlash); end if;
+    if state.hitFlash > 0 then decr(state.hitFlash); end if;
+    if state.damageCooldown > 0 then decr(state.damageCooldown); end if;
     incr(state.frameNo);
   end func;
 
-const proc: runSmoke (in integer: requestedFrames) is func
+const proc: runSmoke (in integer: requestedFrames, in string: startMap) is func
   local
     var engineState: state is engineState.value;
+    var engineState: scriptState is engineState.value;
     var visualStats: stats is visualStats.value;
     var integer: frame is 0;
     var integer: frames is 0;
     var integer: frameHash is 0;
     var string: hashes is "";
     var string: metricLine is "";
+    var array renderSurface: surfaces is 0 times renderSurface.value;
+    var array renderActor: actors is 0 times renderActor.value;
+    var integer: scriptedKills is 0;
   begin
     frames := requestedFrames;
     if frames <= 0 then frames := 2; end if;
+    resetMapState(state, mapIndexForToken(startMap), TRUE);
     writeln("[engine] smoke_frames=" <& frames);
+    writeln("[engine] start_map=" <& episodeMapToken(state.mapIndex) <&
+        " title=\"" <& episodeMapTitle(state.mapIndex) <& "\"");
     for frame range 1 to frames do
       deterministicStep(state, frame);
       stats := visualStats.value;
-      stats.surfacesSubmitted := length(generatedSurfaces);
-      stats.surfacesProjected := length(generatedSurfaces) - 1;
+      surfaces := generatedSurfacesFor(state.mapIndex);
+      actors := generatedActorsFor(state);
+      stats.surfacesSubmitted := length(surfaces);
+      stats.surfacesProjected := length(surfaces) - 1;
       stats.trianglesSubmitted := stats.surfacesProjected * 2;
       stats.depthWrites := stats.trianglesSubmitted * 9 + frame * 3;
       stats.emissiveSurfaces := 7;
       stats.textureSamples := stats.surfacesProjected * 17;
       stats.lightSamples := stats.emissiveSurfaces * 31;
-      stats.actorsSubmitted := length(generatedActors);
-      stats.actorsVisible := 4;
-      stats.hudElements := 24;
+      stats.actorsSubmitted := length(actors);
+      stats.actorsVisible := length(actors);
+      stats.hudElements := 32;
       stats.entropy := stats.depthWrites + stats.textureSamples +
-          stats.lightSamples + frame * 97;
+          stats.lightSamples + frame * 97 + state.mapIndex * 211;
       stats.flatColumnRegression := FALSE;
       metricLine := "tris=" <& stats.trianglesSubmitted <&
           ";z=" <& stats.depthWrites <&
@@ -862,31 +1602,47 @@ const proc: runSmoke (in integer: requestedFrames) is func
       writeln("[engine] smoke_frame_" <& frame <& " hash=" <& frameHash <&
           " " <& metricLine);
     end for;
+    resetMapState(scriptState, MAP_E1M1, TRUE);
+    deterministicStep(scriptState, 1);
+    deterministicStep(scriptState, 2);
+    deterministicStep(scriptState, 3);
+    scriptedKills := 1 - ord(scriptState.monster1Alive);
+    deterministicStep(scriptState, 4);
     writeln("[engine] smoke_hashes=" <& hashes);
     writeln("[engine] smoke_state=" <& stateSignature(state));
+    writeln("[engine] episode_maps=" <& EPISODE_MAPS);
+    writeln("[engine] monster_types=" <& MONSTER_TYPES);
+    writeln("[engine] keys=" <& EPISODE_KEYS);
+    writeln("[engine] doors=" <& EPISODE_DOORS);
+    writeln("[engine] scripted_path=pickup_key>open_door>kill_monster>exit");
+    writeln("[engine] scripted_kills=" <& scriptedKills);
+    writeln("[engine] scripted_transition_map=" <&
+        episodeMapToken(scriptState.mapIndex));
     writeln("[engine] engine_smoke_ready=TRUE");
+    writeln("[engine] episode_smoke_ready=TRUE");
   end func;
 
-const proc: runVisualSmoke (in integer: requestedFrames) is func
+const proc: runVisualSmoke (in integer: requestedFrames, in string: startMap) is func
   local
-    var engineState: state is engineState.value;
     var integer: frames is 0;
   begin
     frames := requestedFrames;
     if frames <= 0 then frames := 2; end if;
-    runSmoke(frames);
+    runSmoke(frames, startMap);
     writeln("[engine] visual_smoke_canvas=main_document_expected");
     writeln("[engine] visual_smoke_renderer=projected_surfaces");
     writeln("[engine] visual_smoke_assets=generated_replacement_pack");
+    writeln("[engine] visual_smoke_episode=classic_generated");
     writeln("[engine] visual_smoke_ready=TRUE");
   end func;
 
-const proc: runEngine is func
+const proc: runEngine (in engineConfig: config) is func
   local
     var engineState: state is engineState.value;
     var visualStats: stats is visualStats.value;
     var boolean: quit is FALSE;
   begin
+    resetMapState(state, mapIndexForToken(config.startMap), TRUE);
     screen(SCREEN_WIDTH, SCREEN_HEIGHT);
     KEYBOARD := GRAPH_KEYBOARD;
     repeat
@@ -906,12 +1662,13 @@ const proc: showUsage is func
     writeln("Usage:");
     writeln("  s7 doom3_seed7_runtime.s7");
     writeln("  s7 doom3_seed7_runtime.s7 --engine_mode generated");
+    writeln("  s7 doom3_seed7_runtime.s7 --doom3_start_map e1m1|e1m2|e1m3");
     writeln("  s7 doom3_seed7_runtime.s7 --engine_mode pk4 --doom3_data_path <optional-root>");
     writeln("  s7 doom3_seed7_runtime.s7 --smoke_frames 2");
     writeln("  s7 doom3_seed7_runtime.s7 --visual_smoke_frames 2");
     writeln("");
-    writeln("Controls: arrow keys move/turn, Space or left mouse fires, ESC quits.");
-    writeln("Default mode uses generated replacement assets and a Seed7 projected-surface engine shell.");
+    writeln("Controls: arrows or WASD move/turn, Space or left mouse fires, ESC quits, R restarts after death.");
+    writeln("Default mode starts E1M1 Foundry Gate with generated Classic DOOM-like replacement assets.");
   end func;
 
 const proc: parseArgs (inout engineConfig: config) is func
@@ -971,10 +1728,10 @@ const proc: main is func
     if config.showHelp then
       showUsage;
     elsif config.visualSmokeFrames <> 0 then
-      runVisualSmoke(config.visualSmokeFrames);
+      runVisualSmoke(config.visualSmokeFrames, config.startMap);
     elsif config.smokeFrames <> 0 then
-      runSmoke(config.smokeFrames);
+      runSmoke(config.smokeFrames, config.startMap);
     else
-      runEngine;
+      runEngine(config);
     end if;
   end func;

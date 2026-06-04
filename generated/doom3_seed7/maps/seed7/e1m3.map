@@ -1,0 +1,48 @@
+"classname" "worldspawn"
+"name" "E1M3 Reactor Exit"
+"episode_map" "e1m3"
+"room_count" "7"
+"rooms" "entry reactor_ring yellow_key_arm armor_bay final_gate final_exit reactor_switch"
+"door_count" "1"
+"locked_door" "yellow_key_gate"
+"key" "yellow"
+"monsters" "ember_crawler rust_trooper iron_brute"
+"pickups" "health ammo armor yellow_key"
+"exit" "episode_complete"
+{
+  "classname" "info_player_start"
+  "origin" "0 0 -1.45"
+}
+{
+  "classname" "item_key_yellow"
+  "name" "generated_yellow_key"
+  "origin" "8.75 0.48 22.0"
+}
+{
+  "classname" "func_door"
+  "name" "yellow_key_gate"
+  "requires" "yellow"
+  "origin" "0 1.1 23.0"
+}
+{
+  "classname" "monster_generated"
+  "name" "ember_crawler"
+  "origin" "-3.75 0.54 10.8"
+}
+{
+  "classname" "monster_generated"
+  "name" "rust_trooper"
+  "origin" "5.20 0.62 16.5"
+}
+{
+  "classname" "monster_generated"
+  "name" "iron_brute"
+  "origin" "0.10 0.64 28.6"
+}
+{
+  "classname" "trigger_exit"
+  "name" "e1m3_exit_switch"
+  "target_map" "episode_complete"
+  "requires" "yellow_key_gate iron_brute_dead"
+  "origin" "0 0.72 34.5"
+}

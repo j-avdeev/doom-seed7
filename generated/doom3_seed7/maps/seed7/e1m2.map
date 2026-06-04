@@ -1,0 +1,47 @@
+"classname" "worldspawn"
+"name" "E1M2 Processing Core"
+"episode_map" "e1m2"
+"room_count" "8"
+"rooms" "entry_corridor processing_core coolant_side blue_key_alcove armor_corner locked_exit_tube core_console exit_switch"
+"door_count" "1"
+"locked_door" "blue_key_gate"
+"key" "blue"
+"monsters" "rust_trooper ember_crawler iron_brute"
+"pickups" "health ammo armor blue_key"
+"exit" "e1m3"
+{
+  "classname" "info_player_start"
+  "origin" "0 0 -1.45"
+}
+{
+  "classname" "item_key_blue"
+  "name" "generated_blue_key"
+  "origin" "-8.40 0.48 20.6"
+}
+{
+  "classname" "func_door"
+  "name" "blue_key_gate"
+  "requires" "blue"
+  "origin" "0 1.1 21.0"
+}
+{
+  "classname" "monster_generated"
+  "name" "rust_trooper"
+  "origin" "-2.20 0.62 8.3"
+}
+{
+  "classname" "monster_generated"
+  "name" "ember_crawler"
+  "origin" "4.95 0.54 15.8"
+}
+{
+  "classname" "monster_generated"
+  "name" "iron_brute"
+  "origin" "0.25 0.64 27.8"
+}
+{
+  "classname" "trigger_exit"
+  "name" "e1m2_exit_switch"
+  "target_map" "e1m3"
+  "origin" "0 0.72 32.5"
+}

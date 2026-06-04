@@ -26,4 +26,16 @@ windowDef Desktop
     forecolor 0.8, 0.45, 0.24, 1
     text "FACE"
   }
+  windowDef KeySlots
+  {
+    rect 492, 430, 96, 28
+    forecolor 1, 0.1, 0.05, 1
+    text "KEYS"
+  }
+  windowDef WeaponSlots
+  {
+    rect 586, 430, 120, 44
+    forecolor 1, 0.82, 0.18, 1
+    text "WEAPONS"
+  }
 }
