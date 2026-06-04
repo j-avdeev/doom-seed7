@@ -55,6 +55,7 @@
       background: #000;
       outline: none;
       display: block;
+      image-rendering: pixelated;
     }
 
     main {
@@ -483,6 +484,7 @@
         canvas.style.display = 'block';
         canvas.style.background = '#000';
         canvas.style.outline = 'none';
+        canvas.style.imageRendering = 'pixelated';
         if (typeof canvas.focus === 'function') {
           try {
             canvas.focus({ preventScroll: true });

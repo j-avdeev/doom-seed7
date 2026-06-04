@@ -117,6 +117,19 @@ async function evaluate(expression) {
   return result.result && result.result.value;
 }
 
+async function sceneChecksum() {
+  return await evaluate(`(() => {
+    const c = document.querySelector('canvas');
+    const ctx = c.getContext('2d');
+    const data = ctx.getImageData(64, 32, 512, 160).data;
+    let sum = 0;
+    for (let i = 0; i < data.length; i += 64) {
+      sum = (sum + data[i] * 3 + data[i + 1] * 7 + data[i + 2] * 13 + i) % 1000000007;
+    }
+    return sum;
+  })()`);
+}
+
 await send('Page.enable');
 await send('Runtime.enable');
 await send('Network.enable');
@@ -163,6 +176,7 @@ for (let i = 0; i < 160; i++) {
         clientWidth: document.documentElement.clientWidth,
         clientHeight: document.documentElement.clientHeight
       },
+      imageRendering: c ? getComputedStyle(c).imageRendering : '',
       bodyText: document.body.innerText.slice(0, 200),
       launchStillVisible: !!document.getElementById('runButton')
     };
@@ -177,8 +191,11 @@ if (!observed || !observed.canvas) {
 if (observed.launchStillVisible || observed.bodyText.includes('Launch')) {
   throw new Error('Launcher UI still overlaps the game canvas: ' + JSON.stringify(observed));
 }
-if (observed.width < 900 || observed.height < 500) {
+if (observed.width !== 640 || observed.height !== 360) {
   throw new Error('Canvas is not the expected engine viewport size: ' + JSON.stringify(observed));
+}
+if (!String(observed.imageRendering).includes('pixelated')) {
+  throw new Error('Canvas is not using pixelated scaling: ' + JSON.stringify(observed));
 }
 if (observed.scroll.width > observed.scroll.clientWidth + 1 || observed.scroll.height > observed.scroll.clientHeight + 1) {
   throw new Error('Game canvas causes document scroll overflow: ' + JSON.stringify(observed));
@@ -191,6 +208,41 @@ await sleep(1500);
 const pageTargets = (await getJson('/json/list')).filter(item => item.type === 'page');
 if (pageTargets.length !== 1) {
   throw new Error('A popup or extra page target was opened: ' + JSON.stringify(pageTargets.map(item => ({ title: item.title, url: item.url }))));
+}
+
+await evaluate(`(() => {
+  const c = document.querySelector('canvas');
+  c.focus();
+  return document.activeElement === c;
+})()`);
+const beforeInputChecksum = await sceneChecksum();
+await send('Input.dispatchKeyEvent', {
+  type: 'keyDown',
+  key: 'w',
+  code: 'KeyW',
+  windowsVirtualKeyCode: 87,
+  nativeVirtualKeyCode: 87
+});
+const inputStart = Date.now();
+let inputResponseMs = -1;
+let afterInputChecksum = beforeInputChecksum;
+for (let i = 0; i < 10; i++) {
+  await sleep(25);
+  afterInputChecksum = await sceneChecksum();
+  if (afterInputChecksum !== beforeInputChecksum) {
+    inputResponseMs = Date.now() - inputStart;
+    break;
+  }
+}
+await send('Input.dispatchKeyEvent', {
+  type: 'keyUp',
+  key: 'w',
+  code: 'KeyW',
+  windowsVirtualKeyCode: 87,
+  nativeVirtualKeyCode: 87
+});
+if (inputResponseMs < 0 || inputResponseMs > 250) {
+  throw new Error('Input latency check did not move the scene within 250ms: ' + JSON.stringify({ inputResponseMs, beforeInputChecksum, afterInputChecksum }));
 }
 
 const pixels = await evaluate(`(() => {
@@ -216,7 +268,7 @@ const pixels = await evaluate(`(() => {
 const hudPixels = await evaluate(`(() => {
   const c = document.querySelector('canvas');
   const ctx = c.getContext('2d');
-  const data = ctx.getImageData(724, 452, 230, 86).data;
+  const data = ctx.getImageData(506, 282, 132, 76).data;
   let nonblank = 0, red = 0, cyan = 0, amber = 0, transitions = 0;
   let last = -1;
   for (let i = 0; i < data.length; i += 16) {
@@ -233,9 +285,9 @@ const hudPixels = await evaluate(`(() => {
 })()`);
 
 if (pixels.nonblank < pixels.samples * 0.90) throw new Error('Canvas appears blank: ' + JSON.stringify(pixels));
-if (pixels.transitions < 900) throw new Error('Frame entropy is too low for projected engine scene: ' + JSON.stringify(pixels));
-if (pixels.red < 20 || pixels.green < 8 || pixels.blue < 8) throw new Error('Expected colored industrial/emissive detail is missing: ' + JSON.stringify(pixels));
-if (hudPixels.nonblank < hudPixels.samples * 0.80 || hudPixels.transitions < 120) {
+if (pixels.transitions < 650) throw new Error('Frame entropy is too low for projected engine scene: ' + JSON.stringify(pixels));
+if (pixels.red < 12 || pixels.green < 6 || pixels.blue < 6) throw new Error('Expected colored industrial/emissive detail is missing: ' + JSON.stringify(pixels));
+if (hudPixels.nonblank < hudPixels.samples * 0.80 || hudPixels.transitions < 65) {
   throw new Error('Right HUD key/weapon icon region is too empty or flat: ' + JSON.stringify(hudPixels));
 }
 
@@ -254,7 +306,15 @@ if (screenshotPath) {
   writeFileSync(screenshotPath, Buffer.from(screenshot.data, 'base64'));
 }
 
-console.log(JSON.stringify({ before, observed, pixels, hudPixels, badResponses, screenshotPath }, null, 2));
+console.log(JSON.stringify({
+  before,
+  observed,
+  inputLatency: { inputResponseMs, beforeInputChecksum, afterInputChecksum },
+  pixels,
+  hudPixels,
+  badResponses,
+  screenshotPath
+}, null, 2));
 ws.close();
 '@
 
