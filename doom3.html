@@ -6,360 +6,343 @@
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate, max-age=0" />
   <meta http-equiv="Pragma" content="no-cache" />
   <meta http-equiv="Expires" content="0" />
-    <title>Doom 3 Seed7 Port Foundation</title>
+  <title>Doom3 Seed7 Playable</title>
   <style>
     :root {
       color-scheme: dark;
-      --bg: #111412;
-      --panel: #1a201d;
-      --line: #354139;
-      --text: #e6ece7;
-      --muted: #a7b4aa;
-      --accent: #8ed3c0;
-      --warn: #d99058;
+      --bg: #070908;
+      --panel: #151918;
+      --panel-2: #101413;
+      --line: #34413d;
+      --text: #edf2ee;
+      --muted: #a8b3ad;
+      --accent: #77d0bd;
+      --accent-2: #caa85f;
       --error: #f08c8c;
+      --warn: #d7a05e;
     }
 
-    * { box-sizing: border-box; }
+    * {
+      box-sizing: border-box;
+    }
 
     body {
       margin: 0;
-      background: var(--bg);
+      min-height: 100vh;
+      background:
+        radial-gradient(circle at 28% 0%, rgba(119, 208, 189, 0.12), transparent 32%),
+        linear-gradient(180deg, #0b0e0d 0%, var(--bg) 58%, #040505 100%);
       color: var(--text);
       font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     }
 
     main {
-      width: min(980px, calc(100vw - 32px));
+      width: min(920px, calc(100vw - 32px));
       margin: 0 auto;
-      padding: 24px 0;
+      padding: 28px 0 22px;
     }
 
     header {
-      display: flex;
-      justify-content: space-between;
-      align-items: baseline;
-      gap: 16px;
+      display: grid;
+      gap: 6px;
       margin-bottom: 18px;
+      padding-bottom: 16px;
       border-bottom: 1px solid var(--line);
-      padding-bottom: 14px;
     }
 
     h1 {
       margin: 0;
-      font-size: 24px;
-      font-weight: 650;
+      font-size: clamp(28px, 5vw, 52px);
+      line-height: 1;
+      font-weight: 760;
       letter-spacing: 0;
     }
 
-    a { color: var(--accent); }
-
-    .panel {
-      background: var(--panel);
-      border: 1px solid var(--line);
-      border-radius: 6px;
-      padding: 16px;
-      margin-bottom: 16px;
+    .subtitle {
+      margin: 0;
+      max-width: 760px;
+      color: var(--muted);
+      font-size: 15px;
+      line-height: 1.45;
     }
 
-    .controls {
+    .panel {
       display: grid;
-      grid-template-columns: 1fr auto;
+      gap: 16px;
+      background: color-mix(in srgb, var(--panel) 94%, black);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 16px;
+      box-shadow: 0 20px 70px rgba(0, 0, 0, 0.24);
+    }
+
+    .fields {
+      display: grid;
+      grid-template-columns: minmax(220px, 1fr) minmax(180px, 280px);
       gap: 12px;
       align-items: end;
     }
 
     label {
       display: block;
+      margin-bottom: 6px;
       color: var(--muted);
       font-size: 13px;
-      margin-bottom: 6px;
     }
 
     input[type="file"],
-    input[type="text"],
-    select {
+    input[type="text"] {
       width: 100%;
-      min-height: 38px;
-      color: var(--text);
-      background: #101311;
+      min-height: 40px;
       border: 1px solid var(--line);
-      border-radius: 4px;
-      padding: 8px;
+      border-radius: 6px;
+      background: var(--panel-2);
+      color: var(--text);
+      padding: 8px 10px;
+      font: inherit;
     }
 
-    button {
-      min-height: 38px;
-      border: 1px solid #5d7f74;
-      border-radius: 4px;
-      padding: 0 14px;
-      color: #06110d;
-      background: var(--accent);
-      font-weight: 650;
-      cursor: pointer;
-    }
-
-    button:disabled {
-      cursor: not-allowed;
-      opacity: 0.55;
-    }
-
-    .button-row {
+    .actions {
       display: flex;
       flex-wrap: wrap;
       gap: 10px;
       justify-content: flex-end;
     }
 
-    .secondary {
-      color: var(--text);
-      background: #27312d;
+    button {
+      min-height: 40px;
+      border: 1px solid #6aa99b;
+      border-radius: 6px;
+      padding: 0 16px;
+      background: var(--accent);
+      color: #06110e;
+      font: inherit;
+      font-weight: 700;
+      cursor: pointer;
+    }
+
+    button.secondary {
       border-color: var(--line);
+      background: #242b29;
+      color: var(--text);
     }
 
-    .hint {
-      color: var(--muted);
-      font-size: 13px;
-      line-height: 1.45;
-      margin: 10px 0 0;
+    button:disabled {
+      opacity: 0.55;
+      cursor: not-allowed;
     }
 
-    .field-grid {
-      display: grid;
-      grid-template-columns: 1fr minmax(190px, 260px);
-      gap: 12px;
-    }
-
-    #status {
+    .status-line {
+      min-height: 22px;
       color: var(--muted);
       font-size: 14px;
-      min-height: 22px;
-      margin-bottom: 10px;
     }
 
-    #status.error { color: var(--error); }
-    #status.warn { color: var(--warn); }
+    .status-line.error {
+      color: var(--error);
+    }
+
+    .status-line.warn {
+      color: var(--warn);
+    }
+
+    details {
+      border-top: 1px solid var(--line);
+      padding-top: 12px;
+    }
+
+    summary {
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 13px;
+    }
 
     pre {
-      min-height: 360px;
-      max-height: calc(100vh - 320px);
+      max-height: min(300px, 44vh);
       overflow: auto;
-      margin: 0;
-      padding: 12px;
-      background: #060806;
+      margin: 10px 0 0;
       border: 1px solid var(--line);
-      border-radius: 4px;
-      color: #cfe4d8;
+      border-radius: 6px;
+      background: #050706;
+      color: #d8ebe3;
+      padding: 12px;
       font: 12px/1.45 Consolas, "Liberation Mono", monospace;
       white-space: pre-wrap;
       word-break: break-word;
     }
 
+    code {
+      color: var(--accent-2);
+    }
+
     @media (max-width: 720px) {
-      header,
-      .controls,
-      .field-grid {
-        grid-template-columns: 1fr;
-        display: grid;
+      main {
+        width: min(100vw - 20px, 920px);
+        padding-top: 18px;
       }
 
-      button { width: 100%; }
+      .fields,
+      .actions {
+        grid-template-columns: 1fr;
+        justify-content: stretch;
+      }
+
+      button {
+        width: 100%;
+      }
     }
   </style>
 </head>
 <body>
-  <main>
+  <main id="launcher">
     <header>
-      <h1>Doom 3 Seed7 Port Foundation</h1>
+      <h1>Doom3 Seed7</h1>
+      <p class="subtitle">
+        Playable WebAssembly runtime with generated dark sci-fi assets. Optional local pk4 files are mounted in browser memory only; the game runs without bundled commercial data.
+      </p>
     </header>
 
-    <section class="panel">
-      <div class="controls">
-        <div class="field-grid">
-          <div>
-            <label for="pk4Files">Optional user-owned Doom 3 pk4 files</label>
-            <input id="pk4Files" type="file" accept=".pk4,.zip" multiple />
-          </div>
-          <div>
-            <label>Run mode</label>
-            <div>doom3_seed7_runtime.s7</div>
-          </div>
-        </div>
-        <div class="button-row">
-          <button id="syntheticButton" class="secondary" type="button">Run Synthetic Fixture</button>
-          <button id="runButton" type="button">Run Runtime</button>
-        </div>
-      </div>
-      <p class="hint">
-        Click <strong>Run Synthetic Fixture</strong> or <strong>Run Runtime</strong> to use generated placeholder data.
-        Selecting legal Doom 3 files from a local install is optional and mounts them only in browser memory under
-        <code>/doom3/base</code>; this page does not upload or bundle commercial assets.
-      </p>
-      <div class="controls" style="margin-top: 12px;">
+    <section class="panel" aria-label="Doom3 Seed7 launcher">
+      <div class="fields">
         <div>
-          <label for="startMap">Start map metadata target</label>
+          <label for="pk4Files">Optional pk4 files</label>
+          <input id="pk4Files" type="file" accept=".pk4,.zip" multiple />
+        </div>
+        <div>
+          <label for="startMap">Start map token</label>
           <input id="startMap" type="text" value="game/mars_city1" />
         </div>
-        <button id="helpButton" type="button">Show Help</button>
       </div>
-    </section>
 
-    <section class="panel">
-      <div id="status">Ready to run with the generated synthetic fixture.</div>
-      <pre id="log" aria-live="polite"></pre>
+      <div class="actions">
+        <button id="helpButton" class="secondary" type="button">Help</button>
+        <button id="runButton" type="button">Launch</button>
+      </div>
+
+      <div id="status" class="status-line">Ready. Launch runs <code>doom3_seed7_runtime.s7</code>.</div>
+
+      <details>
+        <summary>Runtime log</summary>
+        <pre id="log" aria-live="polite"></pre>
+      </details>
     </section>
   </main>
 
-    <script>
+  <script>
     (function() {
-      function clearHttpCaches() {
-        if (!window.caches || !window.caches.keys) {
-          return;
-        }
-        window.caches.keys()
-          .then(function(keys) {
-            return Promise.all(keys.map(function(key) {
-              return window.caches.delete(key);
-            }));
-          })
-          .catch(function() {});
-      }
-
-      function clearServiceWorkers() {
-        if (!window.navigator || !window.navigator.serviceWorker) {
-          return;
-        }
-        window.navigator.serviceWorker.getRegistrations().then(function(registrations) {
-          registrations.forEach(function(registration) {
-            registration.unregister();
-          });
-        }).catch(function() {});
-      }
-
-      clearServiceWorkers();
-      clearHttpCaches();
-
-      var WASM_DIR = 'wasm';
+      var WASM_JS = 'wasm/s7.js';
+      var WASM_WASM = 'wasm/s7.wasm';
+      var DEFAULT_ENTRY = 'doom3_seed7_runtime.s7';
+      var GAME_MODULE = 'doom3_seed7_game.s7';
       var runButton = document.getElementById('runButton');
-      var syntheticButton = document.getElementById('syntheticButton');
       var helpButton = document.getElementById('helpButton');
       var pk4Input = document.getElementById('pk4Files');
       var startMapInput = document.getElementById('startMap');
       var statusEl = document.getElementById('status');
       var logEl = document.getElementById('log');
       var hasStarted = false;
-      var DEFAULT_ENTRY = 'doom3_seed7_runtime.s7';
-      var isFileProtocol = window.location.protocol === 'file:';
-      var fetchDiagnostics = [];
-      var SYNTHETIC_FIXTURE_BASE64 = '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';
-      var launcherUrl = (window.location.protocol === 'file:'
-          ? 'http://localhost:8080/doom3.html?entry=' + encodeURIComponent(DEFAULT_ENTRY)
-          : new URL('doom3.html?entry=' + encodeURIComponent(DEFAULT_ENTRY), window.location.href).href);
 
-      function canonicalizeEntry(entry) {
-        var normalized = (entry || '').trim().toLowerCase();
-        if (!/^\w*doom3_seed7_runtime\.s7$/.test(normalized)) {
-          if (normalized.length > 0 && /raycaster/i.test(normalized)) {
-            appendLog('Legacy raycaster entry detected: ' + entry + '. Switching to Doom 3 runtime launcher.');
-          }
-          return DEFAULT_ENTRY;
-        }
-        return normalized;
-      }
-
-      function resolveEntryRequest(entry) {
-        var requested = (entry || '').trim();
-        var normalized = canonicalizeEntry(requested);
-        if (normalized !== requested.toLowerCase()) {
-          appendLog('Runtime entry "' + requested + '" normalized to canonical entry: ' + normalized);
-        }
-        return normalized;
-      }
-
-      function restoreControls() {
-        hasStarted = false;
-        runButton.disabled = false;
-        syntheticButton.disabled = false;
-        helpButton.disabled = false;
-        pk4Input.disabled = false;
-        startMapInput.disabled = false;
-      }
-
-      function logModeNotice(requestedEntry) {
-        if (!requestedEntry) {
-          return;
-        }
-        var normalized = (requestedEntry || '').trim().toLowerCase();
-        if (normalized !== DEFAULT_ENTRY) {
-          appendLog('Launcher entry "' + requestedEntry + '" is not the Doom3 runtime.');
-          appendLog('Entry has been normalized to ' + DEFAULT_ENTRY + '.');
-        }
-      }
-
-      function applyQueryEntryAlias() {
-        try {
-          var requestedEntry = new URL(window.location.href).searchParams.get('entry');
-          if (requestedEntry && requestedEntry.toLowerCase() !== DEFAULT_ENTRY) {
-            appendLog('Legacy query detected: ' + requestedEntry +
-                '. This launch path is Doom3-only; switching to doom3_seed7_runtime.s7.');
-          }
-          logModeNotice(requestedEntry);
-          if (requestedEntry && requestedEntry.toLowerCase() !== DEFAULT_ENTRY) {
-            appendLog('Launcher entry is forced to Doom3 runtime: ' + DEFAULT_ENTRY + '.');
-          }
-          var normalizedRequest = canonicalizeEntry(requestedEntry || '');
-          var normalizedUrl = new URL(window.location.href);
-          if (!requestedEntry || requestedEntry.toLowerCase() !== normalizedRequest) {
-            appendLog('Launcher query normalized to Doom3-only mode: ' + DEFAULT_ENTRY + '.');
-          } else {
-            appendLog('Browser launcher is Doom3-only; current mode is Doom3 runtime.');
-          }
-          normalizedUrl.searchParams.set('entry', normalizedRequest);
-          window.history.replaceState({}, '', normalizedUrl.href);
-          appendLog('Active launcher entry is set to "' + normalizedRequest + '".');
-          appendLog('Open the current launcher at ' + launcherUrl + ' (or the active local equivalent).');
-        } catch (error) {
-          // best effort only
-        }
-      }
       function appendLog(line) {
+        if (!logEl) return;
         logEl.textContent += line + '\n';
         logEl.scrollTop = logEl.scrollHeight;
       }
 
       function setStatus(message, state) {
         statusEl.textContent = message;
-        statusEl.className = state || '';
+        statusEl.className = 'status-line' + (state ? ' ' + state : '');
       }
 
-      function isFileProtocolError() {
-        return isFileProtocol;
+      function setControls(disabled) {
+        runButton.disabled = disabled;
+        helpButton.disabled = disabled;
+        pk4Input.disabled = disabled;
+        startMapInput.disabled = disabled;
       }
 
       function enforceHttpOnly() {
-        if (!isFileProtocolError()) {
+        if (window.location.protocol !== 'file:') {
           return true;
         }
-        setStatus('Run this page via HTTP: python -m http.server 8080 then open http://localhost:8080/doom3.html', 'error');
-        appendLog('Seed7 browser launcher requires HTTP; file:// cannot fetch runtime source files.');
-        runButton.disabled = true;
-        syntheticButton.disabled = true;
-        helpButton.disabled = true;
-        pk4Input.disabled = true;
-        startMapInput.disabled = true;
+        setControls(true);
+        setStatus('Run over HTTP: python -m http.server 8080, then open http://localhost:8080/doom3.html', 'error');
+        appendLog('file:// cannot fetch Seed7 runtime sources or wasm artifacts.');
         return false;
       }
 
-      function loadScript(src) {
-        return new Promise(function(resolve, reject) {
-          var script = document.createElement('script');
-          var cacheBust = String(Date.now());
-          script.src = src + (src.indexOf('?') === -1 ? '?' : '&') + 's7cache=' + cacheBust;
-          script.setAttribute('crossorigin', 'anonymous');
-          script.onload = resolve;
-          script.onerror = function() { reject(new Error('Failed to load ' + src)); };
-          document.body.appendChild(script);
-        });
+      function canonicalizeEntry(entry) {
+        var normalized = (entry || '').trim().toLowerCase();
+        if (normalized === DEFAULT_ENTRY || normalized === '/' + DEFAULT_ENTRY) {
+          return DEFAULT_ENTRY;
+        }
+        return DEFAULT_ENTRY;
+      }
+
+      function activeEntry() {
+        var requested = '';
+        try {
+          requested = new URL(window.location.href).searchParams.get('entry') || '';
+        } catch (error) {
+          requested = '';
+        }
+        return canonicalizeEntry(requested || DEFAULT_ENTRY);
+      }
+
+      function normalizeUrlEntry() {
+        try {
+          var url = new URL(window.location.href);
+          if (url.searchParams.get('entry') !== DEFAULT_ENTRY) {
+            url.searchParams.set('entry', DEFAULT_ENTRY);
+            window.history.replaceState({}, '', url.href);
+          }
+        } catch (error) {
+          // best effort
+        }
+      }
+
+      function cacheBusted(url) {
+        var separator = url.indexOf('?') === -1 ? '?' : '&';
+        return url + separator + 's7cache=' + encodeURIComponent(String(Date.now()));
+      }
+
+      function sourceCandidates(path) {
+        var baseUrl = new URL('.', window.location.href);
+        var candidates = [
+          new URL(path, baseUrl).href,
+          new URL('./' + path, baseUrl).href
+        ];
+        return candidates.reduce(function(accumulator, candidate) {
+          if (accumulator.indexOf(candidate) === -1) accumulator.push(candidate);
+          var busted = cacheBusted(candidate);
+          if (accumulator.indexOf(busted) === -1) accumulator.push(busted);
+          return accumulator;
+        }, []);
+      }
+
+      function fetchText(path) {
+        if (!/\.s7$/i.test(path)) {
+          return Promise.reject(new Error('Invalid Seed7 entry rejected: ' + path));
+        }
+        var candidates = sourceCandidates(path);
+        var diagnostics = [];
+        function attempt(index) {
+          if (index >= candidates.length) {
+            return Promise.reject(new Error('Failed to fetch ' + path + '. ' + diagnostics.join(' | ')));
+          }
+          var candidate = candidates[index];
+          return fetch(candidate, { cache: 'no-store' })
+            .then(function(response) {
+              if (!response.ok) {
+                diagnostics.push('HTTP ' + response.status + ' for ' + candidate);
+                return attempt(index + 1);
+              }
+              return response.text();
+            }, function(error) {
+              diagnostics.push((error && error.message ? error.message : String(error)) + ' for ' + candidate);
+              return attempt(index + 1);
+            });
+        }
+        return attempt(0);
       }
 
       function readFileBytes(file) {
@@ -383,291 +366,96 @@
         return name.replace(/\.zip$/i, '.pk4');
       }
 
-      function selectedEntry() {
-        return resolveEntryRequest(DEFAULT_ENTRY);
-      }
-
-      function selectedModeName() {
-        return 'Doom3 runtime';
-      }
-
-      function updateRunButtonLabel() {
-        runButton.textContent = 'Run Runtime';
-      }
-
-      function fetchSourceCandidates(entryUrl) {
-        var baseUrl = new URL('.', window.location.href);
-        var cacheBust = String(Date.now());
-        var candidates = [
-          new URL(entryUrl, baseUrl).href,
-          new URL('./' + entryUrl, baseUrl).href
-        ];
-        if (window.location.protocol !== 'file:') {
-          candidates.push(new URL('/' + entryUrl, window.location.href).href);
-        }
-        candidates = candidates.reduce(function(accumulator, candidate) {
-          accumulator.push(candidate);
-          accumulator.push(candidate + (candidate.indexOf('?') === -1 ? '?' : '&') + 's7cache=' + cacheBust);
-          return accumulator;
-        }, []);
-        candidates = candidates.map(function(candidate) {
-          return candidate;
-        });
-        return candidates.filter(function(item, index, arr) {
-          return arr.indexOf(item) === index;
-        });
-      }
-
-      function fetchSourceWithFallback(entryUrl) {
-        return attemptSourceFetch(resolveEntryRequest(entryUrl), false);
-      }
-
-      function addLauncherHint() {
-        appendLog('If you see this message, your browser may still have a stale launcher cache.');
-        appendLog('Open this direct launcher URL and hard-refresh (Ctrl+Shift+R):');
-        appendLog(launcherUrl);
-      }
-
-      function recoverFromStaleLauncher() {
-        if (!window.sessionStorage || !window.sessionStorage.getItem) {
-          return;
-        }
-        var recoveryToken = 'doom3-clear-launcher-recovery-v2';
-        if (window.sessionStorage.getItem(recoveryToken) === '1') {
-          return;
-        }
-        window.sessionStorage.setItem(recoveryToken, '1');
-        clearServiceWorkers();
-        clearHttpCaches();
-        appendLog('Running stale-launcher recovery: cache/state reset requested.');
-      }
-
-      function redirectToCleanLauncher() {
-        if (!window.sessionStorage || !window.sessionStorage.getItem) {
-          return;
-        }
-        if (window.sessionStorage.getItem('doom3-clean-launcher-redirect') === '1') {
-          return;
-        }
-        window.sessionStorage.setItem('doom3-clean-launcher-redirect', '1');
-        var cleanUrl = new URL('doom3.html', window.location.href);
-        cleanUrl.searchParams.set('entry', DEFAULT_ENTRY);
-        cleanUrl.searchParams.set('src', String(Date.now()));
-        appendLog('Attempting automatic recovery by reloading a clean Doom3 launcher URL.');
-        appendLog(cleanUrl.href);
-        setTimeout(function() {
-          window.location.replace(cleanUrl.href);
-        }, 150);
-      }
-
-      function attemptSourceFetch(entryUrl, fallbackAttempted) {
-        if (!/\\.s7$/i.test(entryUrl)) {
-          appendLog('Non-runtime entry "' + entryUrl + '" is not a runtime source; defaulting to Doom3 runtime.');
-          return attemptSourceFetch(DEFAULT_ENTRY, fallbackAttempted);
-        }
-        var candidates = fetchSourceCandidates(entryUrl);
-        fetchDiagnostics = [];
-        if (fallbackAttempted) {
-          appendLog('Retrying source fetch with Doom3 runtime entry: ' + entryUrl);
-        }
-        function attempt(index) {
-          if (index >= candidates.length) {
-              if (!fallbackAttempted && entryUrl !== DEFAULT_ENTRY) {
-              appendLog('Primary entry fetch failed for ' + entryUrl + '; retrying Doom3 runtime fallback.');
-              return attemptSourceFetch(DEFAULT_ENTRY, true);
-            }
-            var aliasHint =
-                'Open this page at ' + launcherUrl + ', then hard-refresh with Ctrl+Shift+R (or clear cache) if the page still looks stale.';
-            var recoveryGuide =
-                'Launcher recovery: open this exact URL and hard-refresh (Ctrl+Shift+R): ' + launcherUrl + '. ' +
-                'If this page came from cache, reopen /doom3.html?entry=doom3_seed7_runtime.s7 directly.';
-            var staleLauncherHint = 'If the browser still shows a cached launcher page, clear cache and open ' +
-                'the Doom 3 launcher directly: ' + launcherUrl + '.';
-            var staleLauncherTextHint =
-                'If the page still shows an older launcher layout, it is from cached UI state.';
-            addLauncherHint();
-            recoverFromStaleLauncher();
-            redirectToCleanLauncher();
-            throw new Error('Failed to fetch entry "' + entryUrl + '" from ' + candidates.join(', ') + '. ' +
-                aliasHint + ' ' + recoveryGuide + ' Details: ' + fetchDiagnostics.join(' | ') + '. ' +
-                staleLauncherHint + ' ' + staleLauncherTextHint);
-          }
-          return fetch(candidates[index]).then(function(response) {
-            if (!response.ok) {
-              fetchDiagnostics.push('HTTP ' + response.status + ' ' + response.statusText + ' for ' + candidates[index]);
-              appendLog('Retrying source fetch, ' + response.status + ' ' + response.statusText + ' for ' + candidates[index]);
-              return attempt(index + 1);
-            }
-            fetchDiagnostics.push('HTTP ' + response.status + ' ' + response.statusText + ' for ' + candidates[index]);
-            return response.text().then(function(source) {
-              return {source: source, entry: entryUrl};
-            });
-          }).catch(function(error) {
-            fetchDiagnostics.push('Network error for ' + candidates[index] + ': ' + (error && error.message ? error.message : String(error)));
-            appendLog('Retrying source fetch for ' + candidates[index]);
-            return attempt(index + 1);
-          });
-        }
-        return attempt(0);
-      }
-
-      function decodeSyntheticFixture() {
-        var raw = atob(SYNTHETIC_FIXTURE_BASE64);
-        var bytes = new Uint8Array(raw.length);
-        for (var index = 0; index < raw.length; index++) {
-          bytes[index] = raw.charCodeAt(index);
-        }
-        return bytes;
-      }
-
-      function afterBrowserPaint() {
-        return new Promise(function(resolve) {
-          requestAnimationFrame(function() {
-            setTimeout(resolve, 0);
-          });
-        });
-      }
-
-      function startSeed7(args, filesToMount, entryUrl) {
-        if (hasStarted) {
-          setStatus('Seed7 runtime already started. Reload the page to run another mode.', 'warn');
-          return Promise.resolve();
-        }
-        var safeEntry = resolveEntryRequest(entryUrl);
-        if (safeEntry !== entryUrl) {
-          appendLog('Non-runtime entry "' + (entryUrl || '') + '" normalized to ' + safeEntry + '.');
-          entryUrl = safeEntry;
-        }
-        hasStarted = true;
-        runButton.disabled = true;
-        syntheticButton.disabled = true;
-        helpButton.disabled = true;
-        pk4Input.disabled = true;
-        startMapInput.disabled = true;
-
-        return fetchSourceWithFallback(entryUrl)
-          .then(function(sourceResult) {
-            var resolvedEntry = sourceResult.entry || entryUrl;
-            var resolvedArgs = args.slice(0);
-            for (var i = resolvedArgs.length - 1; i >= 0; i--) {
-              if (typeof resolvedArgs[i] === 'string' && resolvedArgs[i].charAt(0) === '/') {
-                resolvedArgs[i] = '/' + resolvedEntry;
-                break;
-              }
-            }
-            window.Module = {
-              arguments: resolvedArgs,
-              preRun: [function() {
-                function ensureDir(path) {
-                  try {
-                    FS.mkdir(path);
-                  } catch (error) {
-                    if (!error || error.errno !== 20) throw error;
-                  }
-                }
-                ensureDir('/doom3');
-                ensureDir('/doom3/base');
-                FS.writeFile('/' + resolvedEntry, sourceResult.source);
-                filesToMount.forEach(function(item) {
-                  FS.writeFile('/doom3/base/' + item.name, item.bytes);
-                });
-              }],
-              print: appendLog,
-              printErr: appendLog,
-              locateFile: function(path) {
-                if (path.endsWith('.wasm')) return new URL(WASM_DIR + '/s7.wasm', window.location.href).href;
-                return path;
-              }
-            };
-            return loadScript(new URL(WASM_DIR + '/s7.js', window.location.href).href);
-          })
-          .catch(function(error) {
-            restoreControls();
-            throw error;
-          });
-      }
-
-      helpButton.addEventListener('click', function() {
-        if (!enforceHttpOnly()) {
-          return;
-        }
-        var entryUrl = selectedEntry();
-        logEl.textContent = '';
-        setStatus('Starting Seed7 help for ' + selectedModeName() + ' in browser memory.');
-        startSeed7(['-l', '/seed7/lib', '/' + entryUrl, '--help'], [], entryUrl)
-          .then(function() { setStatus('Help finished. Reload to run another mode.'); })
-          .catch(function(error) {
-            setStatus('Error: ' + error.message, 'error');
-            appendLog(String(error.stack || error));
-          });
-      });
-
-      syntheticButton.addEventListener('click', function() {
-        if (!enforceHttpOnly()) {
-          return;
-        }
-        var entryUrl = selectedEntry();
-        var startMap = startMapInput.value.trim() || 'game/mars_city1';
-
-        logEl.textContent = '';
-        setStatus('Preparing generated placeholder fixture.');
-        appendLog('Synthetic fixture mode uses embedded generated test data, not commercial Doom 3 assets.');
-        Promise.resolve(decodeSyntheticFixture())
-          .then(function(bytes) {
-            appendLog('Synthetic fixture ready: ' + bytes.length + ' bytes.');
-            setStatus('Starting Seed7 ' + selectedModeName() + ' with synthetic fixture.');
-            return afterBrowserPaint().then(function() {
-              return bytes;
-            });
-          })
-          .then(function(bytes) {
-            return startSeed7([
-              '-l', '/seed7/lib',
-              '/' + entryUrl,
-              '--doom3_data_path', '/doom3',
-              '--doom3_start_map', startMap
-            ], [{ name: 'pak000.pk4', bytes: bytes }], entryUrl);
-          })
-          .then(function() {
-            setStatus('Synthetic fixture run finished. Reload the page to run another mode.');
-          })
-          .catch(function(error) {
-            setStatus('Error: ' + error.message, 'error');
-            appendLog(String(error.stack || error));
-            restoreControls();
-          });
-      });
-
-      runButton.addEventListener('click', function() {
-        if (!enforceHttpOnly()) {
-          return;
-        }
-        var entryUrl = selectedEntry();
+      function selectedPk4Files() {
         var files = Array.prototype.slice.call(pk4Input.files || []);
-        var startMap = startMapInput.value.trim() || 'game/mars_city1';
         if (files.length === 0) {
-          syntheticButton.click();
-          return;
+          return Promise.resolve([]);
         }
-
-        logEl.textContent = '';
-        setStatus('Reading ' + files.length + ' pk4 file(s) into browser memory.');
-        Promise.all(files.map(function(file, index) {
+        setStatus('Mounting ' + files.length + ' asset file(s) in browser memory.');
+        return Promise.all(files.map(function(file, index) {
           return readFileBytes(file).then(function(bytes) {
             return { name: cleanPk4Name(file.name, index), bytes: bytes };
           });
-        }))
-          .then(function(mountedFiles) {
-            setStatus('Starting Seed7 ' + selectedModeName() + '.');
-            return startSeed7([
-              '-l', '/seed7/lib',
-              '/' + entryUrl,
-              '--doom3_data_path', '/doom3',
-              '--doom3_start_map', startMap
-            ], mountedFiles, entryUrl);
-          })
-          .then(function() {
-            setStatus('Run finished. Reload the page to run another mode.');
+        })).then(function(mountedFiles) {
+          setStatus('Assets mounted. Starting playable runtime.');
+          appendLog('assets mounted: ' + mountedFiles.map(function(item) { return item.name; }).join(', '));
+          return mountedFiles;
+        });
+      }
+
+      function loadScript(src) {
+        return new Promise(function(resolve, reject) {
+          var script = document.createElement('script');
+          script.src = cacheBusted(src);
+          script.setAttribute('crossorigin', 'anonymous');
+          script.onload = resolve;
+          script.onerror = function() {
+            reject(new Error('Failed to load ' + src));
+          };
+          document.body.appendChild(script);
+        });
+      }
+
+      function startSeed7(args, mountedFiles) {
+        if (hasStarted) {
+          setStatus('Seed7 runtime already started. Reload the page to run again.', 'warn');
+          return Promise.resolve();
+        }
+        hasStarted = true;
+        setControls(true);
+        var entry = activeEntry();
+        var startMap = startMapInput.value.trim() || 'game/mars_city1';
+        var finalArgs = args || [
+          '-l', '/seed7/lib',
+          '/' + entry,
+          '--doom3_data_path', '/doom3',
+          '--doom3_start_map', startMap
+        ];
+
+        return Promise.all([fetchText(entry), fetchText(GAME_MODULE)]).then(function(sources) {
+          window.Module = {
+            arguments: finalArgs,
+            preRun: [function() {
+              function ensureDir(path) {
+                try {
+                  FS.mkdir(path);
+                } catch (error) {
+                  if (!error || error.errno !== 20) throw error;
+                }
+              }
+              ensureDir('/doom3');
+              ensureDir('/doom3/base');
+              FS.writeFile('/' + entry, sources[0]);
+              FS.writeFile('/' + GAME_MODULE, sources[1]);
+              mountedFiles.forEach(function(item) {
+                FS.writeFile('/doom3/base/' + item.name, item.bytes);
+              });
+            }],
+            print: appendLog,
+            printErr: appendLog,
+            locateFile: function(path) {
+              if (path.endsWith('.wasm')) {
+                return new URL(WASM_WASM, window.location.href).href;
+              }
+              return path;
+            }
+          };
+          return loadScript(new URL(WASM_JS, window.location.href).href);
+        }).catch(function(error) {
+          hasStarted = false;
+          setControls(false);
+          throw error;
+        });
+      }
+
+      runButton.addEventListener('click', function() {
+        if (!enforceHttpOnly()) return;
+        logEl.textContent = '';
+        setStatus('Preparing playable Seed7 runtime.');
+        selectedPk4Files()
+          .then(function(files) {
+            setStatus('Launching generated-art game canvas.');
+            return startSeed7(null, files);
           })
           .catch(function(error) {
             setStatus('Error: ' + error.message, 'error');
@@ -675,13 +463,23 @@
           });
       });
 
-      updateRunButtonLabel();
-      applyQueryEntryAlias();
-      if (isFileProtocol) {
-        enforceHttpOnly();
-      }
+      helpButton.addEventListener('click', function() {
+        if (!enforceHttpOnly()) return;
+        logEl.textContent = '';
+        setStatus('Starting runtime help.');
+        startSeed7(['-l', '/seed7/lib', '/' + activeEntry(), '--help'], [])
+          .then(function() {
+            setStatus('Help finished. Reload to launch the game.');
+          })
+          .catch(function(error) {
+            setStatus('Error: ' + error.message, 'error');
+            appendLog(String(error.stack || error));
+          });
+      });
+
+      normalizeUrlEntry();
+      enforceHttpOnly();
     })();
   </script>
 </body>
 </html>
-

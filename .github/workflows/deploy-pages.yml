@@ -29,9 +29,8 @@ jobs:
         run: |
           mkdir -p _site
           cp index.html doom3.html _site/
-          cp doom3_seed7*.s7 _site/
+          cp doom3_seed7_runtime.s7 doom3_seed7_game.s7 _site/
           cp -R wasm _site/wasm
-          cp -R fixtures _site/fixtures
           touch _site/.nojekyll
 
       - name: Configure Pages
