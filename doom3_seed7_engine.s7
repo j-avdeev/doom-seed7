@@ -577,9 +577,9 @@ const proc: updateInput (inout engineState: state) is func
     elsif (state.lastKey = KEY_DOWN) and buttonPressed(KEYBOARD, KEY_DOWN) then
       movePlayer(state, -MOVE_SPEED);
     elsif (state.lastKey = KEY_RIGHT) and buttonPressed(KEYBOARD, KEY_RIGHT) then
-      rotatePlayer(state, -ROT_SPEED);
-    elsif (state.lastKey = KEY_LEFT) and buttonPressed(KEYBOARD, KEY_LEFT) then
       rotatePlayer(state, ROT_SPEED);
+    elsif (state.lastKey = KEY_LEFT) and buttonPressed(KEYBOARD, KEY_LEFT) then
+      rotatePlayer(state, -ROT_SPEED);
     end if;
     if ((state.lastKey = ' ') and buttonPressed(KEYBOARD, ' ')) or
         ((state.lastKey = KEY_MOUSE1) and buttonPressed(KEYBOARD, KEY_MOUSE1)) then

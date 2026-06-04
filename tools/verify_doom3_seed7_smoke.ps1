@@ -123,6 +123,15 @@ Assert-FileContains -Path "generated\doom3_seed7\maps\seed7\mars_city1.map" -Nee
 Assert-FileContains -Path "generated\doom3_seed7\models\monsters\generated_imp.md5mesh" -Needle "MD5Version 10" -Label "generated assets"
 Assert-FileContains -Path "generated\doom3_seed7\guis\hud_seed7.gui" -Needle "windowDef Desktop" -Label "generated assets"
 
+Write-Host "Checking interactive control mapping..."
+$engineSource = Get-Content -LiteralPath "doom3_seed7_engine.s7" -Raw
+if ($engineSource -notmatch "KEY_RIGHT[\s\S]{0,120}rotatePlayer\(state, ROT_SPEED\)") {
+  throw "Right arrow must rotate with positive engine yaw."
+}
+if ($engineSource -notmatch "KEY_LEFT[\s\S]{0,120}rotatePlayer\(state, -ROT_SPEED\)") {
+  throw "Left arrow must rotate with negative engine yaw."
+}
+
 Write-Host "Running engine native smoke..."
 $smokeOutput = cmd /c "node seed7/bin/s7.js -l seed7/lib doom3_seed7_runtime.s7 --smoke_frames 2 2>&1"
 $smokeText = $smokeOutput | Out-String
