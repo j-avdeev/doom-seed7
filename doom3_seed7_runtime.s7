@@ -3,13 +3,14 @@
 (*                                                                  *)
 (*  Doom3 Seed7 runtime entrypoint.                                 *)
 (*                                                                  *)
-(*  This is the browser/native launch entry for the playable           *)
-(*  WebAssembly game path. Diagnostic probe modules remain available   *)
-(*  separately, but this entry opens the generated-art graphical game. *)
+(*  This is the browser/native launch entry for the Seed7-core         *)
+(*  id Tech 4 compatibility shell. Diagnostic probe modules and the    *)
+(*  earlier simple generated demo remain separate from this default    *)
+(*  runtime path.                                                     *)
 (*                                                                  *)
 (*  Note: this project is still a clean-room, asset-backed                *)
 (*  compatibility/probing implementation and intentionally avoids any    *)
 (*  bundled commercial data.                                         *)
 (********************************************************************)
 
-$ include "doom3_seed7_game.s7";
+$ include "doom3_seed7_engine.s7";

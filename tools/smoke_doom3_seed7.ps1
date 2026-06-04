@@ -1015,11 +1015,13 @@ Invoke-Doom3Seed7 -Label "frame subsystem help" -Entry $FrameEntry -ArgsToPass @
 )
 
 Assert-FileContains -Path "doom3.html" -Needle $LauncherProbeNeedle -Label "browser launcher"
-Assert-FileContains -Path "doom3.html" -Needle "doom3_seed7_game.s7" -Label "browser launcher"
+Assert-FileContains -Path "doom3.html" -Needle "doom3_seed7_engine.s7" -Label "browser launcher"
+Assert-FileContains -Path "doom3.html" -Needle "generated/doom3_seed7/manifest.txt" -Label "browser launcher"
 Assert-FileContains -Path "doom3.html" -Needle "accept=`".pk4,.zip`"" -Label "browser launcher"
-Assert-FileContains -Path "doom3.html" -Needle "Doom3 Seed7 Playable" -Label "browser launcher"
+Assert-FileContains -Path "doom3.html" -Needle "Doom3 Seed7 Engine Shell" -Label "browser launcher"
 Assert-FileContains -Path "doom3.html" -Needle "Launch" -Label "browser launcher"
 Assert-FileContains -Path "doom3.html" -Needle "ensureDir('/doom3/base')" -Label "browser launcher"
+Assert-FileContains -Path "doom3.html" -Needle "seed7UseDocumentCanvas: true" -Label "browser launcher"
 Assert-FileContains -Path "doom3.html" -Needle "'--doom3_data_path', '/doom3'" -Label "browser launcher"
 Assert-FileContains -Path "index.html" -Needle "doom3.html" -Label "doom3 launcher link"
 

@@ -8,14 +8,16 @@ $ErrorActionPreference = "Stop"
 
 $url = "http://localhost:${Port}/doom3.html"
 $runtimeUrl = "http://localhost:${Port}/doom3_seed7_runtime.s7"
+$engineUrl = "http://localhost:${Port}/doom3_seed7_engine.s7"
+$generatedManifestUrl = "http://localhost:${Port}/generated/doom3_seed7/manifest.txt"
 
 if ($Build) {
   Write-Host "Building Seed7 wasm browser runtime..."
   python build_s7_wasm.py browser
 }
 
-if (-not (Test-Path "doom3_seed7_runtime.s7")) {
-  throw "doom3_seed7_runtime.s7 is missing; rebuild from a complete repository checkout."
+if (-not (Test-Path "doom3_seed7_runtime.s7") -or -not (Test-Path "doom3_seed7_engine.s7")) {
+  throw "Doom3 Seed7 runtime/engine files are missing; rebuild from a complete repository checkout."
 }
 
 if (-not (Test-Path "wasm/s7.js") -or -not (Test-Path "wasm/s7.wasm")) {
@@ -23,7 +25,7 @@ if (-not (Test-Path "wasm/s7.js") -or -not (Test-Path "wasm/s7.wasm")) {
   python build_s7_wasm.py browser
 }
 
-Write-Host "Starting local static server for Doom3 Seed7 playable launcher..."
+Write-Host "Starting local static server for Doom3 Seed7 engine launcher..."
 $server = Start-Process -FilePath python -ArgumentList @("-m", "http.server", $Port) -PassThru -WindowStyle Hidden
 Start-Sleep -Seconds 1
 
@@ -31,18 +33,23 @@ try {
   Write-Host "Verifying launcher artifacts..."
   Invoke-WebRequest -Uri "$url" -UseBasicParsing | Out-Null
   Invoke-WebRequest -Uri $runtimeUrl -UseBasicParsing | Out-Null
+  Invoke-WebRequest -Uri $engineUrl -UseBasicParsing | Out-Null
+  Invoke-WebRequest -Uri $generatedManifestUrl -UseBasicParsing | Out-Null
   Write-Host "Server running at $url"
   Write-Host "Runtime reachable at $runtimeUrl"
+  Write-Host "Engine reachable at $engineUrl"
+  Write-Host "Generated assets reachable at $generatedManifestUrl"
   Write-Host ""
-  Write-Host "Playable browser smoke path:"
+  Write-Host "Engine browser smoke path:"
   Write-Host "  1) Open $url"
   Write-Host "  2) Optionally select local Doom 3 *.pk4/.zip files"
   Write-Host "  3) Click 'Launch'"
-  Write-Host "  4) Confirm the game canvas appears with wall geometry, weapon, and HUD."
+  Write-Host "  4) Confirm the canvas stays in this page, with projected geometry, weapon, and HUD."
   Write-Host ""
   Write-Host "For command-line sanity checks, use:"
   Write-Host "  powershell -ExecutionPolicy Bypass -File .\\tools\\verify_doom3_seed7_smoke.ps1"
-  Write-Host "  node seed7/bin/s7.js -l seed7/lib doom3_seed7_runtime.s7 --smoke_frames 2"
+  Write-Host "  powershell -ExecutionPolicy Bypass -File .\\tools\\verify_doom3_seed7_pages_visual.ps1 -Url $url"
+  Write-Host "  node seed7/bin/s7.js -l seed7/lib doom3_seed7_runtime.s7 --visual_smoke_frames 2"
   Write-Host ""
   if (-not $NoOpen) {
     Start-Process $url | Out-Null

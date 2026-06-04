@@ -6,7 +6,7 @@
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate, max-age=0" />
   <meta http-equiv="Pragma" content="no-cache" />
   <meta http-equiv="Expires" content="0" />
-  <title>Doom3 Seed7 Playable</title>
+  <title>Doom3 Seed7 Engine Shell</title>
   <style>
     :root {
       color-scheme: dark;
@@ -34,6 +34,27 @@
         linear-gradient(180deg, #0b0e0d 0%, var(--bg) 58%, #040505 100%);
       color: var(--text);
       font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    html.engine-running,
+    html.engine-running body {
+      width: 100%;
+      height: 100%;
+      min-height: 100%;
+      overflow: hidden;
+      background: #000;
+    }
+
+    html.engine-running canvas {
+      position: fixed !important;
+      left: 50% !important;
+      top: 50% !important;
+      width: min(100vw, calc(100vh * 16 / 9)) !important;
+      height: min(100vh, calc(100vw * 9 / 16)) !important;
+      transform: translate(-50%, -50%);
+      background: #000;
+      outline: none;
+      display: block;
     }
 
     main {
@@ -198,7 +219,7 @@
     <header>
       <h1>Doom3 Seed7</h1>
       <p class="subtitle">
-        Playable WebAssembly runtime with generated dark sci-fi assets. Optional local pk4 files are mounted in browser memory only; the game runs without bundled commercial data.
+        Seed7-core id Tech 4 compatibility shell with generated replacement assets. Optional local pk4 files are mounted in browser memory only; no commercial data is bundled.
       </p>
     </header>
 
@@ -219,7 +240,7 @@
         <button id="runButton" type="button">Launch</button>
       </div>
 
-      <div id="status" class="status-line">Ready. Launch runs <code>doom3_seed7_runtime.s7</code>.</div>
+      <div id="status" class="status-line">Ready. Launch runs the generated replacement asset engine scene.</div>
 
       <details>
         <summary>Runtime log</summary>
@@ -233,7 +254,15 @@
       var WASM_JS = 'wasm/s7.js';
       var WASM_WASM = 'wasm/s7.wasm';
       var DEFAULT_ENTRY = 'doom3_seed7_runtime.s7';
-      var GAME_MODULE = 'doom3_seed7_game.s7';
+      var ENGINE_MODULE = 'doom3_seed7_engine.s7';
+      var GENERATED_ASSET_ROOT = 'generated/doom3_seed7';
+      var GENERATED_ASSET_FILES = [
+        'generated/doom3_seed7/manifest.txt',
+        'generated/doom3_seed7/materials/seed7_tech4.mtr',
+        'generated/doom3_seed7/maps/seed7/mars_city1.map',
+        'generated/doom3_seed7/models/monsters/generated_imp.md5mesh',
+        'generated/doom3_seed7/guis/hud_seed7.gui'
+      ];
       var runButton = document.getElementById('runButton');
       var helpButton = document.getElementById('helpButton');
       var pk4Input = document.getElementById('pk4Files');
@@ -319,7 +348,7 @@
         }, []);
       }
 
-      function fetchText(path) {
+      function fetchSeed7Text(path) {
         if (!/\.s7$/i.test(path)) {
           return Promise.reject(new Error('Invalid Seed7 entry rejected: ' + path));
         }
@@ -328,6 +357,29 @@
         function attempt(index) {
           if (index >= candidates.length) {
             return Promise.reject(new Error('Failed to fetch ' + path + '. ' + diagnostics.join(' | ')));
+          }
+          var candidate = candidates[index];
+          return fetch(candidate, { cache: 'no-store' })
+            .then(function(response) {
+              if (!response.ok) {
+                diagnostics.push('HTTP ' + response.status + ' for ' + candidate);
+                return attempt(index + 1);
+              }
+              return response.text();
+            }, function(error) {
+              diagnostics.push((error && error.message ? error.message : String(error)) + ' for ' + candidate);
+              return attempt(index + 1);
+            });
+        }
+        return attempt(0);
+      }
+
+      function fetchAssetText(path) {
+        var candidates = sourceCandidates(path);
+        var diagnostics = [];
+        function attempt(index) {
+          if (index >= candidates.length) {
+            return Promise.reject(new Error('Failed to fetch generated asset ' + path + '. ' + diagnostics.join(' | ')));
           }
           var candidate = candidates[index];
           return fetch(candidate, { cache: 'no-store' })
@@ -383,6 +435,14 @@
         });
       }
 
+      function generatedAssetBundle() {
+        return Promise.all(GENERATED_ASSET_FILES.map(function(path) {
+          return fetchAssetText(path).then(function(source) {
+            return { path: '/' + path, source: source };
+          });
+        }));
+      }
+
       function loadScript(src) {
         return new Promise(function(resolve, reject) {
           var script = document.createElement('script');
@@ -396,6 +456,54 @@
         });
       }
 
+      function fitGameCanvas() {
+        var canvas = document.querySelector('canvas');
+        if (!canvas) {
+          return false;
+        }
+        document.documentElement.classList.add('engine-running');
+        document.body.style.margin = '0';
+        document.body.style.width = '100%';
+        document.body.style.height = '100%';
+        document.body.style.minHeight = '100%';
+        document.body.style.overflow = 'hidden';
+        document.body.style.background = '#000';
+        canvas.id = 'seed7-game-canvas';
+        canvas.setAttribute('tabindex', '0');
+        canvas.setAttribute('aria-label', 'Doom3 Seed7 engine canvas');
+        canvas.style.position = 'fixed';
+        canvas.style.left = '50%';
+        canvas.style.top = '50%';
+        canvas.style.width = 'min(100vw, calc(100vh * 16 / 9))';
+        canvas.style.height = 'min(100vh, calc(100vw * 9 / 16))';
+        canvas.style.transform = 'translate(-50%, -50%)';
+        canvas.style.display = 'block';
+        canvas.style.background = '#000';
+        canvas.style.outline = 'none';
+        if (typeof canvas.focus === 'function') {
+          try {
+            canvas.focus({ preventScroll: true });
+          } catch (error) {
+            canvas.focus();
+          }
+        }
+        return true;
+      }
+
+      function installGameCanvasLayout() {
+        document.documentElement.classList.add('engine-running');
+        var observer = new MutationObserver(function() {
+          if (fitGameCanvas()) {
+            observer.disconnect();
+          }
+        });
+        observer.observe(document.documentElement, { childList: true, subtree: true });
+        window.addEventListener('resize', fitGameCanvas);
+        window.setTimeout(fitGameCanvas, 0);
+        window.setTimeout(fitGameCanvas, 300);
+        window.setTimeout(fitGameCanvas, 1000);
+      }
+
       function startSeed7(args, mountedFiles) {
         if (hasStarted) {
           setStatus('Seed7 runtime already started. Reload the page to run again.', 'warn');
@@ -403,17 +511,24 @@
         }
         hasStarted = true;
         setControls(true);
+        if (!args) {
+          installGameCanvasLayout();
+        }
         var entry = activeEntry();
         var startMap = startMapInput.value.trim() || 'game/mars_city1';
+        var engineMode = mountedFiles.length > 0 ? 'pk4' : 'generated';
         var finalArgs = args || [
           '-l', '/seed7/lib',
           '/' + entry,
+          '--engine_mode', engineMode,
           '--doom3_data_path', '/doom3',
-          '--doom3_start_map', startMap
+          '--doom3_start_map', startMap,
+          '--generated_asset_root', '/' + GENERATED_ASSET_ROOT
         ];
 
-        return Promise.all([fetchText(entry), fetchText(GAME_MODULE)]).then(function(sources) {
+        return Promise.all([fetchSeed7Text(entry), fetchSeed7Text(ENGINE_MODULE), generatedAssetBundle()]).then(function(sources) {
           window.Module = {
+            seed7UseDocumentCanvas: true,
             arguments: finalArgs,
             preRun: [function() {
               function ensureDir(path) {
@@ -425,8 +540,19 @@
               }
               ensureDir('/doom3');
               ensureDir('/doom3/base');
+              ensureDir('/generated');
+              ensureDir('/generated/doom3_seed7');
+              ensureDir('/generated/doom3_seed7/materials');
+              ensureDir('/generated/doom3_seed7/maps');
+              ensureDir('/generated/doom3_seed7/maps/seed7');
+              ensureDir('/generated/doom3_seed7/models');
+              ensureDir('/generated/doom3_seed7/models/monsters');
+              ensureDir('/generated/doom3_seed7/guis');
               FS.writeFile('/' + entry, sources[0]);
-              FS.writeFile('/' + GAME_MODULE, sources[1]);
+              FS.writeFile('/' + ENGINE_MODULE, sources[1]);
+              sources[2].forEach(function(item) {
+                FS.writeFile(item.path, item.source);
+              });
               mountedFiles.forEach(function(item) {
                 FS.writeFile('/doom3/base/' + item.name, item.bytes);
               });
@@ -451,10 +577,10 @@
       runButton.addEventListener('click', function() {
         if (!enforceHttpOnly()) return;
         logEl.textContent = '';
-        setStatus('Preparing playable Seed7 runtime.');
+        setStatus('Preparing Seed7 engine runtime.');
         selectedPk4Files()
           .then(function(files) {
-            setStatus('Launching generated-art game canvas.');
+            setStatus('Launching generated replacement asset engine scene.');
             return startSeed7(null, files);
           })
           .catch(function(error) {

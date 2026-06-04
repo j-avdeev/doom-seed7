@@ -1,0 +1,27 @@
+textures/seed7/industrial_red
+{
+  diffusemap textures/seed7/generated/red_panel_d
+  bumpmap textures/seed7/generated/red_panel_local
+  specularmap textures/seed7/generated/red_panel_s
+}
+
+textures/seed7/industrial_green
+{
+  diffusemap textures/seed7/generated/green_panel_d
+  bumpmap textures/seed7/generated/green_panel_local
+  specularmap textures/seed7/generated/green_panel_s
+}
+
+textures/seed7/emissive_cyan
+{
+  diffusemap textures/seed7/generated/cyan_strip_d
+  blend add
+  noshadows
+}
+
+textures/seed7/emissive_amber
+{
+  diffusemap textures/seed7/generated/amber_strip_d
+  blend add
+  noshadows
+}

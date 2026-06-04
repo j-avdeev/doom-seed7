@@ -1,0 +1,25 @@
+Version 2
+{
+"classname" "worldspawn"
+"name" "seed7_generated_world"
+"editor_description" "Generated replacement id Tech 4 style corridor for Seed7 engine shell"
+}
+{
+"classname" "info_player_start"
+"name" "player_start_1"
+"origin" "0 0 -1.45"
+"angle" "0"
+}
+{
+"classname" "light"
+"name" "generated_flashlight_proxy"
+"origin" "0 1.5 2.0"
+"light_radius" "320 320 320"
+"_color" "0.55 0.82 0.95"
+}
+{
+"classname" "monster_seed7_proxy"
+"name" "generated_imp_proxy"
+"origin" "-1.15 0.55 9.7"
+"model" "models/monsters/generated_imp.md5mesh"
+}
