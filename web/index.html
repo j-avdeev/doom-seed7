@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Seed7 Framebuffer Demo</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <main class="shell">
+    <header class="toolbar">
+      <h1>Seed7 Framebuffer Demo</h1>
+      <div class="controls">
+        <button id="pauseButton" type="button">Pause</button>
+        <button id="resetButton" type="button">Reset</button>
+      </div>
+    </header>
+    <canvas id="framebuffer" width="320" height="200" aria-label="320 by 200 software framebuffer"></canvas>
+    <output id="status">Frame 0</output>
+    <output id="wasmStatus">Generated WASM provider not loaded.</output>
+  </main>
+  <script src="main.js"></script>
+</body>
+</html>

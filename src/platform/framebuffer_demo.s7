@@ -1,0 +1,225 @@
+(********************************************************************)
+(*  framebuffer_demo.s7                                             *)
+(*                                                                  *)
+(*  Minimal 320x200 software framebuffer demo. No Doom logic and no *)
+(*  WAD parsing live here; this is only a browser-runtime milestone. *)
+(********************************************************************)
+
+$ include "seed7_05.s7i";
+  include "stdio.s7i";
+
+const integer: FRAMEBUFFER_WIDTH is 320;
+const integer: FRAMEBUFFER_HEIGHT is 200;
+const integer: RECT_WIDTH is 48;
+const integer: RECT_HEIGHT is 32;
+const integer: CHECKSUM_MOD is 1000000007;
+
+const type: framebuffer is new struct
+    var integer: width is FRAMEBUFFER_WIDTH;
+    var integer: height is FRAMEBUFFER_HEIGHT;
+    var array integer: rgba is 0 times 0;
+  end struct;
+
+const func integer: byteWrap (in integer: value) is func
+  result
+    var integer: wrapped is 0;
+  begin
+    wrapped := value rem 256;
+    if wrapped < 0 then
+      wrapped +:= 256;
+    end if;
+  end func;
+
+const func integer: rectLeft (in integer: frame) is func
+  result
+    var integer: left is 0;
+  begin
+    left := (frame * 5) rem (FRAMEBUFFER_WIDTH + RECT_WIDTH) - RECT_WIDTH;
+  end func;
+
+const func integer: rectTop (in integer: frame) is func
+  result
+    var integer: top is 0;
+  begin
+    top := (frame * 3) rem (FRAMEBUFFER_HEIGHT + RECT_HEIGHT) - RECT_HEIGHT;
+  end func;
+
+const func boolean: insideMovingRect (in integer: x, in integer: y,
+    in integer: frame) is func
+  result
+    var boolean: inside is FALSE;
+  local
+    var integer: left is 0;
+    var integer: top is 0;
+  begin
+    left := rectLeft(frame);
+    top := rectTop(frame);
+    inside := x >= left and x < left + RECT_WIDTH and
+        y >= top and y < top + RECT_HEIGHT;
+  end func;
+
+const func integer: pixelRed (in integer: x, in integer: y,
+    in integer: frame) is func
+  result
+    var integer: red is 0;
+  begin
+    if insideMovingRect(x, y, frame) then
+      red := 255;
+    else
+      red := byteWrap(x + frame * 3);
+    end if;
+  end func;
+
+const func integer: pixelGreen (in integer: x, in integer: y,
+    in integer: frame) is func
+  result
+    var integer: green is 0;
+  begin
+    if insideMovingRect(x, y, frame) then
+      green := byteWrap(y * 3 + frame);
+    else
+      green := byteWrap(y * 2 + frame * 5);
+    end if;
+  end func;
+
+const func integer: pixelBlue (in integer: x, in integer: y,
+    in integer: frame) is func
+  result
+    var integer: blue is 0;
+  begin
+    if insideMovingRect(x, y, frame) then
+      blue := 32;
+    else
+      blue := byteWrap(x + y + frame * 2);
+    end if;
+  end func;
+
+const func framebuffer: makeFramebuffer (in integer: frame) is func
+  result
+    var framebuffer: buffer is framebuffer.value;
+  local
+    var integer: x is 0;
+    var integer: y is 0;
+  begin
+    buffer.width := FRAMEBUFFER_WIDTH;
+    buffer.height := FRAMEBUFFER_HEIGHT;
+    buffer.rgba := 0 times 0;
+    for y range 0 to pred(FRAMEBUFFER_HEIGHT) do
+      for x range 0 to pred(FRAMEBUFFER_WIDTH) do
+        buffer.rgba &:= pixelRed(x, y, frame);
+        buffer.rgba &:= pixelGreen(x, y, frame);
+        buffer.rgba &:= pixelBlue(x, y, frame);
+        buffer.rgba &:= 255;
+      end for;
+    end for;
+  end func;
+
+const func integer: checksum (in framebuffer: buffer) is func
+  result
+    var integer: sum is 0;
+  local
+    var integer: value is 0;
+  begin
+    for value range buffer.rgba do
+      sum := (sum * 131 + value) rem CHECKSUM_MOD;
+    end for;
+  end func;
+
+const func boolean: writePpm (in framebuffer: buffer, in string: fileName) is func
+  result
+    var boolean: written is FALSE;
+  local
+    var file: outFile is STD_NULL;
+    var integer: x is 0;
+    var integer: y is 0;
+    var integer: offset is 0;
+  begin
+    outFile := open(fileName, "w");
+    if outFile = STD_NULL then
+      writeln("*** Cannot open " <& fileName);
+    else
+      writeln(outFile, "P3");
+      writeln(outFile, buffer.width <& " " <& buffer.height);
+      writeln(outFile, "255");
+      for y range 0 to pred(buffer.height) do
+        for x range 0 to pred(buffer.width) do
+          offset := (y * buffer.width + x) * 4 + 1;
+          write(outFile, buffer.rgba[offset] <& " " <&
+              buffer.rgba[offset + 1] <& " " <&
+              buffer.rgba[offset + 2] <& " ");
+        end for;
+        writeln(outFile);
+      end for;
+      close(outFile);
+      written := TRUE;
+    end if;
+  end func;
+
+const proc: showUsage is func
+  begin
+    writeln("Usage:");
+    writeln("  node seed7/bin/s7.js -l seed7/lib src/platform/framebuffer_demo.s7 [options]");
+    writeln("");
+    writeln("Options:");
+    writeln("  --frame <n>       Generate frame n (default: 0).");
+    writeln("  --frames <n>      Print n frame checksums (default: 1).");
+    writeln("  --ppm <path>      Write the selected frame as an ASCII PPM image.");
+    writeln("  --help            Show this help.");
+  end func;
+
+const proc: main is func
+  local
+    var array string: args is 0 times "";
+    var integer: index is 1;
+    var integer: frame is 0;
+    var integer: frames is 1;
+    var string: ppmFile is "";
+    var framebuffer: buffer is framebuffer.value;
+    var boolean: done is FALSE;
+    var boolean: okay is TRUE;
+  begin
+    args := argv(PROGRAM);
+    while index <= length(args) and not done do
+      if args[index] = "--help" then
+        showUsage;
+        done := TRUE;
+      elsif args[index] = "--frame" and index < length(args) then
+        incr(index);
+        frame := integer(args[index]);
+      elsif args[index] = "--frames" and index < length(args) then
+        incr(index);
+        frames := integer(args[index]);
+      elsif args[index] = "--ppm" and index < length(args) then
+        incr(index);
+        ppmFile := args[index];
+      else
+        writeln("*** Unknown option: " <& args[index]);
+        showUsage;
+        okay := FALSE;
+        done := TRUE;
+      end if;
+      incr(index);
+    end while;
+
+    if okay and frames < 1 then
+      frames := 1;
+    end if;
+
+    if okay and not done and ppmFile <> "" then
+      buffer := makeFramebuffer(frame);
+      if writePpm(buffer, ppmFile) then
+        writeln("framebuffer_demo width=" <& buffer.width <&
+            " height=" <& buffer.height <& " frame=" <& frame <&
+            " checksum=" <& checksum(buffer) <& " ppm=" <& ppmFile);
+      else
+        writeln("*** ppm_write_failed=" <& ppmFile);
+      end if;
+    elsif okay and not done then
+      for index range 0 to pred(frames) do
+        buffer := makeFramebuffer(frame + index);
+        writeln("framebuffer_demo width=" <& buffer.width <&
+            " height=" <& buffer.height <& " frame=" <& frame + index <&
+            " checksum=" <& checksum(buffer));
+      end for;
+    end if;
+  end func;

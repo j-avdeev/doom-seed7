@@ -107,3 +107,84 @@ Checks:
 powershell -ExecutionPolicy Bypass -File .\tools\verify_doom3_seed7_smoke.ps1
 powershell -ExecutionPolicy Bypass -File .\tools\verify_doom3_seed7_pages_visual.ps1 -Url http://localhost:8080/doom3.html?entry=doom3_seed7_runtime.s7
 ```
+
+## Software Framebuffer Demo
+
+This is the smallest browser-runtime milestone: a 320x200 software framebuffer with a moving color pattern. It contains no Doom logic and does not parse WAD or pk4 data.
+
+Native/interpreted smoke:
+
+```bash
+node seed7/bin/s7.js -l seed7/lib src/platform/framebuffer_demo.s7 --frame 12 --frames 3
+node seed7/bin/s7.js -l seed7/lib src/platform/framebuffer_demo.s7 --frame 12 --ppm framebuffer_demo.ppm
+```
+
+Generated Seed7-to-WASM smoke:
+
+```powershell
+& 'C:\Program Files\Git\bin\bash.exe' tools/build-wasm.sh
+```
+
+From Git Bash or another POSIX-like shell:
+
+```bash
+tools/build-wasm.sh
+```
+
+The script first builds `src/platform/wasm_probe.s7`, then builds
+`src/platform/framebuffer_demo.s7` through Seed7-generated C and Emscripten. The
+expected framebuffer proof line is:
+
+```text
+framebuffer_demo width=320 height=200 frame=12 checksum=261054247
+```
+
+Browser demo:
+
+```bash
+python -m http.server 8080
+```
+
+Open:
+
+```text
+http://localhost:8080/web/index.html
+```
+
+The browser wrapper in `web/main.js` first draws with the JavaScript fallback
+provider, then switches to the Seed7-generated WASM provider when
+`web/wasm/framebuffer_demo.js` loads successfully. The WASM provider exports a
+stable C ABI for Canvas rendering:
+
+```text
+doom_init(width, height)
+doom_tick(frame_number)
+doom_framebuffer_ptr()
+doom_framebuffer_width()
+doom_framebuffer_height()
+doom_framebuffer_size()
+```
+
+`doom_tick` fills a static 320x200 RGBA framebuffer from Seed7-generated pixel
+functions, and `web/main.js` copies those bytes from WASM memory into Canvas
+`ImageData`. The frame status includes the WASM checksum; the same checksum is
+computed from the displayed Canvas pixels during smoke verification.
+
+What works:
+
+- Interpreted Seed7 framebuffer smoke.
+- Minimal Seed7-generated WASM proof callable from JavaScript/Node.
+- Seed7-generated WASM framebuffer ABI with pointer, dimensions, size, and
+  per-frame rendering.
+- Browser Canvas rendering from Seed7-generated WASM memory.
+- Browser Canvas fallback with changing pixels when generated WASM is missing.
+
+What still does not:
+
+- `seed7_win.exe` and `s7_direct.exe` were previously unreadable/corrupted in
+  this checkout and are not part of the verified path.
+- No Doom logic, WAD parsing, pk4 parsing, or commercial asset loading is part
+  of this milestone.
+
+See `docs/browser-runtime.md` and `tools/build-wasm.sh` for exact commands,
+Emscripten exports, and remaining blockers.

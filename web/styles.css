@@ -1,0 +1,95 @@
+html {
+  color-scheme: dark;
+  min-height: 100%;
+  background: #101413;
+}
+
+body {
+  min-height: 100vh;
+  margin: 0;
+  background: #101413;
+  color: #eef3ef;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.shell {
+  width: min(100vw - 24px, 760px);
+  min-height: 100vh;
+  margin: 0 auto;
+  display: grid;
+  grid-template-rows: auto auto auto 1fr;
+  align-content: start;
+  gap: 12px;
+  padding: 16px 0;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-bottom: 1px solid #2d3835;
+  padding-bottom: 12px;
+}
+
+h1 {
+  margin: 0;
+  font-size: 20px;
+  line-height: 1.2;
+  font-weight: 720;
+}
+
+.controls {
+  display: flex;
+  gap: 8px;
+}
+
+button {
+  min-width: 72px;
+  min-height: 34px;
+  border: 1px solid #66756f;
+  border-radius: 6px;
+  background: #202926;
+  color: #eef3ef;
+  font: inherit;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+button:hover {
+  background: #2a3531;
+}
+
+canvas {
+  width: min(100%, 640px);
+  aspect-ratio: 16 / 10;
+  display: block;
+  border: 1px solid #2d3835;
+  background: #000;
+  image-rendering: pixelated;
+}
+
+output {
+  min-height: 22px;
+  color: #aab6b0;
+  font-size: 14px;
+}
+
+#wasmStatus {
+  color: #77d0bd;
+}
+
+@media (max-width: 520px) {
+  .toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .controls {
+    width: 100%;
+  }
+
+  button {
+    flex: 1;
+  }
+}

@@ -1,0 +1,14 @@
+(********************************************************************)
+(*  wasm_probe.s7                                                   *)
+(*                                                                  *)
+(*  Smallest Seed7-generated C -> Emscripten -> WASM proof. No Doom *)
+(*  logic, no WAD parsing, and no framebuffer dependency.            *)
+(********************************************************************)
+
+$ include "seed7_05.s7i";
+  include "stdio.s7i";
+
+const proc: main is func
+  begin
+    writeln("seed7_wasm_probe ok value=1337");
+  end func;
