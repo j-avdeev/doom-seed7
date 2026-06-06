@@ -60,6 +60,7 @@ The static Pages artifact includes:
 ```text
 web/.nojekyll
 web/index.html
+web/audio.js
 web/main.js
 web/styles.css
 web/assets/demo_map.pwad
@@ -93,5 +94,6 @@ Check:
 - CI does not rebuild Seed7-generated WASM; committed `web/wasm/` artifacts are
   deployed.
 - The gameplay/rendering bridge is still temporary JavaScript.
-- No sound, save/load, CI rebuild, commercial WAD assets, or real Doom assets
-  are part of this deployment.
+- Generated browser sound effects are included through `web/audio.js`, but no
+  music, Doom sound lump decoding, save/load, CI rebuild, commercial WAD assets,
+  or real Doom assets are part of this deployment.

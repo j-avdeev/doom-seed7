@@ -13,6 +13,9 @@ Task 16 keeps the default page game-first and adds local packaging polish:
 compact package status, click-to-focus controls, fullscreen, readable loading
 and error states, and an FPS counter inside the collapsed Debug panel.
 
+Task 17 adds a compact toolbar audio button and Debug audio status for generated
+browser sound effects. The HUD remains canvas-rendered.
+
 Task 14.2 made `web/index.html` start as a playable browser prototype. On page
 load it fetches the generated, non-commercial `web/assets/demo_map.pwad`
 fixture, loads it through the same WAD parser path as manual uploads, and starts
@@ -134,6 +137,7 @@ to first-person mode without manual upload. Verify:
 - health, ammo, weapon, enemies, and the last combat message are visible inside
   the game viewport;
 - movement, firing, enemy melee damage, game over, pause, and reset work;
+- mute/unmute works after browser audio is unlocked by user interaction;
 - clicking the game focuses controls and `Alt+Enter` or Fullscreen toggles
   fullscreen;
 - `Advanced / Load WAD` still allows manual WAD upload;
@@ -156,7 +160,7 @@ verify:
 
 ## Limitations
 
-This milestone does not add pickups, sound, save/load, advanced weapons, real
-Doom HUD assets, intermissions, or episode progression. Level exits are limited
-to the synthetic Task 15 browser-side special documented in
-`docs/level-flow.md`.
+This milestone does not add pickups, save/load, advanced weapons, real Doom HUD
+assets, real Doom sound lump decoding, music, intermissions, or episode
+progression. Level exits are limited to the synthetic Task 15 browser-side
+special documented in `docs/level-flow.md`.

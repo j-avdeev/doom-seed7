@@ -37,6 +37,7 @@ jobs:
           set -euo pipefail
           test -f web/.nojekyll
           test -f web/index.html
+          test -f web/audio.js
           test -f web/main.js
           test -f web/styles.css
           test -f web/assets/demo_map.pwad
