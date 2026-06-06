@@ -4,9 +4,9 @@ Task 8 adds a browser-only first-person renderer prototype on top of the
 existing Task 5-7 JavaScript WAD bridge. Task 9 extends that prototype with
 basic Doom palette and wall texture support. Task 11 adds placeholder thing
 billboards. Task 12 adds minimal pistol hitscan combat against those
-placeholder things. It keeps the Seed7-generated WASM framebuffer provider
-unchanged and does not add enemy AI, enemy attacks, pickups, sound, advanced
-weapons, or a Doom BSP renderer.
+placeholder things. Task 13 adds simple placeholder enemy AI and melee damage.
+It keeps the Seed7-generated WASM framebuffer provider unchanged and does not
+add pickups, sound, advanced weapons, or a Doom BSP renderer.
 
 ## Current Prototype
 
@@ -16,7 +16,8 @@ The browser page has three Canvas modes:
   fallback when the WASM provider is unavailable.
 - `First-person`: the Task 8 ray/segment prototype, with Task 9 wall textures
   when the uploaded WAD supplies supported texture lumps, and Task 11
-  placeholder thing billboards plus Task 12 pistol hitscan combat.
+  placeholder thing billboards plus Task 12 pistol hitscan combat and Task 13
+  placeholder enemy AI.
 - `Top-down Map`: the Task 6-7 debug map renderer.
 
 Uploading `tests/wad_tests/minimal_map.pwad` still parses the WAD directory and
@@ -62,6 +63,8 @@ The first-person and top-down modes share the existing debug player state:
   things.
 - Collision still uses the Task 7 conservative segment test against solid
   linedefs.
+- Alive placeholder enemies can notice the player, chase directly, and apply
+  simple melee damage with a cooldown.
 
 Switching between first-person and top-down modes keeps the current player
 position and angle. `Reset` restores the uploaded map's player start.
@@ -115,3 +118,8 @@ with left mouse, `Ctrl`, or `F`. The status line should report ammo and
 `shot=hit`; after three hits the placeholder should be killed and disappear from
 first-person mode. Top-down mode should continue to show the dead thing as a
 gray cross.
+
+For Task 13 enemy AI verification with the same fixture, wait for the
+placeholder enemy to notice and chase the player, confirm the status line shows
+AI state counts, confirm player health decreases at melee range, and confirm the
+enemy stops attacking after it is killed.

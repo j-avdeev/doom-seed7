@@ -224,7 +224,7 @@ See `docs/map-structures.md` for loaded record fields and expected output.
 
 ## Browser Map And First-Person Renderer
 
-Tasks 6 through 12 add browser map rendering on the existing 320x200 Canvas.
+Tasks 6 through 13 add browser map rendering on the existing 320x200 Canvas.
 Select `tests/wad_tests/minimal_map.pwad` in `web/index.html` to render the
 loaded `E1M1` vertexes, linedefs, and movable player state. The Canvas mode
 control switches between the original framebuffer demo, the first-person
@@ -232,7 +232,8 @@ prototype, and the top-down debug map view. If an uploaded WAD includes
 `PLAYPAL`, `PNAMES`, `TEXTURE1`, and referenced patch lumps, first-person wall
 columns can use basic Doom wall textures. Non-player `THINGS` are drawn as
 top-down markers and first-person placeholder billboards. The browser bridge
-also supports minimal pistol hitscan combat against those placeholder things.
+also supports minimal pistol hitscan combat and simple melee enemy AI for those
+placeholder things.
 
 Generate the local map fixture:
 
@@ -306,22 +307,25 @@ In the page:
    The WAD panel should show two things and one renderable thing; top-down mode
    should show its marker, and first-person mode should show one placeholder
    billboard.
-8. To test Task 12 combat in first-person mode, aim at the placeholder and fire
-   with left mouse, `Ctrl`, or `F`. The status line should report ammo, hit or
-   miss, visible thing count, and alive thing count. Three hits kill the
-   placeholder; it disappears in first-person mode and shows as a gray cross in
-   top-down mode.
+8. To test Task 12 combat and Task 13 enemy AI in first-person mode, aim at the
+   placeholder and fire with left mouse, `Ctrl`, or `F`. The status line should
+   report ammo, hit or miss, visible thing count, alive thing count, AI state
+   counts, and player health. The enemy notices or chases the player, damages
+   the player at close range with a cooldown, and three hits kill the
+   placeholder. A dead enemy disappears in first-person mode, shows as a gray
+   cross in top-down mode, and no longer attacks.
 9. Click `Framebuffer` to return to the generated WASM framebuffer demo.
 
 This is a temporary JavaScript bridge that preserves the Seed7-generated WASM
 framebuffer provider. In top-down and first-person modes, `W`/`S` move forward
 and backward, `A`/`D` strafe, and `ArrowLeft`/`ArrowRight` or `Q`/`E` turn.
 `Space` uses the synthetic Task 10 door line when one is in front of the player.
-Left mouse, `Ctrl`, and `F` fire the Task 12 pistol hitscan weapon.
+Left mouse, `Ctrl`, and `F` fire the Task 12 pistol hitscan weapon and can alert
+placeholder enemies.
 One-sided and explicitly blocking linedefs use conservative debug collision.
 The first-person renderer is still a ray/segment projection prototype; thing
-rendering and combat are placeholder passes and do not add enemies attacking the
-player, pickups, advanced weapon behavior, sound, or full Doom gameplay.
+rendering, combat, and enemy AI are placeholder passes and do not add pickups,
+advanced weapon behavior, sound, or full Doom gameplay.
 
 Known limitations:
 
@@ -334,10 +338,12 @@ Known limitations:
 - Texture support is limited to `PLAYPAL`, `PNAMES`, `TEXTURE1`, and vanilla
   patch picture lumps for wall columns. Sprite support is limited to
   placeholder billboards from map `THINGS`. No floor/ceiling flats, Doom sprite
-  lump compatibility, enemy AI, enemy attacks, pickups, audio, exits, or
-  commercial WAD assets are included.
+  lump compatibility, pickups, audio, exits, or commercial WAD assets are
+  included.
 - Combat support is limited to a pistol-style hitscan against alive placeholder
   non-player things in the browser bridge.
+- Enemy AI support is limited to placeholder idle/chase/attack/dead states,
+  approximate line of sight, direct movement, and melee damage with a cooldown.
 - Door support is limited to the synthetic browser-side linedef special
   documented in `docs/line-specials.md`; it is not Doom-compatible door logic.
 
@@ -346,4 +352,5 @@ See `docs/renderer-debug.md` for top-down details and
 `docs/textures.md` for Task 9 texture support and limitations. See
 `docs/line-specials.md` for Task 10 door support and limitations. See
 `docs/sprites.md` for Task 11 thing rendering and limitations. See
-`docs/combat.md` for Task 12 combat support and limitations.
+`docs/combat.md` for Task 12 combat support and limitations. See
+`docs/enemy-ai.md` for Task 13 enemy AI support and limitations.

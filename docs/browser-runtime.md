@@ -3,9 +3,9 @@
 This note records the current feasibility of compiling Seed7 programs to browser
 WebAssembly and the current browser WAD upload bridge. It is scoped to the
 software framebuffer, WAD inspection, top-down map-debug, and first-person
-prototype milestones with basic Task 9 wall textures and Task 11 placeholder
-thing rendering plus Task 12 placeholder combat. It does not add audio, pk4
-parsing, enemy AI, enemy attacks, pickups, advanced weapons, or full gameplay.
+prototype milestones with basic Task 9 wall textures, Task 11 placeholder thing
+rendering, Task 12 placeholder combat, and Task 13 placeholder enemy AI. It
+does not add audio, pk4 parsing, pickups, advanced weapons, or full gameplay.
 
 ## Current Result
 
@@ -76,6 +76,9 @@ upload flow. The browser bridge mirrors the Task 3 and Task 4 data fields:
   placeholder billboards with rough distance ordering
 - minimal pistol hitscan combat against alive non-player placeholder things,
   with ammo and hit/miss status text
+- simple placeholder enemy AI with idle, chase, attack, and dead states,
+  approximate line of sight, direct movement toward the player, and melee
+  damage with a cooldown
 
 The upload path does not bundle, fetch, or require copyrighted WAD files. User
 files remain in browser memory. The browser bridge remains a debug/prototype
@@ -217,6 +220,12 @@ first-person mode draws placeholder billboards sorted far-to-near and clipped
 against approximate wall-column depth. Doom sprite lump decoding and rotation
 selection are not implemented yet.
 
+Task 13 initializes those non-player shootable things as simple placeholder
+enemies. The status line reports AI state counts, top-down mode color-codes
+alive enemy states, and first-person mode keeps using the existing billboard
+depth pass for alive enemies. See `docs/enemy-ai.md` for behavior and
+limitations.
+
 The expected interpreted and Node-generated checksum proof line remains:
 
 ```text
@@ -339,3 +348,9 @@ the status line reports ammo plus `shot=hit` when aiming at the placeholder and
 `shot=miss` when aiming away. After three hits, the placeholder should disappear
 from first-person mode and remain in top-down mode as a dead gray cross. See
 `docs/combat.md` for the current combat behavior and limitations.
+
+Task 13 verification should additionally use `tests/wad_tests/thing_map.pwad`,
+wait for the placeholder enemy to notice and chase the player, confirm player
+health decreases at melee range with a cooldown, confirm top-down state colors
+change, and confirm that a dead enemy no longer attacks. See
+`docs/enemy-ai.md` for the current AI behavior and limitations.

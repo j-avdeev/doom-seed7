@@ -48,6 +48,18 @@
   const PLAYER_START_AMMO = 24;
   const PISTOL_DAMAGE = 1;
   const SHOOTABLE_THING_HEALTH = 3;
+  const ENEMY_STATE_IDLE = "idle";
+  const ENEMY_STATE_CHASE = "chase";
+  const ENEMY_STATE_ATTACK = "attack";
+  const ENEMY_STATE_DEAD = "dead";
+  const ENEMY_DETECTION_RANGE = 192;
+  const ENEMY_SHOT_ALERT_RANGE = 512;
+  const ENEMY_MOVE_SPEED = 46;
+  const ENEMY_RADIUS = 12;
+  const ENEMY_MELEE_RANGE = 30;
+  const ENEMY_MELEE_DAMAGE = 5;
+  const ENEMY_ATTACK_COOLDOWN_SECONDS = 1.0;
+  const ENEMY_ATTACK_STATE_SECONDS = 0.22;
   const HITSCAN_MAX_DISTANCE = 1024;
   const HITSCAN_THING_RADIUS = 18;
   const FIRST_PERSON_FOV_DEGREES = 66;
@@ -68,6 +80,7 @@
   let playerState = null;
   let interactionMessage = "";
   let combatMessage = "shot=ready";
+  let aiMessage = "none";
   const pressedKeys = new Set();
 
   function byteWrap(value) {
@@ -209,6 +222,15 @@
   }
 
   function thingBaseColor(thing) {
+    if (thing.aiState === ENEMY_STATE_ATTACK) {
+      return { red: 224, green: 70, blue: 64 };
+    }
+    if (thing.aiState === ENEMY_STATE_CHASE) {
+      return { red: 245, green: 184, blue: 74 };
+    }
+    if (thing.aiState === ENEMY_STATE_IDLE) {
+      return { red: 96, green: 172, blue: 226 };
+    }
     if (thing.type >= 3000) {
       return { red: 216, green: 82, blue: 72 };
     }
@@ -240,6 +262,14 @@
     return aliveRenderableThings(mapData).length;
   }
 
+  function setThingDead(thing) {
+    thing.health = 0;
+    thing.dead = true;
+    thing.aiState = ENEMY_STATE_DEAD;
+    thing.aiCooldown = 0;
+    thing.aiAttackTimer = 0;
+  }
+
   function resetThingCombatState(mapData) {
     if (!mapData || !mapData.things) return;
     mapData.things.forEach(function (thing) {
@@ -248,11 +278,17 @@
         thing.maxHealth = 0;
         thing.health = 0;
         thing.dead = false;
+        thing.aiState = null;
+        thing.aiCooldown = 0;
+        thing.aiAttackTimer = 0;
       } else {
         thing.shootable = true;
         thing.maxHealth = SHOOTABLE_THING_HEALTH;
         thing.health = SHOOTABLE_THING_HEALTH;
         thing.dead = false;
+        thing.aiState = ENEMY_STATE_IDLE;
+        thing.aiCooldown = 0;
+        thing.aiAttackTimer = 0;
       }
     });
   }
@@ -354,8 +390,9 @@
     return dx * dx + dy * dy;
   }
 
-  function movementTouchesSolidLine(mapData, fromX, fromY, toX, toY) {
-    const radiusSquared = PLAYER_RADIUS * PLAYER_RADIUS;
+  function movementTouchesSolidLine(mapData, fromX, fromY, toX, toY, radius) {
+    const collisionRadius = typeof radius === "number" ? radius : PLAYER_RADIUS;
+    const radiusSquared = collisionRadius * collisionRadius;
 
     for (let index = 0; index < mapData.linedefs.length; index += 1) {
       const linedef = mapData.linedefs[index];
@@ -379,6 +416,25 @@
     return false;
   }
 
+  function hasApproxLineOfSight(mapData, fromX, fromY, toX, toY) {
+    if (!mapData) return false;
+
+    for (let index = 0; index < mapData.linedefs.length; index += 1) {
+      const linedef = mapData.linedefs[index];
+      if (!isSolidLinedef(linedef, mapData, index)) continue;
+
+      const start = mapData.vertexes[linedef.startVertex];
+      const end = mapData.vertexes[linedef.endVertex];
+      if (!start || !end) continue;
+
+      if (segmentsIntersect(fromX, fromY, toX, toY, start.x, start.y, end.x, end.y)) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
   function tryMovePlayer(mapData, dx, dy) {
     const nextX = playerState.x + dx;
     const nextY = playerState.y + dy;
@@ -390,6 +446,129 @@
     }
 
     return false;
+  }
+
+  function tryMoveThing(mapData, thing, dx, dy) {
+    const nextX = thing.x + dx;
+    const nextY = thing.y + dy;
+
+    if (!movementTouchesSolidLine(mapData, thing.x, thing.y, nextX, nextY, ENEMY_RADIUS)) {
+      thing.x = nextX;
+      thing.y = nextY;
+      return true;
+    }
+
+    return false;
+  }
+
+  function moveEnemyTowardPlayer(mapData, thing, seconds) {
+    const dx = playerState.x - thing.x;
+    const dy = playerState.y - thing.y;
+    const distance = Math.hypot(dx, dy);
+    const stopDistance = ENEMY_MELEE_RANGE * 0.75;
+    let travel = 0;
+    let stepX = 0;
+    let stepY = 0;
+
+    if (distance <= stopDistance) return;
+
+    travel = Math.min(ENEMY_MOVE_SPEED * seconds, Math.max(0, distance - stopDistance));
+    if (travel <= 0) return;
+
+    stepX = dx / distance * travel;
+    stepY = dy / distance * travel;
+    thing.angle = normalizeAngle(Math.atan2(dy, dx) * 180 / Math.PI);
+
+    if (!tryMoveThing(mapData, thing, stepX, stepY)) {
+      tryMoveThing(mapData, thing, stepX, 0);
+      tryMoveThing(mapData, thing, 0, stepY);
+    }
+  }
+
+  function enemyCanSeePlayer(mapData, thing, maxDistance) {
+    const dx = playerState.x - thing.x;
+    const dy = playerState.y - thing.y;
+
+    if (dx * dx + dy * dy > maxDistance * maxDistance) return false;
+    return hasApproxLineOfSight(mapData, thing.x, thing.y, playerState.x, playerState.y);
+  }
+
+  function alertEnemiesFromShot(mapData) {
+    let alerted = 0;
+
+    if (!mapData || playerState === null) return alerted;
+    aliveRenderableThings(mapData).forEach(function (thing) {
+      const dx = thing.x - playerState.x;
+      const dy = thing.y - playerState.y;
+      if (dx * dx + dy * dy > ENEMY_SHOT_ALERT_RANGE * ENEMY_SHOT_ALERT_RANGE) return;
+      if (!hasApproxLineOfSight(mapData, playerState.x, playerState.y, thing.x, thing.y)) return;
+
+      if (thing.aiState === ENEMY_STATE_IDLE) alerted += 1;
+      thing.aiState = ENEMY_STATE_CHASE;
+    });
+
+    if (alerted > 0) {
+      aiMessage = "shot alerted " + alerted;
+    } else if (shootableThingCount(mapData) > 0) {
+      aiMessage = "shot no alert";
+    }
+    return alerted;
+  }
+
+  function updateEnemyAi(mapData, deltaSeconds) {
+    const seconds = Math.min(deltaSeconds, 0.1);
+    let detected = 0;
+    let attacks = 0;
+
+    if (!mapData || playerState === null || seconds <= 0) return;
+
+    renderableThings(mapData).forEach(function (thing) {
+      const dx = playerState.x - thing.x;
+      const dy = playerState.y - thing.y;
+      const distance = Math.hypot(dx, dy);
+      let closeAndVisible = false;
+
+      if (!isShootableThing(thing)) return;
+      if (thing.dead === true || thing.health <= 0) {
+        setThingDead(thing);
+        return;
+      }
+
+      thing.aiCooldown = Math.max(0, (thing.aiCooldown || 0) - seconds);
+      thing.aiAttackTimer = Math.max(0, (thing.aiAttackTimer || 0) - seconds);
+
+      if (thing.aiState === ENEMY_STATE_IDLE &&
+          enemyCanSeePlayer(mapData, thing, ENEMY_DETECTION_RANGE)) {
+        thing.aiState = ENEMY_STATE_CHASE;
+        detected += 1;
+      }
+
+      if (thing.aiState === ENEMY_STATE_IDLE) return;
+
+      closeAndVisible = distance <= ENEMY_MELEE_RANGE &&
+        hasApproxLineOfSight(mapData, thing.x, thing.y, playerState.x, playerState.y);
+
+      if (closeAndVisible) {
+        thing.aiState = ENEMY_STATE_ATTACK;
+        thing.aiAttackTimer = ENEMY_ATTACK_STATE_SECONDS;
+        if (thing.aiCooldown <= 0 && playerState.health > 0) {
+          playerState.health = Math.max(0, playerState.health - ENEMY_MELEE_DAMAGE);
+          thing.aiCooldown = ENEMY_ATTACK_COOLDOWN_SECONDS;
+          attacks += 1;
+        }
+      } else {
+        if (thing.aiAttackTimer <= 0) {
+          thing.aiState = ENEMY_STATE_CHASE;
+        }
+        moveEnemyTowardPlayer(mapData, thing, seconds);
+      }
+    });
+
+    if (attacks > 0) {
+      aiMessage = "melee " + attacks + " hp=" + playerState.health;
+    } else if (detected > 0) {
+      aiMessage = "detected " + detected;
+    }
   }
 
   function updatePlayerFromInput(mapData, deltaSeconds) {
@@ -558,15 +737,19 @@
     }
 
     playerState.ammo -= 1;
+    alertEnemiesFromShot(mapData);
     target = findHitscanThing(mapData);
     if (target === null) {
       combatMessage = "shot=miss";
     } else {
       target.thing.health = Math.max(0, target.thing.health - PISTOL_DAMAGE);
       if (target.thing.health === 0) {
-        target.thing.dead = true;
+        setThingDead(target.thing);
+        aiMessage = "killed thing#" + (target.thing.index + 1);
         combatMessage = "shot=kill thing#" + (target.thing.index + 1);
       } else {
+        target.thing.aiState = ENEMY_STATE_CHASE;
+        aiMessage = "hurt thing#" + (target.thing.index + 1);
         combatMessage = "shot=hit thing#" + (target.thing.index + 1) +
           " hp=" + target.thing.health;
       }
@@ -574,9 +757,40 @@
     renderCurrentMapMode(mapData);
   }
 
+  function enemyStateHudText(mapData) {
+    const counts = {};
+    let total = 0;
+
+    counts[ENEMY_STATE_IDLE] = 0;
+    counts[ENEMY_STATE_CHASE] = 0;
+    counts[ENEMY_STATE_ATTACK] = 0;
+    counts[ENEMY_STATE_DEAD] = 0;
+
+    if (!mapData || !mapData.things) return "";
+
+    mapData.things.forEach(function (thing) {
+      let state = thing.aiState || ENEMY_STATE_IDLE;
+
+      if (!isShootableThing(thing)) return;
+      if (thing.dead === true || thing.health <= 0) state = ENEMY_STATE_DEAD;
+      if (!Object.prototype.hasOwnProperty.call(counts, state)) state = ENEMY_STATE_IDLE;
+      counts[state] += 1;
+      total += 1;
+    });
+
+    if (total === 0) return "";
+
+    return "ai idle=" + counts[ENEMY_STATE_IDLE] +
+      " chase=" + counts[ENEMY_STATE_CHASE] +
+      " attack=" + counts[ENEMY_STATE_ATTACK] +
+      " dead=" + counts[ENEMY_STATE_DEAD] +
+      " last=" + aiMessage;
+  }
+
   function combatHudText(mapData, visibleThingCount) {
     const visible = typeof visibleThingCount === "number" ?
       visibleThingCount : aliveThingCount(mapData);
+    const aiHud = enemyStateHudText(mapData);
 
     if (playerState === null) return "";
     return "HUD hp=" + playerState.health +
@@ -584,7 +798,8 @@
       " ammo=" + playerState.ammo +
       " visible=" + visible +
       " alive=" + aliveThingCount(mapData) + "/" + shootableThingCount(mapData) +
-      " " + combatMessage;
+      " " + combatMessage +
+      (aiHud === "" ? "" : " " + aiHud);
   }
 
   function interactionSuffix(mapData, visibleThingCount) {
@@ -1087,6 +1302,7 @@
       const deltaSeconds = (timestamp - lastMapStep) / 1000;
       updatePlayerFromInput(loadedMap, deltaSeconds);
       updateDoorStates(loadedMap, deltaSeconds);
+      updateEnemyAi(loadedMap, deltaSeconds);
       renderCurrentMapMode(loadedMap);
       lastMapStep = timestamp;
     }
@@ -1785,6 +2001,7 @@
     playerState = null;
     interactionMessage = "";
     combatMessage = "shot=ready";
+    aiMessage = "none";
     mapModeButton.disabled = true;
     firstPersonModeButton.disabled = true;
 
@@ -1822,6 +2039,8 @@
         appendDescription(mapSummary, "Things", String(mapData.counts.things));
         appendDescription(mapSummary, "Renderable things", String(renderableThings(mapData).length));
         appendDescription(mapSummary, "Shootable things", String(shootableThingCount(mapData)));
+        appendDescription(mapSummary, "Enemy AI", shootableThingCount(mapData) > 0 ?
+          "basic idle/chase/attack/dead placeholders" : "No shootable enemies");
         if (mapData.doors.size > 0) {
           appendDescription(mapSummary, "Line specials",
             mapData.doors.size + " synthetic door special " + SYNTHETIC_DOOR_SPECIAL);
@@ -1866,6 +2085,7 @@
     playerState = null;
     interactionMessage = "";
     combatMessage = "shot=ready";
+    aiMessage = "none";
     mapModeButton.disabled = true;
     firstPersonModeButton.disabled = true;
     if (isMapRenderMode(renderMode)) setRenderMode("framebuffer");
@@ -1882,6 +2102,7 @@
       playerState = null;
       interactionMessage = "";
       combatMessage = "shot=ready";
+      aiMessage = "none";
       mapModeButton.disabled = true;
       firstPersonModeButton.disabled = true;
       if (isMapRenderMode(renderMode)) setRenderMode("framebuffer");
@@ -1981,6 +2202,7 @@
       resetDoorStates(loadedMap);
       interactionMessage = "";
       combatMessage = "shot=ready";
+      aiMessage = "none";
       resetThingCombatState(loadedMap);
       initPlayerState(loadedMap);
       renderCurrentMapMode(loadedMap);

@@ -14,7 +14,8 @@ draws:
 - one-sided linedefs in light gray.
 - two-sided linedefs in muted green.
 - non-player `THINGS` as colored ring markers with angle ticks.
-- dead Task 12 placeholder things as gray crosses.
+- alive Task 13 placeholder enemies color-coded by AI state.
+- dead placeholder things as gray crosses.
 - the current player position as a yellow marker with a direction arrow.
 
 The renderer computes bounds from the loaded map vertexes and the player start,
@@ -48,8 +49,8 @@ without disturbing the framebuffer ABI.
 
 The renderer still uses the same Canvas and `ImageData` surface as the
 framebuffer demo. It writes pixels directly into the 320x200 RGBA buffer, then
-presents them with `putImageData`. No WebGL, BSP traversal, enemy AI, enemy
-attacks, pickups, audio, advanced weapons, or full Doom gameplay were added.
+presents them with `putImageData`. No WebGL, BSP traversal, pickups, audio,
+advanced weapons, or full Doom gameplay were added.
 
 ## Modes
 
@@ -101,5 +102,5 @@ Expected browser result:
 
 Task 11 additionally draws non-player thing markers in this same top-down debug
 view. Task 12 uses this same view to show dead placeholder things as gray
-crosses. It still does not add enemy AI, enemy attacks, pickups, sound, or full
-Doom gameplay.
+crosses. Task 13 color-codes alive placeholder enemies by AI state. It still
+does not add pickups, sound, or full Doom gameplay.
