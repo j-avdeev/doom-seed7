@@ -230,10 +230,67 @@ loaded `E1M1` vertexes, linedefs, and movable player marker. The Canvas mode
 control switches between the original framebuffer demo and the top-down map
 view.
 
+Generate the local map fixture:
+
+```bash
+node seed7/bin/s7.js -l seed7/lib tests/wad_tests/make_minimal_wad.s7 --map
+```
+
+Build the current generated WASM framebuffer provider:
+
+```powershell
+& 'C:\Program Files\Git\bin\bash.exe' tools/build-wasm.sh
+```
+
+From Git Bash or another POSIX-like shell:
+
+```bash
+tools/build-wasm.sh
+```
+
+Serve the repository locally:
+
+```bash
+python -m http.server 8080
+```
+
+Open the local browser demo:
+
+```powershell
+Start-Process "http://localhost:8080/web/index.html"
+```
+
+Or open this URL manually:
+
+```text
+http://localhost:8080/web/index.html
+```
+
+In the page:
+
+1. Click `Choose file`.
+2. Select `tests/wad_tests/minimal_map.pwad`.
+3. Confirm the WAD panel shows `PWAD`, `E1M1`, four vertexes, four linedefs,
+   four sidedefs, one sector, one thing, and player start `128, 64 angle=90`.
+4. The page switches to `Mode: top-down map view` automatically. If needed,
+   click `Top-down Map`.
+5. Click `Framebuffer` to return to the generated WASM framebuffer demo.
+
 This is a temporary JavaScript bridge that preserves the Seed7-generated WASM
 framebuffer provider. In top-down mode, `W`/`S` move forward and backward,
 `A`/`D` strafe, and `ArrowLeft`/`ArrowRight` or `Q`/`E` turn. One-sided and
 explicitly blocking linedefs use conservative debug collision. This does not add
 first-person rendering, textures, enemies, weapons, combat, or gameplay.
+
+Known limitations:
+
+- The top-down map renderer is a browser debug view, not Doom gameplay.
+- Map rendering uses the JavaScript WAD bridge; the WASM path remains the
+  framebuffer provider.
+- Only the first supported `E1M1` or `MAP01` map marker is loaded.
+- Collision is conservative debug collision against one-sided or blocking
+  linedefs, not full Doom movement, height, blockmap, or thing collision.
+- No first-person projection, textures, sprites, enemies, weapons, combat,
+  audio, exits, or commercial WAD assets are included.
 
 See `docs/renderer-debug.md` for verification steps and renderer details.
