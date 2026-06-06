@@ -97,5 +97,6 @@ Expected browser result:
 - Switching back to `Framebuffer` resumes the Seed7-generated WASM framebuffer
   provider when it is available, or the JavaScript fallback when it is not.
 
-Task 8 is still not started by this renderer. First-person projection, textures,
-enemies, combat, and gameplay remain future milestones.
+This Task 7 debug renderer did not add first-person projection, textures,
+enemies, combat, or gameplay. Later first-person and texture milestones use the
+same parsed map and player state while keeping the top-down mode available.

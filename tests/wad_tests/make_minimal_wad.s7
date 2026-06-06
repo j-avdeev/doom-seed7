@@ -50,12 +50,16 @@ const proc: show_usage is func
     writeln("Usage:");
     writeln("  node seed7/bin/s7.js -l seed7/lib tests/wad_tests/make_minimal_wad.s7 [output-wad]");
     writeln("  node seed7/bin/s7.js -l seed7/lib tests/wad_tests/make_minimal_wad.s7 --map [output-wad]");
+    writeln("  node seed7/bin/s7.js -l seed7/lib tests/wad_tests/make_minimal_wad.s7 --textured-map [output-wad]");
     writeln("");
     writeln("Default output:");
     writeln("  tests/wad_tests/minimal.pwad");
     writeln("");
     writeln("Map fixture output:");
     writeln("  tests/wad_tests/minimal_map.pwad");
+    writeln("");
+    writeln("Textured map fixture output:");
+    writeln("  tests/wad_tests/textured_map.pwad");
   end func;
 
 const proc: main is func
@@ -73,6 +77,12 @@ const proc: main is func
       elsif args[1] = "--map" then
         outName := "tests/wad_tests/minimal_map.pwad";
         fixtureName := "tests/wad_tests/minimal_map_pwad.hex";
+        if length(args) >= 2 then
+          outName := args[2];
+        end if;
+      elsif args[1] = "--textured-map" then
+        outName := "tests/wad_tests/textured_map.pwad";
+        fixtureName := "tests/wad_tests/textured_map_pwad.hex";
         if length(args) >= 2 then
           outName := args[2];
         end if;

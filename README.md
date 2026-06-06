@@ -224,16 +224,24 @@ See `docs/map-structures.md` for loaded record fields and expected output.
 
 ## Browser Map And First-Person Renderer
 
-Tasks 6 through 8 add browser map rendering on the existing 320x200 Canvas.
+Tasks 6 through 9 add browser map rendering on the existing 320x200 Canvas.
 Select `tests/wad_tests/minimal_map.pwad` in `web/index.html` to render the
 loaded `E1M1` vertexes, linedefs, and movable player state. The Canvas mode
 control switches between the original framebuffer demo, the first-person
-prototype, and the top-down debug map view.
+prototype, and the top-down debug map view. If an uploaded WAD includes
+`PLAYPAL`, `PNAMES`, `TEXTURE1`, and referenced patch lumps, first-person wall
+columns can use basic Doom wall textures.
 
 Generate the local map fixture:
 
 ```bash
 node seed7/bin/s7.js -l seed7/lib tests/wad_tests/make_minimal_wad.s7 --map
+```
+
+Generate the synthetic textured map fixture:
+
+```bash
+node seed7/bin/s7.js -l seed7/lib tests/wad_tests/make_minimal_wad.s7 --textured-map
 ```
 
 Build the current generated WASM framebuffer provider:
@@ -274,16 +282,17 @@ In the page:
    four sidedefs, one sector, one thing, and player start `128, 64 angle=90`.
 4. The page switches to `Mode: top-down map view` automatically. If needed,
    click `Top-down Map`.
-5. Click `First-person` to render flat ceiling/floor bands and untextured wall
-   columns from the player perspective.
+5. Click `First-person` to render flat ceiling/floor bands and wall columns
+   from the player perspective. With `textured_map.pwad`, the WAD panel should
+   report `1 of 1 resolved` wall textures.
 6. Click `Framebuffer` to return to the generated WASM framebuffer demo.
 
 This is a temporary JavaScript bridge that preserves the Seed7-generated WASM
 framebuffer provider. In top-down and first-person modes, `W`/`S` move forward
 and backward, `A`/`D` strafe, and `ArrowLeft`/`ArrowRight` or `Q`/`E` turn.
 One-sided and explicitly blocking linedefs use conservative debug collision.
-The first-person renderer is an untextured ray/segment projection prototype; it
-does not add textures, sprites, enemies, weapons, combat, sound, or gameplay.
+The first-person renderer is still a ray/segment projection prototype; it does
+not add sprites, enemies, weapons, combat, sound, or gameplay.
 
 Known limitations:
 
@@ -293,8 +302,10 @@ Known limitations:
 - Only the first supported `E1M1` or `MAP01` map marker is loaded.
 - Collision is conservative debug collision against one-sided or blocking
   linedefs, not full Doom movement, height, blockmap, or thing collision.
-- No textures, sprites, enemies, weapons, combat, audio, exits, or commercial
-  WAD assets are included.
+- Texture support is limited to `PLAYPAL`, `PNAMES`, `TEXTURE1`, and vanilla
+  patch picture lumps for wall columns. No floor/ceiling flats, sprites,
+  enemies, weapons, combat, audio, exits, or commercial WAD assets are included.
 
 See `docs/renderer-debug.md` for top-down details and
-`docs/renderer-options.md` for the first-person renderer approach.
+`docs/renderer-options.md` for the first-person renderer approach. See
+`docs/textures.md` for Task 9 texture support and limitations.

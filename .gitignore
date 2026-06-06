@@ -9,3 +9,4 @@ build/
 !fixtures/base/pak000.pk4
 tests/wad_tests/minimal.pwad
 tests/wad_tests/minimal_map.pwad
+tests/wad_tests/textured_map.pwad

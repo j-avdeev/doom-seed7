@@ -3,8 +3,8 @@
 This note records the current feasibility of compiling Seed7 programs to browser
 WebAssembly and the current browser WAD upload bridge. It is scoped to the
 software framebuffer, WAD inspection, top-down map-debug, and first-person
-prototype milestones and does not add textures, audio, pk4 parsing, enemies,
-weapons, combat, or gameplay.
+prototype milestones with basic Task 9 wall textures. It does not add audio,
+pk4 parsing, enemies, weapons, combat, doors, interactions, or gameplay.
 
 ## Current Result
 
@@ -51,9 +51,10 @@ Task 5 adds a WAD file picker to `web/index.html`. The selected file is read in
 with a temporary JavaScript top-down map renderer and movable debug player
 instead of changing the working framebuffer WASM module. Task 8 adds a
 browser-only first-person projection prototype on top of that same parsed
-geometry and player state. This keeps the Task 2.5 Seed7-generated WASM
-framebuffer path stable while still exercising the browser upload flow. The
-browser bridge mirrors the Task 3 and Task 4 data fields:
+geometry and player state. Task 9 adds optional `PLAYPAL`/`PNAMES`/`TEXTURE1`
+wall texture parsing to that JavaScript bridge. This keeps the Task 2.5
+Seed7-generated WASM framebuffer path stable while still exercising the browser
+upload flow. The browser bridge mirrors the Task 3 and Task 4 data fields:
 
 - WAD magic: `IWAD` or `PWAD`
 - lump count
@@ -64,8 +65,10 @@ browser bridge mirrors the Task 3 and Task 4 data fields:
   `SECTORS`, when the selected WAD contains a complete supported map
 - top-down geometry data from `VERTEXES`, `LINEDEFS`, and the type-1 player
   start, rendered into the existing 320x200 Canvas `ImageData`
-- first-person untextured wall columns from solid linedef ray intersections,
-  sharing the same player `x`, `y`, and `angle`
+- first-person wall columns from solid linedef ray intersections, sharing the
+  same player `x`, `y`, and `angle`
+- optional wall texture data from `PLAYPAL`, `PNAMES`, `TEXTURE1`, and patch
+  picture lumps when the uploaded WAD supplies them
 
 The upload path does not bundle, fetch, or require copyrighted WAD files. User
 files remain in browser memory. No gameplay is started by this milestone.
@@ -195,6 +198,11 @@ linedef, sidedef, sector, thing, and player-start statistics, then switches the
 Canvas mode to the top-down map view. The mode control can switch back to the
 original framebuffer demo or into the first-person prototype.
 
+When the selected map references wall textures and the WAD provides supported
+texture lumps, first-person mode resolves those textures and reports the count
+in the WAD panel. If texture data is absent or incomplete, the map still loads
+and the first-person renderer uses shaded fallback wall columns.
+
 The expected interpreted and Node-generated checksum proof line remains:
 
 ```text
@@ -299,3 +307,8 @@ mode label changes to `Mode: first-person prototype`, confirm flat ceiling/floor
 bands and untextured wall columns are visible, confirm movement/turning updates
 the player perspective, and confirm `Top-down Map` and `Framebuffer` still work.
 See `docs/renderer-options.md` for the prototype renderer approach.
+
+Task 9 verification should additionally generate
+`tests/wad_tests/textured_map.pwad`, upload it, confirm the WAD panel reports
+one resolved wall texture, and confirm first-person mode reports textured wall
+columns while `minimal_map.pwad` still uses fallback wall rendering.
