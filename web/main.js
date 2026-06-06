@@ -38,6 +38,9 @@
   const MAX_TEXTURE_PIXELS = 1024 * 1024;
   const MAP_LUMPS = ["THINGS", "LINEDEFS", "SIDEDEFS", "VERTEXES", "SECTORS"];
   const LINEDEF_BLOCKING = 1;
+  const SYNTHETIC_DOOR_SPECIAL = 900;
+  const USE_DISTANCE = 96;
+  const DOOR_OPEN_SECONDS = 0.45;
   const PLAYER_RADIUS = 12;
   const PLAYER_SPEED = 120;
   const PLAYER_TURN_SPEED = 150;
@@ -55,6 +58,7 @@
   let renderMode = "framebuffer";
   let loadedMap = null;
   let playerState = null;
+  let interactionMessage = "";
   const pressedKeys = new Set();
 
   function byteWrap(value) {
@@ -177,7 +181,30 @@
     };
   }
 
-  function isSolidLinedef(linedef) {
+  function resetDoorStates(mapData) {
+    if (!mapData || !mapData.doors) return;
+    mapData.doors.forEach(function (door) {
+      door.state = "closed";
+      door.progress = 0;
+    });
+  }
+
+  function isDoorLinedef(linedef) {
+    return linedef.specialType === SYNTHETIC_DOOR_SPECIAL;
+  }
+
+  function doorStateAt(mapData, linedefIndex) {
+    if (!mapData || !mapData.doors) return null;
+    return mapData.doors.get(linedefIndex) || null;
+  }
+
+  function isDoorOpen(mapData, linedefIndex) {
+    const door = doorStateAt(mapData, linedefIndex);
+    return door !== null && door.state === "open";
+  }
+
+  function isSolidLinedef(linedef, mapData, linedefIndex) {
+    if (isDoorLinedef(linedef) && isDoorOpen(mapData, linedefIndex)) return false;
     return linedef.leftSidedef < 0 ||
       linedef.rightSidedef < 0 ||
       (linedef.flags & LINEDEF_BLOCKING) !== 0;
@@ -238,7 +265,7 @@
 
     for (let index = 0; index < mapData.linedefs.length; index += 1) {
       const linedef = mapData.linedefs[index];
-      if (!isSolidLinedef(linedef)) continue;
+      if (!isSolidLinedef(linedef, mapData, index)) continue;
 
       const start = mapData.vertexes[linedef.startVertex];
       const end = mapData.vertexes[linedef.endVertex];
@@ -304,6 +331,92 @@
     }
   }
 
+  function createDoorStates(mapData) {
+    const doors = new Map();
+
+    for (let index = 0; index < mapData.linedefs.length; index += 1) {
+      if (isDoorLinedef(mapData.linedefs[index])) {
+        doors.set(index, {
+          linedefIndex: index,
+          state: "closed",
+          progress: 0
+        });
+      }
+    }
+
+    return doors;
+  }
+
+  function updateDoorStates(mapData, deltaSeconds) {
+    if (!mapData || !mapData.doors) return;
+    mapData.doors.forEach(function (door) {
+      if (door.state !== "opening") return;
+      door.progress = Math.min(1, door.progress + deltaSeconds / DOOR_OPEN_SECONDS);
+      if (door.progress >= 1) {
+        door.state = "open";
+        interactionMessage = "Door open.";
+      }
+    });
+  }
+
+  function findUsableLinedefInFront(mapData) {
+    if (playerState === null || !mapData || !mapData.doors || mapData.doors.size === 0) return null;
+
+    const radians = playerState.angle * Math.PI / 180;
+    const rayX = Math.cos(radians);
+    const rayY = Math.sin(radians);
+    let nearest = null;
+
+    mapData.doors.forEach(function (door, linedefIndex) {
+      const linedef = mapData.linedefs[linedefIndex];
+      const start = mapData.vertexes[linedef.startVertex];
+      const end = mapData.vertexes[linedef.endVertex];
+      let hit = null;
+
+      if (!start || !end) return;
+      hit = raySegmentIntersection(
+        playerState.x, playerState.y,
+        rayX, rayY,
+        start.x, start.y,
+        end.x, end.y
+      );
+      if (hit === null || hit.distance > USE_DISTANCE) return;
+      if (nearest === null || hit.distance < nearest.distance) {
+        nearest = {
+          distance: hit.distance,
+          linedef: linedef,
+          linedefIndex: linedefIndex,
+          door: door
+        };
+      }
+    });
+
+    return nearest;
+  }
+
+  function useLinedefInFront(mapData) {
+    const target = findUsableLinedefInFront(mapData);
+
+    if (target === null) {
+      interactionMessage = "No usable line in reach.";
+      return;
+    }
+    if (target.door.state === "closed") {
+      target.door.state = "opening";
+      target.door.progress = 0;
+      interactionMessage = "Door opening.";
+    } else if (target.door.state === "opening") {
+      interactionMessage = "Door is opening.";
+    } else {
+      interactionMessage = "Door already open.";
+    }
+    renderCurrentMapMode(mapData);
+  }
+
+  function interactionSuffix() {
+    return interactionMessage === "" ? "" : " " + interactionMessage;
+  }
+
   function renderAndPresent(frameNumber) {
     if (wasmProvider !== null) {
       const checksum = wasmProvider.writeFrame(frameNumber, imageData.data);
@@ -342,7 +455,14 @@
       if (start && end) {
         const startScreen = toScreen(start);
         const endScreen = toScreen(end);
-        if (linedef.leftSidedef >= 0 && linedef.rightSidedef >= 0) {
+        const door = doorStateAt(mapData, index);
+        if (door !== null && door.state === "open") {
+          drawLine(data, startScreen.x, startScreen.y, endScreen.x, endScreen.y, 94, 196, 135);
+        } else if (door !== null && door.state === "opening") {
+          drawLine(data, startScreen.x, startScreen.y, endScreen.x, endScreen.y, 255, 212, 96);
+        } else if (door !== null) {
+          drawLine(data, startScreen.x, startScreen.y, endScreen.x, endScreen.y, 240, 128, 96);
+        } else if (linedef.leftSidedef >= 0 && linedef.rightSidedef >= 0) {
           drawLine(data, startScreen.x, startScreen.y, endScreen.x, endScreen.y, 82, 141, 128);
         } else {
           drawLine(data, startScreen.x, startScreen.y, endScreen.x, endScreen.y, 220, 232, 225);
@@ -377,7 +497,7 @@
         playerState.x.toFixed(1) + " y=" + playerState.y.toFixed(1) +
         " angle=" + Math.round(playerState.angle) + " (" +
         mapData.vertexes.length + " vertexes, " + mapData.linedefs.length +
-        " linedefs, scale " + scale.toFixed(2) + ")";
+        " linedefs, scale " + scale.toFixed(2) + ")" + interactionSuffix();
     } else {
       status.textContent = "Map " + mapData.name + " top-down: no player start (" +
       mapData.vertexes.length + " vertexes, " + mapData.linedefs.length +
@@ -414,7 +534,7 @@
 
     for (let index = 0; index < mapData.linedefs.length; index += 1) {
       const linedef = mapData.linedefs[index];
-      if (!isSolidLinedef(linedef)) continue;
+      if (!isSolidLinedef(linedef, mapData, index)) continue;
 
       const start = mapData.vertexes[linedef.startVertex];
       const end = mapData.vertexes[linedef.endVertex];
@@ -432,6 +552,7 @@
           distance: hit.distance,
           segmentT: hit.segmentT,
           linedef: linedef,
+          linedefIndex: index,
           start: start,
           end: end
         };
@@ -569,7 +690,7 @@
       for (let column = 0; column < WIDTH; column += 1) {
         const cameraX = (column + 0.5) / WIDTH - 0.5;
         const angleOffset = cameraX * fovRadians;
-        const rayAngle = playerAngleRadians + angleOffset;
+        const rayAngle = playerAngleRadians - angleOffset;
         const hit = findNearestWallHit(mapData, rayAngle);
 
         if (hit === null) continue;
@@ -627,7 +748,8 @@
       status.textContent = "First-person " + mapData.name + " player x=" +
         playerState.x.toFixed(1) + " y=" + playerState.y.toFixed(1) +
         " angle=" + Math.round(playerState.angle) + " (" +
-        hitColumns + " wall columns, " + texturedColumns + " textured)";
+        hitColumns + " wall columns, " + texturedColumns + " textured)" +
+        interactionSuffix();
     } else {
       status.textContent = "First-person " + mapData.name + ": no player start";
     }
@@ -672,7 +794,9 @@
       lastStep = timestamp;
     } else if (isMapRenderMode(renderMode) && loadedMap !== null) {
       if (lastMapStep === 0) lastMapStep = timestamp;
-      updatePlayerFromInput(loadedMap, (timestamp - lastMapStep) / 1000);
+      const deltaSeconds = (timestamp - lastMapStep) / 1000;
+      updatePlayerFromInput(loadedMap, deltaSeconds);
+      updateDoorStates(loadedMap, deltaSeconds);
       renderCurrentMapMode(loadedMap);
       lastMapStep = timestamp;
     }
@@ -902,7 +1026,7 @@
 
     for (let index = 0; index < mapData.linedefs.length; index += 1) {
       const linedef = mapData.linedefs[index];
-      if (!isSolidLinedef(linedef)) continue;
+      if (!isSolidLinedef(linedef, mapData, index)) continue;
       addSidedefTexture(mapData.sidedefs[linedef.rightSidedef]);
       addSidedefTexture(mapData.sidedefs[linedef.leftSidedef]);
     }
@@ -1266,8 +1390,10 @@
       linedefs: linedefs,
       sidedefs: sidedefs,
       bounds: computeMapBounds(vertexes, playerStart),
+      doors: new Map(),
       textureSet: unavailableTextureSet("not loaded", 0)
     };
+    mapData.doors = createDoorStates(mapData);
     mapData.textureSet = loadWallTextureSet(
       buffer,
       wad,
@@ -1352,6 +1478,7 @@
     appendDescription(wadSummary, "Size", buffer.byteLength + " bytes");
     loadedMap = null;
     playerState = null;
+    interactionMessage = "";
     mapModeButton.disabled = true;
     firstPersonModeButton.disabled = true;
 
@@ -1386,6 +1513,10 @@
         appendDescription(mapSummary, "Sidedefs", String(mapData.counts.sidedefs));
         appendDescription(mapSummary, "Sectors", String(mapData.counts.sectors));
         appendDescription(mapSummary, "Things", String(mapData.counts.things));
+        if (mapData.doors.size > 0) {
+          appendDescription(mapSummary, "Line specials",
+            mapData.doors.size + " synthetic door special " + SYNTHETIC_DOOR_SPECIAL);
+        }
         appendDescription(mapSummary, "Bounds",
           mapData.bounds.minX + "," + mapData.bounds.minY + " to " +
           mapData.bounds.maxX + "," + mapData.bounds.maxY);
@@ -1424,6 +1555,7 @@
     clearNode(mapSummary);
     loadedMap = null;
     playerState = null;
+    interactionMessage = "";
     mapModeButton.disabled = true;
     firstPersonModeButton.disabled = true;
     if (isMapRenderMode(renderMode)) setRenderMode("framebuffer");
@@ -1438,6 +1570,7 @@
       clearNode(mapSummary);
       loadedMap = null;
       playerState = null;
+      interactionMessage = "";
       mapModeButton.disabled = true;
       firstPersonModeButton.disabled = true;
       if (isMapRenderMode(renderMode)) setRenderMode("framebuffer");
@@ -1534,6 +1667,8 @@
   resetButton.addEventListener("click", function () {
     frame = 0;
     if (isMapRenderMode(renderMode)) {
+      resetDoorStates(loadedMap);
+      interactionMessage = "";
       initPlayerState(loadedMap);
       renderCurrentMapMode(loadedMap);
     } else {
@@ -1565,9 +1700,15 @@
       event.code === "KeyQ" ||
       event.code === "KeyE" ||
       event.code === "ArrowLeft" ||
-      event.code === "ArrowRight";
+      event.code === "ArrowRight" ||
+      event.code === "Space";
 
     if (!controlledKey) return;
+    if (event.code === "Space" && isMapRenderMode(renderMode) && loadedMap !== null) {
+      if (!event.repeat) useLinedefInFront(loadedMap);
+      event.preventDefault();
+      return;
+    }
     pressedKeys.add(event.code);
     if (isMapRenderMode(renderMode)) {
       event.preventDefault();

@@ -10,3 +10,4 @@ build/
 tests/wad_tests/minimal.pwad
 tests/wad_tests/minimal_map.pwad
 tests/wad_tests/textured_map.pwad
+tests/wad_tests/door_map.pwad

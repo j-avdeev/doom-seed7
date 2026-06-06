@@ -244,6 +244,12 @@ Generate the synthetic textured map fixture:
 node seed7/bin/s7.js -l seed7/lib tests/wad_tests/make_minimal_wad.s7 --textured-map
 ```
 
+Generate the synthetic door interaction fixture:
+
+```bash
+node seed7/bin/s7.js -l seed7/lib tests/wad_tests/make_minimal_wad.s7 --door-map
+```
+
 Build the current generated WASM framebuffer provider:
 
 ```powershell
@@ -285,11 +291,15 @@ In the page:
 5. Click `First-person` to render flat ceiling/floor bands and wall columns
    from the player perspective. With `textured_map.pwad`, the WAD panel should
    report `1 of 1 resolved` wall textures.
-6. Click `Framebuffer` to return to the generated WASM framebuffer demo.
+6. To test Task 10 interaction, select `tests/wad_tests/door_map.pwad`, face
+   the marked door line, and press `Space`. The closed line blocks movement;
+   after opening, movement through that line is allowed.
+7. Click `Framebuffer` to return to the generated WASM framebuffer demo.
 
 This is a temporary JavaScript bridge that preserves the Seed7-generated WASM
 framebuffer provider. In top-down and first-person modes, `W`/`S` move forward
 and backward, `A`/`D` strafe, and `ArrowLeft`/`ArrowRight` or `Q`/`E` turn.
+`Space` uses the synthetic Task 10 door line when one is in front of the player.
 One-sided and explicitly blocking linedefs use conservative debug collision.
 The first-person renderer is still a ray/segment projection prototype; it does
 not add sprites, enemies, weapons, combat, sound, or gameplay.
@@ -305,7 +315,10 @@ Known limitations:
 - Texture support is limited to `PLAYPAL`, `PNAMES`, `TEXTURE1`, and vanilla
   patch picture lumps for wall columns. No floor/ceiling flats, sprites,
   enemies, weapons, combat, audio, exits, or commercial WAD assets are included.
+- Door support is limited to the synthetic browser-side linedef special
+  documented in `docs/line-specials.md`; it is not Doom-compatible door logic.
 
 See `docs/renderer-debug.md` for top-down details and
 `docs/renderer-options.md` for the first-person renderer approach. See
-`docs/textures.md` for Task 9 texture support and limitations.
+`docs/textures.md` for Task 9 texture support and limitations. See
+`docs/line-specials.md` for Task 10 door support and limitations.
