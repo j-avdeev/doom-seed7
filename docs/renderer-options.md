@@ -2,9 +2,11 @@
 
 Task 8 adds a browser-only first-person renderer prototype on top of the
 existing Task 5-7 JavaScript WAD bridge. Task 9 extends that prototype with
-basic Doom palette and wall texture support. It keeps the Seed7-generated WASM
-framebuffer provider unchanged and does not add sprites, enemies, weapons,
-combat, sound, doors, interactions, or a Doom BSP renderer.
+basic Doom palette and wall texture support. Task 11 adds placeholder thing
+billboards. Task 12 adds minimal pistol hitscan combat against those
+placeholder things. It keeps the Seed7-generated WASM framebuffer provider
+unchanged and does not add enemy AI, enemy attacks, pickups, sound, advanced
+weapons, or a Doom BSP renderer.
 
 ## Current Prototype
 
@@ -13,7 +15,8 @@ The browser page has three Canvas modes:
 - `Framebuffer`: the original generated-WASM framebuffer demo, or the JavaScript
   fallback when the WASM provider is unavailable.
 - `First-person`: the Task 8 ray/segment prototype, with Task 9 wall textures
-  when the uploaded WAD supplies supported texture lumps.
+  when the uploaded WAD supplies supported texture lumps, and Task 11
+  placeholder thing billboards plus Task 12 pistol hitscan combat.
 - `Top-down Map`: the Task 6-7 debug map renderer.
 
 Uploading `tests/wad_tests/minimal_map.pwad` still parses the WAD directory and
@@ -43,8 +46,9 @@ color.
 
 This is intentionally a stepping-stone renderer. It does not use Doom sectors
 for floor or ceiling heights, does not traverse `NODES`/`SSECTORS`/`SEGS`, and
-does not sample flats, sprites, or things. See `docs/textures.md` for the
-supported texture subset.
+does not sample flats or full Doom sprites. Thing rendering is currently a
+placeholder billboard pass. See `docs/textures.md` for the supported texture
+subset and `docs/sprites.md` for thing rendering.
 
 ## Player State
 
@@ -54,6 +58,8 @@ The first-person and top-down modes share the existing debug player state:
 - `W` / `S` move forward and backward.
 - `A` / `D` strafe left and right.
 - `ArrowLeft` / `ArrowRight` and `Q` / `E` turn.
+- left mouse, `Ctrl`, and `F` fire the current pistol at alive placeholder
+  things.
 - Collision still uses the Task 7 conservative segment test against solid
   linedefs.
 
@@ -98,3 +104,14 @@ Expected browser result:
 For Task 9 texture verification, generate and select
 `tests/wad_tests/textured_map.pwad`; first-person mode should report textured
 wall columns and the WAD panel should report one resolved wall texture.
+
+For Task 11 sprite/thing verification, generate and select
+`tests/wad_tests/thing_map.pwad`; top-down mode should show one non-player thing
+marker, and first-person mode should report and display one placeholder thing
+billboard.
+
+For Task 12 combat verification with the same fixture, fire at the placeholder
+with left mouse, `Ctrl`, or `F`. The status line should report ammo and
+`shot=hit`; after three hits the placeholder should be killed and disappear from
+first-person mode. Top-down mode should continue to show the dead thing as a
+gray cross.

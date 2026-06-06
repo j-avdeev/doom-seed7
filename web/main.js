@@ -44,8 +44,16 @@
   const PLAYER_RADIUS = 12;
   const PLAYER_SPEED = 120;
   const PLAYER_TURN_SPEED = 150;
+  const PLAYER_START_HEALTH = 100;
+  const PLAYER_START_AMMO = 24;
+  const PISTOL_DAMAGE = 1;
+  const SHOOTABLE_THING_HEALTH = 3;
+  const HITSCAN_MAX_DISTANCE = 1024;
+  const HITSCAN_THING_RADIUS = 18;
   const FIRST_PERSON_FOV_DEGREES = 66;
   const FIRST_PERSON_WALL_HEIGHT = 96;
+  const FIRST_PERSON_THING_HEIGHT = 56;
+  const FIRST_PERSON_THING_WIDTH_RATIO = 0.62;
   const FIRST_PERSON_NEAR_DISTANCE = 0.25;
   const FIRST_PERSON_PROJECTION_DISTANCE =
     (WIDTH / 2) / Math.tan((FIRST_PERSON_FOV_DEGREES * Math.PI / 180) / 2);
@@ -59,6 +67,7 @@
   let loadedMap = null;
   let playerState = null;
   let interactionMessage = "";
+  let combatMessage = "shot=ready";
   const pressedKeys = new Set();
 
   function byteWrap(value) {
@@ -154,6 +163,22 @@
     }
   }
 
+  function drawRing(data, centerX, centerY, radius, red, green, blue) {
+    const innerRadiusSquared = Math.max(0, (radius - 2) * (radius - 2));
+    const outerRadiusSquared = radius * radius;
+    const roundedX = Math.round(centerX);
+    const roundedY = Math.round(centerY);
+
+    for (let y = -radius; y <= radius; y += 1) {
+      for (let x = -radius; x <= radius; x += 1) {
+        const distanceSquared = x * x + y * y;
+        if (distanceSquared <= outerRadiusSquared && distanceSquared >= innerRadiusSquared) {
+          putPixel(data, roundedX + x, roundedY + y, red, green, blue);
+        }
+      }
+    }
+  }
+
   function normalizeAngle(angle) {
     return ((angle % 360) + 360) % 360;
   }
@@ -166,6 +191,72 @@
     return mode === "map" || mode === "firstPerson";
   }
 
+  function isPlayerStartThing(thing) {
+    return thing.type === 1 || thing.type === 2 || thing.type === 3 ||
+      thing.type === 4 || thing.type === 11;
+  }
+
+  function isRenderableThing(thing) {
+    return !isPlayerStartThing(thing);
+  }
+
+  function isShootableThing(thing) {
+    return isRenderableThing(thing) && thing.shootable === true;
+  }
+
+  function isAliveThing(thing) {
+    return isShootableThing(thing) && thing.dead !== true && thing.health > 0;
+  }
+
+  function thingBaseColor(thing) {
+    if (thing.type >= 3000) {
+      return { red: 216, green: 82, blue: 72 };
+    }
+    if (thing.type >= 2000) {
+      return { red: 92, green: 170, blue: 232 };
+    }
+    if (thing.type >= 1000) {
+      return { red: 240, green: 192, blue: 84 };
+    }
+    return { red: 184, green: 132, blue: 220 };
+  }
+
+  function renderableThings(mapData) {
+    if (!mapData || !mapData.things) return [];
+    return mapData.things.filter(isRenderableThing);
+  }
+
+  function aliveRenderableThings(mapData) {
+    if (!mapData || !mapData.things) return [];
+    return mapData.things.filter(isAliveThing);
+  }
+
+  function shootableThingCount(mapData) {
+    if (!mapData || !mapData.things) return 0;
+    return mapData.things.filter(isShootableThing).length;
+  }
+
+  function aliveThingCount(mapData) {
+    return aliveRenderableThings(mapData).length;
+  }
+
+  function resetThingCombatState(mapData) {
+    if (!mapData || !mapData.things) return;
+    mapData.things.forEach(function (thing) {
+      if (isPlayerStartThing(thing)) {
+        thing.shootable = false;
+        thing.maxHealth = 0;
+        thing.health = 0;
+        thing.dead = false;
+      } else {
+        thing.shootable = true;
+        thing.maxHealth = SHOOTABLE_THING_HEALTH;
+        thing.health = SHOOTABLE_THING_HEALTH;
+        thing.dead = false;
+      }
+    });
+  }
+
   function initPlayerState(mapData) {
     if (mapData === null || mapData.playerStart === null) {
       playerState = null;
@@ -176,6 +267,9 @@
       x: mapData.playerStart.x,
       y: mapData.playerStart.y,
       angle: normalizeAngle(mapData.playerStart.angle),
+      health: PLAYER_START_HEALTH,
+      ammo: PLAYER_START_AMMO,
+      currentWeapon: "pistol",
       speed: PLAYER_SPEED,
       turnSpeed: PLAYER_TURN_SPEED
     };
@@ -413,8 +507,93 @@
     renderCurrentMapMode(mapData);
   }
 
-  function interactionSuffix() {
-    return interactionMessage === "" ? "" : " " + interactionMessage;
+  function findHitscanThing(mapData) {
+    const radians = playerState.angle * Math.PI / 180;
+    const rayX = Math.cos(radians);
+    const rayY = Math.sin(radians);
+    const wallHit = findNearestWallHit(mapData, radians);
+    const wallDistance = wallHit === null ? HITSCAN_MAX_DISTANCE :
+      Math.min(HITSCAN_MAX_DISTANCE, wallHit.distance);
+    let nearest = null;
+
+    aliveRenderableThings(mapData).forEach(function (thing) {
+      const dx = thing.x - playerState.x;
+      const dy = thing.y - playerState.y;
+      const forward = dx * rayX + dy * rayY;
+      const lateral = dx * rayY - dy * rayX;
+      let surfaceDistance = 0;
+
+      if (forward <= FIRST_PERSON_NEAR_DISTANCE || forward > HITSCAN_MAX_DISTANCE) return;
+      if (Math.abs(lateral) > HITSCAN_THING_RADIUS) return;
+
+      surfaceDistance = forward -
+        Math.sqrt(Math.max(0, HITSCAN_THING_RADIUS * HITSCAN_THING_RADIUS - lateral * lateral));
+      if (surfaceDistance > wallDistance) return;
+
+      if (nearest === null || surfaceDistance < nearest.distance) {
+        nearest = {
+          thing: thing,
+          distance: surfaceDistance,
+          centerDistance: forward
+        };
+      }
+    });
+
+    return nearest;
+  }
+
+  function fireCurrentWeapon(mapData) {
+    let target = null;
+
+    if (playerState === null || mapData === null) return;
+    if (playerState.currentWeapon !== "pistol") {
+      combatMessage = "shot=no weapon";
+      renderCurrentMapMode(mapData);
+      return;
+    }
+    if (playerState.ammo <= 0) {
+      combatMessage = "shot=no ammo";
+      renderCurrentMapMode(mapData);
+      return;
+    }
+
+    playerState.ammo -= 1;
+    target = findHitscanThing(mapData);
+    if (target === null) {
+      combatMessage = "shot=miss";
+    } else {
+      target.thing.health = Math.max(0, target.thing.health - PISTOL_DAMAGE);
+      if (target.thing.health === 0) {
+        target.thing.dead = true;
+        combatMessage = "shot=kill thing#" + (target.thing.index + 1);
+      } else {
+        combatMessage = "shot=hit thing#" + (target.thing.index + 1) +
+          " hp=" + target.thing.health;
+      }
+    }
+    renderCurrentMapMode(mapData);
+  }
+
+  function combatHudText(mapData, visibleThingCount) {
+    const visible = typeof visibleThingCount === "number" ?
+      visibleThingCount : aliveThingCount(mapData);
+
+    if (playerState === null) return "";
+    return "HUD hp=" + playerState.health +
+      " weapon=" + playerState.currentWeapon +
+      " ammo=" + playerState.ammo +
+      " visible=" + visible +
+      " alive=" + aliveThingCount(mapData) + "/" + shootableThingCount(mapData) +
+      " " + combatMessage;
+  }
+
+  function interactionSuffix(mapData, visibleThingCount) {
+    const parts = [];
+    const combatHud = combatHudText(mapData, visibleThingCount);
+
+    if (combatHud !== "") parts.push(combatHud);
+    if (interactionMessage !== "") parts.push(interactionMessage);
+    return parts.length === 0 ? "" : " " + parts.join(" ");
   }
 
   function renderAndPresent(frameNumber) {
@@ -475,6 +654,22 @@
       drawDisk(data, screen.x, screen.y, 2, 119, 208, 189);
     }
 
+    renderableThings(mapData).forEach(function (thing) {
+      const screen = toScreen(thing);
+      const color = thingBaseColor(thing);
+      const radians = thing.angle * Math.PI / 180;
+      const noseX = screen.x + Math.cos(radians) * 7;
+      const noseY = screen.y - Math.sin(radians) * 7;
+      if (thing.dead === true) {
+        drawLine(data, screen.x - 5, screen.y - 5, screen.x + 5, screen.y + 5, 112, 119, 116);
+        drawLine(data, screen.x - 5, screen.y + 5, screen.x + 5, screen.y - 5, 112, 119, 116);
+      } else {
+        drawRing(data, screen.x, screen.y, 5, color.red, color.green, color.blue);
+        drawDisk(data, screen.x, screen.y, 2, 24, 28, 30);
+        drawLine(data, screen.x, screen.y, noseX, noseY, color.red, color.green, color.blue);
+      }
+    });
+
     if (playerState !== null) {
       const player = toScreen(playerState);
       const radians = playerState.angle * Math.PI / 180;
@@ -497,7 +692,8 @@
         playerState.x.toFixed(1) + " y=" + playerState.y.toFixed(1) +
         " angle=" + Math.round(playerState.angle) + " (" +
         mapData.vertexes.length + " vertexes, " + mapData.linedefs.length +
-        " linedefs, scale " + scale.toFixed(2) + ")" + interactionSuffix();
+        " linedefs, scale " + scale.toFixed(2) + ")" +
+        interactionSuffix(mapData, aliveThingCount(mapData));
     } else {
       status.textContent = "Map " + mapData.name + " top-down: no player start (" +
       mapData.vertexes.length + " vertexes, " + mapData.linedefs.length +
@@ -666,8 +862,12 @@
     const data = imageData.data;
     const playerAngleRadians = playerState === null ? 0 : playerState.angle * Math.PI / 180;
     const fovRadians = FIRST_PERSON_FOV_DEGREES * Math.PI / 180;
+    const wallDepthByColumn = new Float64Array(WIDTH);
     let hitColumns = 0;
     let texturedColumns = 0;
+    let thingSprites = 0;
+
+    wallDepthByColumn.fill(Infinity);
 
     for (let y = 0; y < HEIGHT; y += 1) {
       const ceiling = y < HEIGHT / 2;
@@ -739,8 +939,10 @@
           );
           texturedColumns += 1;
         }
+        wallDepthByColumn[column] = perpendicularDistance;
         hitColumns += 1;
       }
+      thingSprites = drawFirstPersonThings(mapData, wallDepthByColumn, playerAngleRadians);
     }
 
     context.putImageData(imageData, 0, 0);
@@ -748,11 +950,99 @@
       status.textContent = "First-person " + mapData.name + " player x=" +
         playerState.x.toFixed(1) + " y=" + playerState.y.toFixed(1) +
         " angle=" + Math.round(playerState.angle) + " (" +
-        hitColumns + " wall columns, " + texturedColumns + " textured)" +
-        interactionSuffix();
+        hitColumns + " wall columns, " + texturedColumns + " textured, " +
+        thingSprites + " things)" +
+        interactionSuffix(mapData, thingSprites);
     } else {
       status.textContent = "First-person " + mapData.name + ": no player start";
     }
+  }
+
+  function drawFirstPersonThings(mapData, wallDepthByColumn, playerAngleRadians) {
+    const data = imageData.data;
+    const cosAngle = Math.cos(playerAngleRadians);
+    const sinAngle = Math.sin(playerAngleRadians);
+    const projectedThings = [];
+    let drawn = 0;
+
+    aliveRenderableThings(mapData).forEach(function (thing) {
+      const dx = thing.x - playerState.x;
+      const dy = thing.y - playerState.y;
+      const forward = dx * cosAngle + dy * sinAngle;
+      const right = dx * sinAngle - dy * cosAngle;
+
+      if (forward <= FIRST_PERSON_NEAR_DISTANCE) return;
+
+      const screenX = WIDTH / 2 + (right / forward) * FIRST_PERSON_PROJECTION_DISTANCE;
+      const spriteHeight = FIRST_PERSON_THING_HEIGHT * FIRST_PERSON_PROJECTION_DISTANCE / forward;
+      const spriteWidth = spriteHeight * FIRST_PERSON_THING_WIDTH_RATIO;
+
+      if (screenX + spriteWidth / 2 < 0 || screenX - spriteWidth / 2 >= WIDTH) return;
+
+      projectedThings.push({
+        thing: thing,
+        distance: forward,
+        screenX: screenX,
+        top: HEIGHT / 2 - spriteHeight * 0.62,
+        bottom: HEIGHT / 2 + spriteHeight * 0.38,
+        width: spriteWidth
+      });
+    });
+
+    projectedThings.sort(function (left, right) {
+      return right.distance - left.distance;
+    });
+
+    projectedThings.forEach(function (sprite) {
+      const color = thingBaseColor(sprite.thing);
+      const shade = Math.max(0.32, Math.min(1, 180 / (sprite.distance + 72)));
+      const halfWidth = sprite.width / 2;
+      const centerX = sprite.screenX;
+      const top = sprite.top;
+      const bottom = sprite.bottom;
+      const height = Math.max(1, bottom - top);
+      const xStart = Math.max(0, Math.floor(centerX - halfWidth));
+      const xEnd = Math.min(WIDTH - 1, Math.ceil(centerX + halfWidth));
+      const yStart = Math.max(0, Math.floor(top));
+      const yEnd = Math.min(HEIGHT - 1, Math.ceil(bottom));
+      let pixelsDrawn = 0;
+
+      for (let x = xStart; x <= xEnd; x += 1) {
+        if (sprite.distance >= wallDepthByColumn[x]) continue;
+
+        const normalizedX = halfWidth <= 0 ? 0 : (x + 0.5 - centerX) / halfWidth;
+        for (let y = yStart; y <= yEnd; y += 1) {
+          const normalizedY = (y + 0.5 - top) / height;
+          const bodyWidth = normalizedY < 0.22 ?
+            0.42 + normalizedY * 1.45 :
+            0.92 - Math.max(0, normalizedY - 0.22) * 0.18;
+
+          if (Math.abs(normalizedX) > bodyWidth) continue;
+          if (normalizedY > 0.84 && Math.abs(normalizedX) < 0.20) continue;
+
+          const edge = Math.abs(normalizedX) > bodyWidth - 0.08 ||
+            normalizedY < 0.08 || normalizedY > 0.90;
+          const verticalShade = 1 - Math.max(0, normalizedY - 0.35) * 0.34;
+          const destinationOffset = (y * WIDTH + x) * 4;
+
+          if (edge) {
+            data[destinationOffset] = Math.round(34 * shade);
+            data[destinationOffset + 1] = Math.round(38 * shade);
+            data[destinationOffset + 2] = Math.round(36 * shade);
+          } else {
+            data[destinationOffset] = Math.round(color.red * shade * verticalShade);
+            data[destinationOffset + 1] = Math.round(color.green * shade * verticalShade);
+            data[destinationOffset + 2] = Math.round(color.blue * shade * verticalShade);
+          }
+          data[destinationOffset + 3] = 255;
+          pixelsDrawn += 1;
+        }
+      }
+
+      if (pixelsDrawn > 0) drawn += 1;
+    });
+
+    return drawn;
   }
 
   function renderCurrentMapMode(mapData) {
@@ -934,17 +1224,29 @@
     return dataView.byteLength / recordSize;
   }
 
-  function parsePlayerStart(thingsView) {
+  function parseThings(thingsView) {
     const thingCount = checkedRecordCount("THINGS", thingsView, THING_SIZE);
+    const things = [];
+
     for (let index = 0; index < thingCount; index += 1) {
       const offset = index * THING_SIZE;
-      if (thingsView.getInt16(offset + 6, true) === 1) {
-        return {
-          x: thingsView.getInt16(offset, true),
-          y: thingsView.getInt16(offset + 2, true),
-          angle: thingsView.getInt16(offset + 4, true)
-        };
-      }
+      const thingType = thingsView.getInt16(offset + 6, true);
+      things.push({
+        index: index,
+        x: thingsView.getInt16(offset, true),
+        y: thingsView.getInt16(offset + 2, true),
+        angle: normalizeAngle(thingsView.getInt16(offset + 4, true)),
+        type: thingType,
+        thingType: thingType,
+        flags: thingsView.getInt16(offset + 8, true)
+      });
+    }
+    return things;
+  }
+
+  function parsePlayerStart(things) {
+    for (let index = 0; index < things.length; index += 1) {
+      if (things[index].type === 1) return things[index];
     }
     return null;
   }
@@ -1319,7 +1621,7 @@
     }
   }
 
-  function computeMapBounds(vertexes, playerStart) {
+  function computeMapBounds(vertexes, things) {
     let minX = Infinity;
     let minY = Infinity;
     let maxX = -Infinity;
@@ -1338,8 +1640,8 @@
     for (let index = 0; index < vertexes.length; index += 1) {
       includePoint(vertexes[index]);
     }
-    if (playerStart !== null) {
-      includePoint(playerStart);
+    for (let index = 0; index < things.length; index += 1) {
+      includePoint(things[index]);
     }
 
     return {
@@ -1355,6 +1657,7 @@
     const counts = {};
     const views = {};
     let playerStart = null;
+    let things = [];
     let vertexes = [];
     let linedefs = [];
     let sidedefs = [];
@@ -1377,7 +1680,8 @@
     counts.vertexes = checkedRecordCount("VERTEXES", views.VERTEXES, VERTEX_SIZE);
     counts.sectors = checkedRecordCount("SECTORS", views.SECTORS, SECTOR_SIZE);
 
-    playerStart = parsePlayerStart(views.THINGS);
+    things = parseThings(views.THINGS);
+    playerStart = parsePlayerStart(things);
     vertexes = parseVertexes(views.VERTEXES);
     linedefs = parseLinedefs(views.LINEDEFS, vertexes.length);
     sidedefs = parseSidedefs(views.SIDEDEFS);
@@ -1385,11 +1689,12 @@
     mapData = {
       name: wad.lumps[markerIndex].name,
       counts: counts,
+      things: things,
       playerStart: playerStart,
       vertexes: vertexes,
       linedefs: linedefs,
       sidedefs: sidedefs,
-      bounds: computeMapBounds(vertexes, playerStart),
+      bounds: computeMapBounds(vertexes, things),
       doors: new Map(),
       textureSet: unavailableTextureSet("not loaded", 0)
     };
@@ -1479,6 +1784,7 @@
     loadedMap = null;
     playerState = null;
     interactionMessage = "";
+    combatMessage = "shot=ready";
     mapModeButton.disabled = true;
     firstPersonModeButton.disabled = true;
 
@@ -1504,6 +1810,7 @@
         if (isMapRenderMode(renderMode)) setRenderMode("framebuffer");
       } else {
         loadedMap = mapData;
+        resetThingCombatState(loadedMap);
         initPlayerState(loadedMap);
         mapModeButton.disabled = false;
         firstPersonModeButton.disabled = false;
@@ -1513,6 +1820,8 @@
         appendDescription(mapSummary, "Sidedefs", String(mapData.counts.sidedefs));
         appendDescription(mapSummary, "Sectors", String(mapData.counts.sectors));
         appendDescription(mapSummary, "Things", String(mapData.counts.things));
+        appendDescription(mapSummary, "Renderable things", String(renderableThings(mapData).length));
+        appendDescription(mapSummary, "Shootable things", String(shootableThingCount(mapData)));
         if (mapData.doors.size > 0) {
           appendDescription(mapSummary, "Line specials",
             mapData.doors.size + " synthetic door special " + SYNTHETIC_DOOR_SPECIAL);
@@ -1556,6 +1865,7 @@
     loadedMap = null;
     playerState = null;
     interactionMessage = "";
+    combatMessage = "shot=ready";
     mapModeButton.disabled = true;
     firstPersonModeButton.disabled = true;
     if (isMapRenderMode(renderMode)) setRenderMode("framebuffer");
@@ -1571,6 +1881,7 @@
       loadedMap = null;
       playerState = null;
       interactionMessage = "";
+      combatMessage = "shot=ready";
       mapModeButton.disabled = true;
       firstPersonModeButton.disabled = true;
       if (isMapRenderMode(renderMode)) setRenderMode("framebuffer");
@@ -1669,6 +1980,8 @@
     if (isMapRenderMode(renderMode)) {
       resetDoorStates(loadedMap);
       interactionMessage = "";
+      combatMessage = "shot=ready";
+      resetThingCombatState(loadedMap);
       initPlayerState(loadedMap);
       renderCurrentMapMode(loadedMap);
     } else {
@@ -1692,13 +2005,24 @@
     loadWadFile(wadFileInput.files[0]);
   });
 
+  canvas.addEventListener("mousedown", function (event) {
+    if (event.button !== 0) return;
+    if (isMapRenderMode(renderMode) && loadedMap !== null) {
+      fireCurrentWeapon(loadedMap);
+      event.preventDefault();
+    }
+  });
+
   window.addEventListener("keydown", function (event) {
     const controlledKey = event.code === "KeyW" ||
       event.code === "KeyA" ||
       event.code === "KeyS" ||
       event.code === "KeyD" ||
+      event.code === "KeyF" ||
       event.code === "KeyQ" ||
       event.code === "KeyE" ||
+      event.code === "ControlLeft" ||
+      event.code === "ControlRight" ||
       event.code === "ArrowLeft" ||
       event.code === "ArrowRight" ||
       event.code === "Space";
@@ -1706,6 +2030,12 @@
     if (!controlledKey) return;
     if (event.code === "Space" && isMapRenderMode(renderMode) && loadedMap !== null) {
       if (!event.repeat) useLinedefInFront(loadedMap);
+      event.preventDefault();
+      return;
+    }
+    if ((event.code === "KeyF" || event.code === "ControlLeft" || event.code === "ControlRight") &&
+        isMapRenderMode(renderMode) && loadedMap !== null) {
+      if (!event.repeat) fireCurrentWeapon(loadedMap);
       event.preventDefault();
       return;
     }

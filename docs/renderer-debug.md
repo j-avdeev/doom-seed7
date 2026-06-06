@@ -13,6 +13,8 @@ draws:
 - `LINEDEFS` as software framebuffer lines.
 - one-sided linedefs in light gray.
 - two-sided linedefs in muted green.
+- non-player `THINGS` as colored ring markers with angle ticks.
+- dead Task 12 placeholder things as gray crosses.
 - the current player position as a yellow marker with a direction arrow.
 
 The renderer computes bounds from the loaded map vertexes and the player start,
@@ -46,8 +48,8 @@ without disturbing the framebuffer ABI.
 
 The renderer still uses the same Canvas and `ImageData` surface as the
 framebuffer demo. It writes pixels directly into the 320x200 RGBA buffer, then
-presents them with `putImageData`. No WebGL, textures, BSP traversal,
-first-person projection, enemies, weapons, audio, or gameplay were added.
+presents them with `putImageData`. No WebGL, BSP traversal, enemy AI, enemy
+attacks, pickups, audio, advanced weapons, or full Doom gameplay were added.
 
 ## Modes
 
@@ -97,6 +99,7 @@ Expected browser result:
 - Switching back to `Framebuffer` resumes the Seed7-generated WASM framebuffer
   provider when it is available, or the JavaScript fallback when it is not.
 
-This Task 7 debug renderer did not add first-person projection, textures,
-enemies, combat, or gameplay. Later first-person and texture milestones use the
-same parsed map and player state while keeping the top-down mode available.
+Task 11 additionally draws non-player thing markers in this same top-down debug
+view. Task 12 uses this same view to show dead placeholder things as gray
+crosses. It still does not add enemy AI, enemy attacks, pickups, sound, or full
+Doom gameplay.

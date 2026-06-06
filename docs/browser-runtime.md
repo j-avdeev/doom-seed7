@@ -3,8 +3,9 @@
 This note records the current feasibility of compiling Seed7 programs to browser
 WebAssembly and the current browser WAD upload bridge. It is scoped to the
 software framebuffer, WAD inspection, top-down map-debug, and first-person
-prototype milestones with basic Task 9 wall textures. It does not add audio,
-pk4 parsing, enemies, weapons, combat, doors, interactions, or gameplay.
+prototype milestones with basic Task 9 wall textures and Task 11 placeholder
+thing rendering plus Task 12 placeholder combat. It does not add audio, pk4
+parsing, enemy AI, enemy attacks, pickups, advanced weapons, or full gameplay.
 
 ## Current Result
 
@@ -52,7 +53,9 @@ with a temporary JavaScript top-down map renderer and movable debug player
 instead of changing the working framebuffer WASM module. Task 8 adds a
 browser-only first-person projection prototype on top of that same parsed
 geometry and player state. Task 9 adds optional `PLAYPAL`/`PNAMES`/`TEXTURE1`
-wall texture parsing to that JavaScript bridge. This keeps the Task 2.5
+wall texture parsing to that JavaScript bridge. Task 11 parses all map things
+and renders non-player things as top-down markers and first-person placeholder
+billboards. This keeps the Task 2.5
 Seed7-generated WASM framebuffer path stable while still exercising the browser
 upload flow. The browser bridge mirrors the Task 3 and Task 4 data fields:
 
@@ -69,9 +72,14 @@ upload flow. The browser bridge mirrors the Task 3 and Task 4 data fields:
   same player `x`, `y`, and `angle`
 - optional wall texture data from `PLAYPAL`, `PNAMES`, `TEXTURE1`, and patch
   picture lumps when the uploaded WAD supplies them
+- non-player `THINGS` rendered as top-down debug markers and first-person
+  placeholder billboards with rough distance ordering
+- minimal pistol hitscan combat against alive non-player placeholder things,
+  with ammo and hit/miss status text
 
 The upload path does not bundle, fetch, or require copyrighted WAD files. User
-files remain in browser memory. No gameplay is started by this milestone.
+files remain in browser memory. The browser bridge remains a debug/prototype
+path, not a complete gameplay loop.
 
 ## How Seed7 Compiles To C
 
@@ -203,6 +211,12 @@ texture lumps, first-person mode resolves those textures and reports the count
 in the WAD panel. If texture data is absent or incomplete, the map still loads
 and the first-person renderer uses shaded fallback wall columns.
 
+When the selected map includes non-player things, the WAD panel reports
+renderable thing count. Top-down mode draws markers for those things, and
+first-person mode draws placeholder billboards sorted far-to-near and clipped
+against approximate wall-column depth. Doom sprite lump decoding and rotation
+selection are not implemented yet.
+
 The expected interpreted and Node-generated checksum proof line remains:
 
 ```text
@@ -312,3 +326,16 @@ Task 9 verification should additionally generate
 `tests/wad_tests/textured_map.pwad`, upload it, confirm the WAD panel reports
 one resolved wall texture, and confirm first-person mode reports textured wall
 columns while `minimal_map.pwad` still uses fallback wall rendering.
+
+Task 11 verification should additionally generate
+`tests/wad_tests/thing_map.pwad`, upload it, confirm the WAD panel reports
+`Things 2` and `Renderable things 1`, confirm top-down mode shows one thing
+marker, and confirm first-person mode displays one placeholder billboard that
+roughly respects distance and wall depth.
+
+Task 12 verification should additionally use `tests/wad_tests/thing_map.pwad`,
+switch to first-person mode, fire with left mouse, `Ctrl`, or `F`, and confirm
+the status line reports ammo plus `shot=hit` when aiming at the placeholder and
+`shot=miss` when aiming away. After three hits, the placeholder should disappear
+from first-person mode and remain in top-down mode as a dead gray cross. See
+`docs/combat.md` for the current combat behavior and limitations.
