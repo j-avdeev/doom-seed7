@@ -30,13 +30,20 @@
   const VERTEX_SIZE = 4;
   const SECTOR_SIZE = 26;
   const MAP_LUMPS = ["THINGS", "LINEDEFS", "SIDEDEFS", "VERTEXES", "SECTORS"];
+  const LINEDEF_BLOCKING = 1;
+  const PLAYER_RADIUS = 12;
+  const PLAYER_SPEED = 120;
+  const PLAYER_TURN_SPEED = 150;
 
   let frame = 0;
   let paused = false;
   let lastStep = 0;
+  let lastMapStep = 0;
   let wasmProvider = null;
   let renderMode = "framebuffer";
   let loadedMap = null;
+  let playerState = null;
+  const pressedKeys = new Set();
 
   function byteWrap(value) {
     return ((value % 256) + 256) % 256;
@@ -131,6 +138,152 @@
     }
   }
 
+  function normalizeAngle(angle) {
+    return ((angle % 360) + 360) % 360;
+  }
+
+  function initPlayerState(mapData) {
+    if (mapData === null || mapData.playerStart === null) {
+      playerState = null;
+      return;
+    }
+
+    playerState = {
+      x: mapData.playerStart.x,
+      y: mapData.playerStart.y,
+      angle: normalizeAngle(mapData.playerStart.angle),
+      speed: PLAYER_SPEED,
+      turnSpeed: PLAYER_TURN_SPEED
+    };
+  }
+
+  function isSolidLinedef(linedef) {
+    return linedef.leftSidedef < 0 ||
+      linedef.rightSidedef < 0 ||
+      (linedef.flags & LINEDEF_BLOCKING) !== 0;
+  }
+
+  function cross(ax, ay, bx, by, cx, cy) {
+    return (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+  }
+
+  function pointOnSegment(px, py, ax, ay, bx, by) {
+    const epsilon = 0.000001;
+    return Math.abs(cross(ax, ay, bx, by, px, py)) <= epsilon &&
+      px >= Math.min(ax, bx) - epsilon &&
+      px <= Math.max(ax, bx) + epsilon &&
+      py >= Math.min(ay, by) - epsilon &&
+      py <= Math.max(ay, by) + epsilon;
+  }
+
+  function segmentsIntersect(ax, ay, bx, by, cx, cy, dx, dy) {
+    const abC = cross(ax, ay, bx, by, cx, cy);
+    const abD = cross(ax, ay, bx, by, dx, dy);
+    const cdA = cross(cx, cy, dx, dy, ax, ay);
+    const cdB = cross(cx, cy, dx, dy, bx, by);
+
+    if ((abC > 0 && abD < 0 || abC < 0 && abD > 0) &&
+        (cdA > 0 && cdB < 0 || cdA < 0 && cdB > 0)) {
+      return true;
+    }
+
+    return pointOnSegment(cx, cy, ax, ay, bx, by) ||
+      pointOnSegment(dx, dy, ax, ay, bx, by) ||
+      pointOnSegment(ax, ay, cx, cy, dx, dy) ||
+      pointOnSegment(bx, by, cx, cy, dx, dy);
+  }
+
+  function pointSegmentDistanceSquared(px, py, ax, ay, bx, by) {
+    const segmentX = bx - ax;
+    const segmentY = by - ay;
+    const lengthSquared = segmentX * segmentX + segmentY * segmentY;
+
+    if (lengthSquared === 0) {
+      const pointDx = px - ax;
+      const pointDy = py - ay;
+      return pointDx * pointDx + pointDy * pointDy;
+    }
+
+    const t = Math.max(0, Math.min(1,
+      ((px - ax) * segmentX + (py - ay) * segmentY) / lengthSquared));
+    const nearestX = ax + t * segmentX;
+    const nearestY = ay + t * segmentY;
+    const dx = px - nearestX;
+    const dy = py - nearestY;
+    return dx * dx + dy * dy;
+  }
+
+  function movementTouchesSolidLine(mapData, fromX, fromY, toX, toY) {
+    const radiusSquared = PLAYER_RADIUS * PLAYER_RADIUS;
+
+    for (let index = 0; index < mapData.linedefs.length; index += 1) {
+      const linedef = mapData.linedefs[index];
+      if (!isSolidLinedef(linedef)) continue;
+
+      const start = mapData.vertexes[linedef.startVertex];
+      const end = mapData.vertexes[linedef.endVertex];
+      if (!start || !end) continue;
+
+      if (segmentsIntersect(fromX, fromY, toX, toY, start.x, start.y, end.x, end.y)) {
+        return true;
+      }
+
+      const oldDistance = pointSegmentDistanceSquared(fromX, fromY, start.x, start.y, end.x, end.y);
+      const newDistance = pointSegmentDistanceSquared(toX, toY, start.x, start.y, end.x, end.y);
+      if (newDistance < radiusSquared && newDistance <= oldDistance) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  function tryMovePlayer(mapData, dx, dy) {
+    const nextX = playerState.x + dx;
+    const nextY = playerState.y + dy;
+
+    if (!movementTouchesSolidLine(mapData, playerState.x, playerState.y, nextX, nextY)) {
+      playerState.x = nextX;
+      playerState.y = nextY;
+      return true;
+    }
+
+    return false;
+  }
+
+  function updateTopDownPlayer(mapData, deltaSeconds) {
+    if (playerState === null) return;
+
+    const seconds = Math.min(deltaSeconds, 0.1);
+    let turn = 0;
+    let forward = 0;
+    let strafe = 0;
+
+    if (pressedKeys.has("ArrowLeft") || pressedKeys.has("KeyQ")) turn += 1;
+    if (pressedKeys.has("ArrowRight") || pressedKeys.has("KeyE")) turn -= 1;
+    if (pressedKeys.has("KeyW")) forward += 1;
+    if (pressedKeys.has("KeyS")) forward -= 1;
+    if (pressedKeys.has("KeyD")) strafe += 1;
+    if (pressedKeys.has("KeyA")) strafe -= 1;
+
+    if (turn !== 0) {
+      playerState.angle = normalizeAngle(playerState.angle + turn * playerState.turnSpeed * seconds);
+    }
+
+    if (forward !== 0 || strafe !== 0) {
+      const radians = playerState.angle * Math.PI / 180;
+      const length = Math.hypot(forward, strafe);
+      const travel = playerState.speed * seconds;
+      const moveForward = forward / length;
+      const moveStrafe = strafe / length;
+      const dx = (Math.cos(radians) * moveForward + Math.sin(radians) * moveStrafe) * travel;
+      const dy = (Math.sin(radians) * moveForward - Math.cos(radians) * moveStrafe) * travel;
+
+      tryMovePlayer(mapData, dx, 0);
+      tryMovePlayer(mapData, 0, dy);
+    }
+  }
+
   function renderAndPresent(frameNumber) {
     if (wasmProvider !== null) {
       const checksum = wasmProvider.writeFrame(frameNumber, imageData.data);
@@ -182,9 +335,9 @@
       drawDisk(data, screen.x, screen.y, 2, 119, 208, 189);
     }
 
-    if (mapData.playerStart !== null) {
-      const player = toScreen(mapData.playerStart);
-      const radians = mapData.playerStart.angle * Math.PI / 180;
+    if (playerState !== null) {
+      const player = toScreen(playerState);
+      const radians = playerState.angle * Math.PI / 180;
       const arrowLength = 18;
       const arrowX = player.x + Math.cos(radians) * arrowLength;
       const arrowY = player.y - Math.sin(radians) * arrowLength;
@@ -199,14 +352,23 @@
     }
 
     context.putImageData(imageData, 0, 0);
-    status.textContent = "Map " + mapData.name + " top-down (" +
+    if (playerState !== null) {
+      status.textContent = "Map " + mapData.name + " player x=" +
+        playerState.x.toFixed(1) + " y=" + playerState.y.toFixed(1) +
+        " angle=" + Math.round(playerState.angle) + " (" +
+        mapData.vertexes.length + " vertexes, " + mapData.linedefs.length +
+        " linedefs, scale " + scale.toFixed(2) + ")";
+    } else {
+      status.textContent = "Map " + mapData.name + " top-down: no player start (" +
       mapData.vertexes.length + " vertexes, " + mapData.linedefs.length +
       " linedefs, scale " + scale.toFixed(2) + ")";
+    }
   }
 
   function setRenderMode(nextMode) {
     if (nextMode === "map" && loadedMap === null) return;
     renderMode = nextMode;
+    lastMapStep = 0;
     framebufferModeButton.classList.toggle("is-active", renderMode === "framebuffer");
     mapModeButton.classList.toggle("is-active", renderMode === "map");
     framebufferModeButton.setAttribute("aria-pressed", renderMode === "framebuffer" ? "true" : "false");
@@ -224,6 +386,11 @@
       renderAndPresent(frame);
       frame += 1;
       lastStep = timestamp;
+    } else if (renderMode === "map" && loadedMap !== null) {
+      if (lastMapStep === 0) lastMapStep = timestamp;
+      updateTopDownPlayer(loadedMap, (timestamp - lastMapStep) / 1000);
+      renderTopDownMap(loadedMap);
+      lastMapStep = timestamp;
     }
     window.requestAnimationFrame(draw);
   }
@@ -528,6 +695,7 @@
     appendDescription(wadSummary, "Directory offset", String(wad.directoryOffset));
     appendDescription(wadSummary, "Size", buffer.byteLength + " bytes");
     loadedMap = null;
+    playerState = null;
     mapModeButton.disabled = true;
 
     if (previewCount > 0) {
@@ -552,6 +720,7 @@
         if (renderMode === "map") setRenderMode("framebuffer");
       } else {
         loadedMap = mapData;
+        initPlayerState(loadedMap);
         mapModeButton.disabled = false;
         appendDescription(mapSummary, "Map", mapData.name);
         appendDescription(mapSummary, "Vertexes", String(mapData.counts.vertexes));
@@ -582,6 +751,7 @@
     clearNode(wadLumps);
     clearNode(mapSummary);
     loadedMap = null;
+    playerState = null;
     mapModeButton.disabled = true;
     if (renderMode === "map") setRenderMode("framebuffer");
     wadStatus.textContent = "WAD parse failed: " + message;
@@ -594,6 +764,7 @@
       clearNode(wadLumps);
       clearNode(mapSummary);
       loadedMap = null;
+      playerState = null;
       mapModeButton.disabled = true;
       if (renderMode === "map") setRenderMode("framebuffer");
       return;
@@ -689,6 +860,7 @@
   resetButton.addEventListener("click", function () {
     frame = 0;
     if (renderMode === "map") {
+      initPlayerState(loadedMap);
       renderTopDownMap(loadedMap);
     } else {
       renderAndPresent(frame);
@@ -705,6 +877,27 @@
 
   wadFileInput.addEventListener("change", function () {
     loadWadFile(wadFileInput.files[0]);
+  });
+
+  window.addEventListener("keydown", function (event) {
+    const controlledKey = event.code === "KeyW" ||
+      event.code === "KeyA" ||
+      event.code === "KeyS" ||
+      event.code === "KeyD" ||
+      event.code === "KeyQ" ||
+      event.code === "KeyE" ||
+      event.code === "ArrowLeft" ||
+      event.code === "ArrowRight";
+
+    if (!controlledKey) return;
+    pressedKeys.add(event.code);
+    if (renderMode === "map") {
+      event.preventDefault();
+    }
+  });
+
+  window.addEventListener("keyup", function (event) {
+    pressedKeys.delete(event.code);
   });
 
   renderAndPresent(frame);

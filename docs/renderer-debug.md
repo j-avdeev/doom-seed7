@@ -1,7 +1,7 @@
 # Renderer Debug View
 
-Task 6 adds a browser-only top-down map viewer for loaded Doom map geometry. It
-is a debug renderer, not a first-person renderer and not gameplay.
+Task 7 extends the browser-only top-down map viewer with a movable debug player.
+It is still a debug renderer, not a first-person renderer and not gameplay.
 
 ## Current Scope
 
@@ -13,12 +13,29 @@ draws:
 - `LINEDEFS` as software framebuffer lines.
 - one-sided linedefs in light gray.
 - two-sided linedefs in muted green.
-- the type-1 player start as a yellow marker with a direction arrow.
+- the current player position as a yellow marker with a direction arrow.
 
 The renderer computes bounds from the loaded map vertexes and the player start,
 then scales and centers that world rectangle into the Canvas with fixed padding.
 Doom map coordinates keep their native orientation: positive X points right and
 positive Y points upward in the debug view.
+
+Player state is initialized from the first type-1 `THINGS` player start. The
+view updates that state every animation frame while top-down mode is active and
+shows the current `x`, `y`, and `angle` in the Canvas status line.
+
+Controls in top-down mode:
+
+- `W` / `S`: move forward and backward.
+- `A` / `D`: strafe left and right.
+- `ArrowLeft` / `ArrowRight`: turn.
+- `Q` / `E`: alternate turn keys.
+
+Collision is intentionally conservative. One-sided linedefs and linedefs with
+the Doom blocking flag are treated as solid. Movement that crosses one of those
+segments, or moves the debug player radius farther into one, is rejected. This
+prevents obvious wall walking for the debug view, but it is not full Doom
+collision, blockmap, height, or thing collision.
 
 ## Browser Bridge
 
@@ -29,8 +46,8 @@ without disturbing the framebuffer ABI.
 
 The renderer still uses the same Canvas and `ImageData` surface as the
 framebuffer demo. It writes pixels directly into the 320x200 RGBA buffer, then
-presents them with `putImageData`. No WebGL, textures, BSP traversal, player
-movement, enemies, weapons, audio, or gameplay were added.
+presents them with `putImageData`. No WebGL, textures, BSP traversal,
+first-person projection, enemies, weapons, audio, or gameplay were added.
 
 ## Modes
 
@@ -71,10 +88,14 @@ Expected browser result:
 - Map stats show `E1M1`, four vertexes, four linedefs, four sidedefs, one
   sector, one thing, and a player start.
 - The Canvas mode label changes to `Mode: top-down map view`.
-- The Canvas shows a simple square map outline, vertex dots, and a player-start
+- The Canvas shows a simple square map outline, vertex dots, and the player
   direction arrow.
+- Pressing `W`, `S`, `A`, or `D` moves the yellow player marker.
+- Pressing `ArrowLeft`, `ArrowRight`, `Q`, or `E` turns the direction arrow.
+- The status line updates with player `x`, `y`, and `angle`.
+- The square map boundary blocks obvious attempts to walk through the walls.
 - Switching back to `Framebuffer` resumes the Seed7-generated WASM framebuffer
   provider when it is available, or the JavaScript fallback when it is not.
 
-Task 7 is still not started by this renderer. Movement, collision, first-person
-projection, textures, enemies, combat, and gameplay remain future milestones.
+Task 8 is still not started by this renderer. First-person projection, textures,
+enemies, combat, and gameplay remain future milestones.
