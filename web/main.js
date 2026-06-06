@@ -11,6 +11,9 @@
   const wasmStatus = document.getElementById("wasmStatus");
   const pauseButton = document.getElementById("pauseButton");
   const resetButton = document.getElementById("resetButton");
+  const framebufferModeButton = document.getElementById("framebufferModeButton");
+  const mapModeButton = document.getElementById("mapModeButton");
+  const modeStatus = document.getElementById("modeStatus");
   const wadFileInput = document.getElementById("wadFileInput");
   const wadStatus = document.getElementById("wadStatus");
   const wadSummary = document.getElementById("wadSummary");
@@ -32,6 +35,8 @@
   let paused = false;
   let lastStep = 0;
   let wasmProvider = null;
+  let renderMode = "framebuffer";
+  let loadedMap = null;
 
   function byteWrap(value) {
     return ((value % 256) + 256) % 256;
@@ -70,6 +75,62 @@
     }
   }
 
+  function putPixel(data, x, y, red, green, blue) {
+    if (x < 0 || x >= WIDTH || y < 0 || y >= HEIGHT) return;
+    const offset = (Math.trunc(y) * WIDTH + Math.trunc(x)) * 4;
+    data[offset] = red;
+    data[offset + 1] = green;
+    data[offset + 2] = blue;
+    data[offset + 3] = 255;
+  }
+
+  function clearImageData(data, red, green, blue) {
+    for (let offset = 0; offset < data.length; offset += 4) {
+      data[offset] = red;
+      data[offset + 1] = green;
+      data[offset + 2] = blue;
+      data[offset + 3] = 255;
+    }
+  }
+
+  function drawLine(data, x0, y0, x1, y1, red, green, blue) {
+    let currentX = Math.round(x0);
+    let currentY = Math.round(y0);
+    const targetX = Math.round(x1);
+    const targetY = Math.round(y1);
+    const dx = Math.abs(targetX - currentX);
+    const sx = currentX < targetX ? 1 : -1;
+    const dy = -Math.abs(targetY - currentY);
+    const sy = currentY < targetY ? 1 : -1;
+    let error = dx + dy;
+
+    while (true) {
+      putPixel(data, currentX, currentY, red, green, blue);
+      if (currentX === targetX && currentY === targetY) break;
+      const doubledError = error * 2;
+      if (doubledError >= dy) {
+        error += dy;
+        currentX += sx;
+      }
+      if (doubledError <= dx) {
+        error += dx;
+        currentY += sy;
+      }
+    }
+  }
+
+  function drawDisk(data, centerX, centerY, radius, red, green, blue) {
+    const roundedX = Math.round(centerX);
+    const roundedY = Math.round(centerY);
+    for (let y = -radius; y <= radius; y += 1) {
+      for (let x = -radius; x <= radius; x += 1) {
+        if (x * x + y * y <= radius * radius) {
+          putPixel(data, roundedX + x, roundedY + y, red, green, blue);
+        }
+      }
+    }
+  }
+
   function renderAndPresent(frameNumber) {
     if (wasmProvider !== null) {
       const checksum = wasmProvider.writeFrame(frameNumber, imageData.data);
@@ -82,8 +143,84 @@
     }
   }
 
+  function renderTopDownMap(mapData) {
+    const data = imageData.data;
+    const bounds = mapData.bounds;
+    const mapWidth = Math.max(1, bounds.maxX - bounds.minX);
+    const mapHeight = Math.max(1, bounds.maxY - bounds.minY);
+    const padding = 16;
+    const scale = Math.min((WIDTH - padding * 2) / mapWidth, (HEIGHT - padding * 2) / mapHeight);
+    const centerX = (bounds.minX + bounds.maxX) / 2;
+    const centerY = (bounds.minY + bounds.maxY) / 2;
+
+    function toScreen(vertex) {
+      return {
+        x: WIDTH / 2 + (vertex.x - centerX) * scale,
+        y: HEIGHT / 2 - (vertex.y - centerY) * scale
+      };
+    }
+
+    clearImageData(data, 9, 12, 12);
+
+    for (let index = 0; index < mapData.linedefs.length; index += 1) {
+      const linedef = mapData.linedefs[index];
+      const start = mapData.vertexes[linedef.startVertex];
+      const end = mapData.vertexes[linedef.endVertex];
+      if (start && end) {
+        const startScreen = toScreen(start);
+        const endScreen = toScreen(end);
+        if (linedef.leftSidedef >= 0 && linedef.rightSidedef >= 0) {
+          drawLine(data, startScreen.x, startScreen.y, endScreen.x, endScreen.y, 82, 141, 128);
+        } else {
+          drawLine(data, startScreen.x, startScreen.y, endScreen.x, endScreen.y, 220, 232, 225);
+        }
+      }
+    }
+
+    for (let index = 0; index < mapData.vertexes.length; index += 1) {
+      const screen = toScreen(mapData.vertexes[index]);
+      drawDisk(data, screen.x, screen.y, 2, 119, 208, 189);
+    }
+
+    if (mapData.playerStart !== null) {
+      const player = toScreen(mapData.playerStart);
+      const radians = mapData.playerStart.angle * Math.PI / 180;
+      const arrowLength = 18;
+      const arrowX = player.x + Math.cos(radians) * arrowLength;
+      const arrowY = player.y - Math.sin(radians) * arrowLength;
+      drawDisk(data, player.x, player.y, 4, 255, 212, 96);
+      drawLine(data, player.x, player.y, arrowX, arrowY, 255, 212, 96);
+      drawLine(data, arrowX, arrowY,
+        arrowX - Math.cos(radians + 0.55) * 6,
+        arrowY + Math.sin(radians + 0.55) * 6, 255, 212, 96);
+      drawLine(data, arrowX, arrowY,
+        arrowX - Math.cos(radians - 0.55) * 6,
+        arrowY + Math.sin(radians - 0.55) * 6, 255, 212, 96);
+    }
+
+    context.putImageData(imageData, 0, 0);
+    status.textContent = "Map " + mapData.name + " top-down (" +
+      mapData.vertexes.length + " vertexes, " + mapData.linedefs.length +
+      " linedefs, scale " + scale.toFixed(2) + ")";
+  }
+
+  function setRenderMode(nextMode) {
+    if (nextMode === "map" && loadedMap === null) return;
+    renderMode = nextMode;
+    framebufferModeButton.classList.toggle("is-active", renderMode === "framebuffer");
+    mapModeButton.classList.toggle("is-active", renderMode === "map");
+    framebufferModeButton.setAttribute("aria-pressed", renderMode === "framebuffer" ? "true" : "false");
+    mapModeButton.setAttribute("aria-pressed", renderMode === "map" ? "true" : "false");
+    modeStatus.textContent = renderMode === "map" ? "Mode: top-down map view" : "Mode: framebuffer demo";
+    if (renderMode === "map") {
+      renderTopDownMap(loadedMap);
+    } else {
+      renderAndPresent(frame);
+    }
+  }
+
   function draw(timestamp) {
-    if (!paused && timestamp - lastStep >= 33) {
+    if (renderMode === "framebuffer" && !paused && timestamp - lastStep >= 33) {
       renderAndPresent(frame);
       frame += 1;
       lastStep = timestamp;
@@ -210,10 +347,80 @@
     return null;
   }
 
-  function parseMapStats(buffer, wad) {
+  function parseVertexes(vertexesView) {
+    const vertexCount = checkedRecordCount("VERTEXES", vertexesView, VERTEX_SIZE);
+    const vertexes = [];
+    for (let index = 0; index < vertexCount; index += 1) {
+      const offset = index * VERTEX_SIZE;
+      vertexes.push({
+        x: vertexesView.getInt16(offset, true),
+        y: vertexesView.getInt16(offset + 2, true)
+      });
+    }
+    return vertexes;
+  }
+
+  function parseLinedefs(linedefsView, vertexCount) {
+    const linedefCount = checkedRecordCount("LINEDEFS", linedefsView, LINEDEF_SIZE);
+    const linedefs = [];
+    for (let index = 0; index < linedefCount; index += 1) {
+      const offset = index * LINEDEF_SIZE;
+      const startVertex = linedefsView.getUint16(offset, true);
+      const endVertex = linedefsView.getUint16(offset + 2, true);
+      if (startVertex >= vertexCount || endVertex >= vertexCount) {
+        throw new Error("linedef " + index + " references a missing vertex");
+      }
+      linedefs.push({
+        startVertex: startVertex,
+        endVertex: endVertex,
+        flags: linedefsView.getInt16(offset + 4, true),
+        specialType: linedefsView.getInt16(offset + 6, true),
+        sectorTag: linedefsView.getInt16(offset + 8, true),
+        rightSidedef: linedefsView.getInt16(offset + 10, true),
+        leftSidedef: linedefsView.getInt16(offset + 12, true)
+      });
+    }
+    return linedefs;
+  }
+
+  function computeMapBounds(vertexes, playerStart) {
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+
+    function includePoint(point) {
+      minX = Math.min(minX, point.x);
+      minY = Math.min(minY, point.y);
+      maxX = Math.max(maxX, point.x);
+      maxY = Math.max(maxY, point.y);
+    }
+
+    if (vertexes.length === 0) {
+      throw new Error("map has no vertexes to render");
+    }
+    for (let index = 0; index < vertexes.length; index += 1) {
+      includePoint(vertexes[index]);
+    }
+    if (playerStart !== null) {
+      includePoint(playerStart);
+    }
+
+    return {
+      minX: minX,
+      minY: minY,
+      maxX: maxX,
+      maxY: maxY
+    };
+  }
+
+  function parseMapData(buffer, wad) {
     const markerIndex = findFirstSupportedMap(wad);
     const counts = {};
     const views = {};
+    let playerStart = null;
+    let vertexes = [];
+    let linedefs = [];
 
     if (markerIndex < 0) return null;
 
@@ -232,10 +439,17 @@
     counts.vertexes = checkedRecordCount("VERTEXES", views.VERTEXES, VERTEX_SIZE);
     counts.sectors = checkedRecordCount("SECTORS", views.SECTORS, SECTOR_SIZE);
 
+    playerStart = parsePlayerStart(views.THINGS);
+    vertexes = parseVertexes(views.VERTEXES);
+    linedefs = parseLinedefs(views.LINEDEFS, vertexes.length);
+
     return {
       name: wad.lumps[markerIndex].name,
       counts: counts,
-      playerStart: parsePlayerStart(views.THINGS)
+      playerStart: playerStart,
+      vertexes: vertexes,
+      linedefs: linedefs,
+      bounds: computeMapBounds(vertexes, playerStart)
     };
   }
 
@@ -313,6 +527,8 @@
     appendDescription(wadSummary, "Lumps", String(wad.lumpCount));
     appendDescription(wadSummary, "Directory offset", String(wad.directoryOffset));
     appendDescription(wadSummary, "Size", buffer.byteLength + " bytes");
+    loadedMap = null;
+    mapModeButton.disabled = true;
 
     if (previewCount > 0) {
       const title = document.createElement("h3");
@@ -330,26 +546,34 @@
     }
 
     try {
-      const mapStats = parseMapStats(buffer, wad);
-      if (mapStats === null) {
+      const mapData = parseMapData(buffer, wad);
+      if (mapData === null) {
         appendDescription(mapSummary, "Map", "No E1M1 or MAP01 marker found");
+        if (renderMode === "map") setRenderMode("framebuffer");
       } else {
-        appendDescription(mapSummary, "Map", mapStats.name);
-        appendDescription(mapSummary, "Vertexes", String(mapStats.counts.vertexes));
-        appendDescription(mapSummary, "Linedefs", String(mapStats.counts.linedefs));
-        appendDescription(mapSummary, "Sidedefs", String(mapStats.counts.sidedefs));
-        appendDescription(mapSummary, "Sectors", String(mapStats.counts.sectors));
-        appendDescription(mapSummary, "Things", String(mapStats.counts.things));
-        if (mapStats.playerStart === null) {
+        loadedMap = mapData;
+        mapModeButton.disabled = false;
+        appendDescription(mapSummary, "Map", mapData.name);
+        appendDescription(mapSummary, "Vertexes", String(mapData.counts.vertexes));
+        appendDescription(mapSummary, "Linedefs", String(mapData.counts.linedefs));
+        appendDescription(mapSummary, "Sidedefs", String(mapData.counts.sidedefs));
+        appendDescription(mapSummary, "Sectors", String(mapData.counts.sectors));
+        appendDescription(mapSummary, "Things", String(mapData.counts.things));
+        appendDescription(mapSummary, "Bounds",
+          mapData.bounds.minX + "," + mapData.bounds.minY + " to " +
+          mapData.bounds.maxX + "," + mapData.bounds.maxY);
+        if (mapData.playerStart === null) {
           appendDescription(mapSummary, "Player start", "Missing");
         } else {
           appendDescription(mapSummary, "Player start",
-            mapStats.playerStart.x + ", " + mapStats.playerStart.y +
-            " angle=" + mapStats.playerStart.angle);
+            mapData.playerStart.x + ", " + mapData.playerStart.y +
+            " angle=" + mapData.playerStart.angle);
         }
+        setRenderMode("map");
       }
     } catch (error) {
       appendDescription(mapSummary, "Map", "Could not load statistics: " + error.message);
+      if (renderMode === "map") setRenderMode("framebuffer");
     }
   }
 
@@ -357,6 +581,9 @@
     clearNode(wadSummary);
     clearNode(wadLumps);
     clearNode(mapSummary);
+    loadedMap = null;
+    mapModeButton.disabled = true;
+    if (renderMode === "map") setRenderMode("framebuffer");
     wadStatus.textContent = "WAD parse failed: " + message;
   }
 
@@ -366,6 +593,9 @@
       clearNode(wadSummary);
       clearNode(wadLumps);
       clearNode(mapSummary);
+      loadedMap = null;
+      mapModeButton.disabled = true;
+      if (renderMode === "map") setRenderMode("framebuffer");
       return;
     }
 
@@ -458,7 +688,19 @@
 
   resetButton.addEventListener("click", function () {
     frame = 0;
-    renderAndPresent(frame);
+    if (renderMode === "map") {
+      renderTopDownMap(loadedMap);
+    } else {
+      renderAndPresent(frame);
+    }
+  });
+
+  framebufferModeButton.addEventListener("click", function () {
+    setRenderMode("framebuffer");
+  });
+
+  mapModeButton.addEventListener("click", function () {
+    setRenderMode("map");
   });
 
   wadFileInput.addEventListener("change", function () {

@@ -17,7 +17,7 @@ body {
   min-height: 100vh;
   margin: 0 auto;
   display: grid;
-  grid-template-rows: auto auto auto auto 1fr;
+  grid-template-rows: auto auto auto auto auto 1fr;
   align-content: start;
   gap: 12px;
   padding: 16px 0;
@@ -44,6 +44,14 @@ h1 {
   gap: 8px;
 }
 
+.mode-control {
+  display: inline-flex;
+  width: fit-content;
+  border: 1px solid #66756f;
+  border-radius: 6px;
+  overflow: hidden;
+}
+
 button {
   min-width: 72px;
   min-height: 34px;
@@ -56,8 +64,33 @@ button {
   cursor: pointer;
 }
 
+.mode-control__button {
+  min-width: 118px;
+  border: 0;
+  border-radius: 0;
+  background: #141a18;
+}
+
+.mode-control__button + .mode-control__button {
+  border-left: 1px solid #66756f;
+}
+
 button:hover {
   background: #2a3531;
+}
+
+button:disabled {
+  color: #64716b;
+  cursor: not-allowed;
+}
+
+button:disabled:hover {
+  background: #141a18;
+}
+
+.mode-control__button.is-active {
+  background: #31544b;
+  color: #f3fff9;
 }
 
 button:focus-visible,
@@ -187,6 +220,15 @@ h3 {
 
   .controls {
     width: 100%;
+  }
+
+  .mode-control {
+    width: 100%;
+  }
+
+  .mode-control__button {
+    flex: 1;
+    min-width: 0;
   }
 
   button {

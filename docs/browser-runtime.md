@@ -2,8 +2,9 @@
 
 This note records the current feasibility of compiling Seed7 programs to browser
 WebAssembly and the current browser WAD upload bridge. It is scoped to the
-software framebuffer and data-inspection milestones and does not add Doom
-rendering, textures, audio, pk4 parsing, enemies, weapons, combat, or gameplay.
+software framebuffer, WAD inspection, and top-down map-debug milestones and does
+not add first-person Doom rendering, textures, audio, pk4 parsing, enemies,
+weapons, combat, or gameplay.
 
 ## Current Result
 
@@ -46,11 +47,11 @@ frame status. If the generated provider cannot be fetched or its ABI is invalid,
 the JavaScript fallback remains active.
 
 Task 5 adds a WAD file picker to `web/index.html`. The selected file is read in
-`web/main.js` with `File.arrayBuffer()`. The current bridge parses those bytes
-on the JavaScript side instead of changing the working framebuffer WASM module.
-This keeps the Task 2.5 Seed7-generated WASM framebuffer path stable while still
-exercising the browser upload flow. The browser bridge mirrors the Task 3 and
-Task 4 data fields:
+`web/main.js` with `File.arrayBuffer()`. Task 6 extends that same bridge with a
+temporary JavaScript top-down map renderer instead of changing the working
+framebuffer WASM module. This keeps the Task 2.5 Seed7-generated WASM
+framebuffer path stable while still exercising the browser upload flow. The
+browser bridge mirrors the Task 3 and Task 4 data fields:
 
 - WAD magic: `IWAD` or `PWAD`
 - lump count
@@ -59,10 +60,11 @@ Task 4 data fields:
 - first supported map marker: `E1M1` or `MAP01`
 - map lump statistics for `THINGS`, `LINEDEFS`, `SIDEDEFS`, `VERTEXES`, and
   `SECTORS`, when the selected WAD contains a complete supported map
+- top-down geometry data from `VERTEXES`, `LINEDEFS`, and the type-1 player
+  start, rendered into the existing 320x200 Canvas `ImageData`
 
 The upload path does not bundle, fetch, or require copyrighted WAD files. User
-files remain in browser memory. No map rendering or gameplay is started by this
-milestone.
+files remain in browser memory. No gameplay is started by this milestone.
 
 ## How Seed7 Compiles To C
 
@@ -185,7 +187,9 @@ file as an `ArrayBuffer`, validates the WAD header and directory, and updates th
 page with the parsed WAD type, lump count, directory offset, file size, and the
 first 24 lump names with offsets and sizes. If an `E1M1` or `MAP01` marker is
 present and the required map lumps are valid, the page also displays vertex,
-linedef, sidedef, sector, thing, and player-start statistics.
+linedef, sidedef, sector, thing, and player-start statistics, then switches the
+Canvas mode to the top-down map view. The mode control can switch back to the
+original framebuffer demo.
 
 The expected interpreted and Node-generated checksum proof line remains:
 
@@ -277,3 +281,11 @@ Then serve the browser demo, select `tests/wad_tests/minimal.pwad` and
 animating while the WAD panel reports parsed WAD metadata. For the map fixture,
 the expected browser map marker is `E1M1` and the expected counts are one thing,
 four linedefs, four sidedefs, four vertexes, and one sector.
+
+Task 6 verification should additionally confirm that selecting
+`tests/wad_tests/minimal_map.pwad` switches the Canvas to `Mode: top-down map
+view`, draws the square map outline, draws vertex markers, and draws the
+player-start marker with an angle arrow. Switching back to `Framebuffer` should
+resume the generated Seed7/WASM framebuffer provider when present, or the
+JavaScript fallback when the provider is unavailable. See
+`docs/renderer-debug.md` for the debug-renderer behavior.

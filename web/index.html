@@ -15,7 +15,12 @@
         <button id="resetButton" type="button">Reset</button>
       </div>
     </header>
+    <div class="mode-control" role="group" aria-label="Canvas mode">
+      <button id="framebufferModeButton" class="mode-control__button is-active" type="button" aria-pressed="true">Framebuffer</button>
+      <button id="mapModeButton" class="mode-control__button" type="button" aria-pressed="false" disabled>Top-down Map</button>
+    </div>
     <canvas id="framebuffer" width="320" height="200" aria-label="320 by 200 software framebuffer"></canvas>
+    <output id="modeStatus">Mode: framebuffer demo</output>
     <output id="status">Frame 0</output>
     <output id="wasmStatus">Generated WASM provider not loaded.</output>
     <section class="wad-panel" aria-labelledby="wadTitle">

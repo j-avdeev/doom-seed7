@@ -221,3 +221,16 @@ node seed7/bin/s7.js -l seed7/lib -l src/wad src/wad/map_loader.s7 tests/wad_tes
 ```
 
 See `docs/map-structures.md` for loaded record fields and expected output.
+
+## Browser Top-Down Map Viewer
+
+Task 6 adds a debug-only browser map view on the existing 320x200 Canvas. Select
+`tests/wad_tests/minimal_map.pwad` in `web/index.html` to render the loaded
+`E1M1` vertexes, linedefs, and player-start direction. The Canvas mode control
+switches between the original framebuffer demo and the top-down map view.
+
+This is a temporary JavaScript bridge that preserves the Seed7-generated WASM
+framebuffer provider. It does not add player movement, first-person rendering,
+textures, enemies, weapons, combat, or gameplay.
+
+See `docs/renderer-debug.md` for verification steps and renderer details.
