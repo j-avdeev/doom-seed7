@@ -1,10 +1,15 @@
 (function () {
   "use strict";
 
-  const WIDTH = 320;
-  const HEIGHT = 200;
+  const CANVAS_WIDTH = 320;
+  const CANVAS_HEIGHT = 200;
+  const HUD_HEIGHT = 40;
+  const VIEW_HEIGHT = CANVAS_HEIGHT - HUD_HEIGHT;
+  const WIDTH = CANVAS_WIDTH;
+  const HEIGHT = CANVAS_HEIGHT;
   const RECT_WIDTH = 48;
   const RECT_HEIGHT = 32;
+  const DEFAULT_DEMO_WAD_URL = "assets/demo_map.pwad";
 
   const canvas = document.getElementById("framebuffer");
   const status = document.getElementById("status");
@@ -14,6 +19,7 @@
   const framebufferModeButton = document.getElementById("framebufferModeButton");
   const firstPersonModeButton = document.getElementById("firstPersonModeButton");
   const mapModeButton = document.getElementById("mapModeButton");
+  const gameStage = document.querySelector(".game-stage");
   const modeStatus = document.getElementById("modeStatus");
   const wadFileInput = document.getElementById("wadFileInput");
   const wadStatus = document.getElementById("wadStatus");
@@ -52,6 +58,10 @@
   const ENEMY_STATE_CHASE = "chase";
   const ENEMY_STATE_ATTACK = "attack";
   const ENEMY_STATE_DEAD = "dead";
+  const GAME_STATE_READY = "ready";
+  const GAME_STATE_PLAYING = "playing";
+  const GAME_STATE_PAUSED = "paused";
+  const GAME_STATE_DEAD = "dead";
   const ENEMY_DETECTION_RANGE = 192;
   const ENEMY_SHOT_ALERT_RANGE = 512;
   const ENEMY_MOVE_SPEED = 46;
@@ -81,6 +91,7 @@
   let interactionMessage = "";
   let combatMessage = "shot=ready";
   let aiMessage = "none";
+  let gameStateMessage = "No map loaded.";
   const pressedKeys = new Set();
 
   function byteWrap(value) {
@@ -262,6 +273,41 @@
     return aliveRenderableThings(mapData).length;
   }
 
+  function deadThingCount(mapData) {
+    if (!mapData || !mapData.things) return 0;
+    return mapData.things.filter(function (thing) {
+      return isShootableThing(thing) && (thing.dead === true || thing.health <= 0);
+    }).length;
+  }
+
+  function isPlayerDead() {
+    return playerState !== null && (playerState.dead === true || playerState.health <= 0);
+  }
+
+  function currentGameState() {
+    if (isPlayerDead()) return GAME_STATE_DEAD;
+    if (paused) return GAME_STATE_PAUSED;
+    if (playerState !== null) return GAME_STATE_PLAYING;
+    if (loadedMap !== null) return GAME_STATE_READY;
+    return GAME_STATE_READY;
+  }
+
+  function setPaused(nextPaused) {
+    paused = nextPaused;
+    if (paused) pressedKeys.clear();
+    pauseButton.textContent = paused ? "Resume" : "Pause";
+    updateHudPanel(loadedMap);
+  }
+
+  function killPlayer(message) {
+    if (playerState === null || playerState.dead === true) return;
+    playerState.health = 0;
+    playerState.dead = true;
+    pressedKeys.clear();
+    combatMessage = message || "player died";
+    gameStateMessage = "GAME OVER - click Reset to restart.";
+  }
+
   function setThingDead(thing) {
     thing.health = 0;
     thing.dead = true;
@@ -306,9 +352,11 @@
       health: PLAYER_START_HEALTH,
       ammo: PLAYER_START_AMMO,
       currentWeapon: "pistol",
+      dead: false,
       speed: PLAYER_SPEED,
       turnSpeed: PLAYER_TURN_SPEED
     };
+    gameStateMessage = "Playing.";
   }
 
   function resetDoorStates(mapData) {
@@ -317,6 +365,20 @@
       door.state = "closed";
       door.progress = 0;
     });
+  }
+
+  function resetPlayableState(mapData) {
+    frame = 0;
+    pressedKeys.clear();
+    resetDoorStates(mapData);
+    resetThingCombatState(mapData);
+    initPlayerState(mapData);
+    interactionMessage = "";
+    combatMessage = "shot=ready";
+    aiMessage = "none";
+    gameStateMessage = playerState === null ? "No player start in loaded map." : "Playing.";
+    setPaused(false);
+    updateHudPanel(mapData);
   }
 
   function isDoorLinedef(linedef) {
@@ -520,7 +582,7 @@
     let detected = 0;
     let attacks = 0;
 
-    if (!mapData || playerState === null || seconds <= 0) return;
+    if (!mapData || playerState === null || isPlayerDead() || seconds <= 0) return;
 
     renderableThings(mapData).forEach(function (thing) {
       const dx = playerState.x - thing.x;
@@ -555,6 +617,9 @@
           playerState.health = Math.max(0, playerState.health - ENEMY_MELEE_DAMAGE);
           thing.aiCooldown = ENEMY_ATTACK_COOLDOWN_SECONDS;
           attacks += 1;
+          if (playerState.health <= 0) {
+            killPlayer("player killed by enemy melee");
+          }
         }
       } else {
         if (thing.aiAttackTimer <= 0) {
@@ -573,6 +638,7 @@
 
   function updatePlayerFromInput(mapData, deltaSeconds) {
     if (playerState === null) return;
+    if (isPlayerDead() || paused) return;
 
     const seconds = Math.min(deltaSeconds, 0.1);
     let turn = 0;
@@ -670,6 +736,7 @@
   function useLinedefInFront(mapData) {
     const target = findUsableLinedefInFront(mapData);
 
+    if (isPlayerDead() || paused) return;
     if (target === null) {
       interactionMessage = "No usable line in reach.";
       return;
@@ -725,6 +792,16 @@
     let target = null;
 
     if (playerState === null || mapData === null) return;
+    if (isPlayerDead()) {
+      combatMessage = "shot=blocked player dead";
+      renderCurrentMapMode(mapData);
+      return;
+    }
+    if (paused) {
+      combatMessage = "shot=blocked paused";
+      renderCurrentMapMode(mapData);
+      return;
+    }
     if (playerState.currentWeapon !== "pistol") {
       combatMessage = "shot=no weapon";
       renderCurrentMapMode(mapData);
@@ -787,6 +864,113 @@
       " last=" + aiMessage;
   }
 
+  function enemySummaryText(mapData) {
+    const total = shootableThingCount(mapData);
+
+    if (total === 0) return "--";
+    return aliveThingCount(mapData) + " alive / " + deadThingCount(mapData) + " dead";
+  }
+
+  function gameStateText() {
+    const state = currentGameState();
+
+    if (state === GAME_STATE_DEAD) return "Game over";
+    if (state === GAME_STATE_PAUSED) return "Paused";
+    if (state === GAME_STATE_PLAYING) return "Playing";
+    if (loadedMap !== null && playerState === null) return "No player start";
+    return "No map loaded";
+  }
+
+  function playerFacingCombatMessage() {
+    if (combatMessage === "shot=ready") return "Ready.";
+    if (combatMessage === "shot=miss") return "Shot missed.";
+    if (combatMessage === "shot=no ammo") return "Out of ammo.";
+    if (combatMessage === "shot=no weapon") return "No weapon.";
+    if (combatMessage === "shot=blocked paused") return "Paused.";
+    if (combatMessage === "shot=blocked player dead") return "Game over.";
+    if (combatMessage.indexOf("shot=kill") === 0) return "Enemy down.";
+    if (combatMessage.indexOf("shot=hit") === 0) return "Enemy hit.";
+    return combatMessage;
+  }
+
+  function canvasHudMessage(mapData, visibleThingCount) {
+    const state = currentGameState();
+    const messageParts = [];
+
+    if (playerState === null) return gameStateMessage;
+    if (state === GAME_STATE_DEAD) {
+      messageParts.push(gameStateMessage);
+    } else if (state === GAME_STATE_PAUSED) {
+      messageParts.push("Paused.");
+    }
+    messageParts.push(playerFacingCombatMessage());
+    if (interactionMessage !== "") messageParts.push(interactionMessage);
+    return messageParts.join(" ");
+  }
+
+  function updateHudPanel(mapData, visibleThingCount) {
+    const state = currentGameState();
+
+    gameStage.classList.toggle("is-dead", state === GAME_STATE_DEAD);
+    gameStage.classList.toggle("is-paused", state === GAME_STATE_PAUSED);
+  }
+
+  function drawHudBox(x, y, width, height, label, value, accentColor) {
+    context.fillStyle = "rgba(25, 28, 25, 0.94)";
+    context.fillRect(x, y, width, height);
+    context.strokeStyle = accentColor;
+    context.strokeRect(x + 0.5, y + 0.5, width - 1, height - 1);
+    context.fillStyle = "#aeb8b0";
+    context.font = "7px monospace";
+    context.fillText(label, x + 4, y + 8);
+    context.fillStyle = "#f2ead2";
+    context.font = "bold 11px monospace";
+    context.fillText(value, x + 4, y + 21);
+  }
+
+  function renderCanvasHud(mapData, visibleThingCount) {
+    const hudTop = VIEW_HEIGHT;
+    const state = currentGameState();
+    const healthText = playerState === null ? "--" : String(playerState.health);
+    const ammoText = playerState === null ? "--" : String(playerState.ammo);
+    const weaponText = playerState === null ? "--" : playerState.currentWeapon.toUpperCase();
+    const enemyText = enemySummaryText(mapData).replace(" alive / ", "/").replace(" dead", "");
+    const stateText = gameStateText().toUpperCase();
+    const messageText = canvasHudMessage(mapData, visibleThingCount);
+    let stateColor = "#8fd9c7";
+
+    if (state === GAME_STATE_DEAD) {
+      stateColor = "#ff8f80";
+    } else if (state === GAME_STATE_PAUSED) {
+      stateColor = "#ffd46f";
+    }
+
+    context.save();
+    context.imageSmoothingEnabled = false;
+    context.fillStyle = "#070807";
+    context.fillRect(0, hudTop, WIDTH, HUD_HEIGHT);
+    context.fillStyle = "rgba(56, 60, 54, 0.88)";
+    context.fillRect(0, hudTop, WIDTH, 3);
+    context.strokeStyle = "#6f7b73";
+    context.strokeRect(0.5, hudTop + 0.5, WIDTH - 1, HUD_HEIGHT - 1);
+
+    drawHudBox(6, hudTop + 6, 48, 24, "HP", healthText, state === GAME_STATE_DEAD ? "#b84f45" : "#679d87");
+    drawHudBox(60, hudTop + 6, 50, 24, "AMMO", ammoText, "#8c9fb0");
+    drawHudBox(116, hudTop + 6, 70, 24, "WEAPON", weaponText, "#a9975c");
+    drawHudBox(192, hudTop + 6, 62, 24, "ENEMY", enemyText, "#9d6a61");
+
+    context.fillStyle = stateColor;
+    context.font = "bold 10px monospace";
+    context.textAlign = "right";
+    context.fillText(stateText, WIDTH - 8, hudTop + 34);
+
+    context.textAlign = "left";
+    context.fillStyle = state === GAME_STATE_DEAD ? "#ffb0a4" : "#d7ddd6";
+    context.font = "9px monospace";
+    context.fillText(messageText.slice(0, 41), 8, hudTop + 36);
+    context.restore();
+  }
+
   function combatHudText(mapData, visibleThingCount) {
     const visible = typeof visibleThingCount === "number" ?
       visibleThingCount : aliveThingCount(mapData);
@@ -815,12 +999,15 @@
     if (wasmProvider !== null) {
       const checksum = wasmProvider.writeFrame(frameNumber, imageData.data);
       context.putImageData(imageData, 0, 0);
+      renderCanvasHud(loadedMap);
       status.textContent = "Frame " + frameNumber + " (WASM checksum " + checksum + ")";
     } else {
       writeFrame(frameNumber, imageData.data);
       context.putImageData(imageData, 0, 0);
+      renderCanvasHud(loadedMap);
       status.textContent = "Frame " + frameNumber + " (JS fallback)";
     }
+    updateHudPanel(loadedMap);
   }
 
   function renderTopDownMap(mapData) {
@@ -829,14 +1016,14 @@
     const mapWidth = Math.max(1, bounds.maxX - bounds.minX);
     const mapHeight = Math.max(1, bounds.maxY - bounds.minY);
     const padding = 16;
-    const scale = Math.min((WIDTH - padding * 2) / mapWidth, (HEIGHT - padding * 2) / mapHeight);
+    const scale = Math.min((WIDTH - padding * 2) / mapWidth, (VIEW_HEIGHT - padding * 2) / mapHeight);
     const centerX = (bounds.minX + bounds.maxX) / 2;
     const centerY = (bounds.minY + bounds.maxY) / 2;
 
     function toScreen(vertex) {
       return {
         x: WIDTH / 2 + (vertex.x - centerX) * scale,
-        y: HEIGHT / 2 - (vertex.y - centerY) * scale
+        y: VIEW_HEIGHT / 2 - (vertex.y - centerY) * scale
       };
     }
 
@@ -902,18 +1089,21 @@
     }
 
     context.putImageData(imageData, 0, 0);
+    renderCanvasHud(mapData, aliveThingCount(mapData));
     if (playerState !== null) {
       status.textContent = "Map " + mapData.name + " player x=" +
         playerState.x.toFixed(1) + " y=" + playerState.y.toFixed(1) +
         " angle=" + Math.round(playerState.angle) + " (" +
         mapData.vertexes.length + " vertexes, " + mapData.linedefs.length +
         " linedefs, scale " + scale.toFixed(2) + ")" +
+        (isPlayerDead() ? " GAME OVER" : paused ? " PAUSED" : "") +
         interactionSuffix(mapData, aliveThingCount(mapData));
     } else {
       status.textContent = "Map " + mapData.name + " top-down: no player start (" +
       mapData.vertexes.length + " vertexes, " + mapData.linedefs.length +
       " linedefs, scale " + scale.toFixed(2) + ")";
     }
+    updateHudPanel(mapData, aliveThingCount(mapData));
   }
 
   function raySegmentIntersection(originX, originY, rayX, rayY, ax, ay, bx, by) {
@@ -975,7 +1165,7 @@
 
   function drawVerticalColumn(data, x, y0, y1, red, green, blue) {
     const startY = Math.max(0, Math.floor(y0));
-    const endY = Math.min(HEIGHT - 1, Math.ceil(y1));
+    const endY = Math.min(VIEW_HEIGHT - 1, Math.ceil(y1));
 
     for (let y = startY; y <= endY; y += 1) {
       const offset = (y * WIDTH + x) * 4;
@@ -1049,7 +1239,7 @@
 
   function drawTexturedWallColumn(data, x, y0, y1, texture, textureX, yOffset, shade, fallbackColor) {
     const startY = Math.max(0, Math.floor(y0));
-    const endY = Math.min(HEIGHT - 1, Math.ceil(y1));
+    const endY = Math.min(VIEW_HEIGHT - 1, Math.ceil(y1));
     const wallSpan = Math.max(1, y1 - y0);
 
     for (let y = startY; y <= endY; y += 1) {
@@ -1084,8 +1274,8 @@
 
     wallDepthByColumn.fill(Infinity);
 
-    for (let y = 0; y < HEIGHT; y += 1) {
-      const ceiling = y < HEIGHT / 2;
+    for (let y = 0; y < VIEW_HEIGHT; y += 1) {
+      const ceiling = y < VIEW_HEIGHT / 2;
       for (let x = 0; x < WIDTH; x += 1) {
         const offset = (y * WIDTH + x) * 4;
         if (ceiling) {
@@ -1115,11 +1305,11 @@
           hit.distance * Math.cos(angleOffset)
         );
         const wallHeight = Math.min(
-          HEIGHT * 2,
+          VIEW_HEIGHT * 2,
           FIRST_PERSON_WALL_HEIGHT * FIRST_PERSON_PROJECTION_DISTANCE / perpendicularDistance
         );
-        const wallTop = HEIGHT / 2 - wallHeight / 2;
-        const wallBottom = HEIGHT / 2 + wallHeight / 2;
+        const wallTop = VIEW_HEIGHT / 2 - wallHeight / 2;
+        const wallBottom = VIEW_HEIGHT / 2 + wallHeight / 2;
         const fallbackColor = wallFallbackColor(perpendicularDistance, hit.segmentT);
         const resolvedTexture = resolveWallTexture(mapData, hit);
 
@@ -1161,16 +1351,19 @@
     }
 
     context.putImageData(imageData, 0, 0);
+    renderCanvasHud(mapData, thingSprites);
     if (playerState !== null) {
       status.textContent = "First-person " + mapData.name + " player x=" +
         playerState.x.toFixed(1) + " y=" + playerState.y.toFixed(1) +
         " angle=" + Math.round(playerState.angle) + " (" +
         hitColumns + " wall columns, " + texturedColumns + " textured, " +
         thingSprites + " things)" +
+        (isPlayerDead() ? " GAME OVER" : paused ? " PAUSED" : "") +
         interactionSuffix(mapData, thingSprites);
     } else {
       status.textContent = "First-person " + mapData.name + ": no player start";
     }
+    updateHudPanel(mapData, thingSprites);
   }
 
   function drawFirstPersonThings(mapData, wallDepthByColumn, playerAngleRadians) {
@@ -1198,8 +1391,8 @@
         thing: thing,
         distance: forward,
         screenX: screenX,
-        top: HEIGHT / 2 - spriteHeight * 0.62,
-        bottom: HEIGHT / 2 + spriteHeight * 0.38,
+        top: VIEW_HEIGHT / 2 - spriteHeight * 0.62,
+        bottom: VIEW_HEIGHT / 2 + spriteHeight * 0.38,
         width: spriteWidth
       });
     });
@@ -1219,7 +1412,7 @@
       const xStart = Math.max(0, Math.floor(centerX - halfWidth));
       const xEnd = Math.min(WIDTH - 1, Math.ceil(centerX + halfWidth));
       const yStart = Math.max(0, Math.floor(top));
-      const yEnd = Math.min(HEIGHT - 1, Math.ceil(bottom));
+      const yEnd = Math.min(VIEW_HEIGHT - 1, Math.ceil(bottom));
       let pixelsDrawn = 0;
 
       for (let x = xStart; x <= xEnd; x += 1) {
@@ -1292,6 +1485,14 @@
     }
   }
 
+  function renderActiveMode() {
+    if (isMapRenderMode(renderMode) && loadedMap !== null) {
+      renderCurrentMapMode(loadedMap);
+    } else {
+      renderAndPresent(frame);
+    }
+  }
+
   function draw(timestamp) {
     if (renderMode === "framebuffer" && !paused && timestamp - lastStep >= 33) {
       renderAndPresent(frame);
@@ -1300,9 +1501,11 @@
     } else if (isMapRenderMode(renderMode) && loadedMap !== null) {
       if (lastMapStep === 0) lastMapStep = timestamp;
       const deltaSeconds = (timestamp - lastMapStep) / 1000;
-      updatePlayerFromInput(loadedMap, deltaSeconds);
-      updateDoorStates(loadedMap, deltaSeconds);
-      updateEnemyAi(loadedMap, deltaSeconds);
+      if (!paused && !isPlayerDead()) {
+        updatePlayerFromInput(loadedMap, deltaSeconds);
+        updateDoorStates(loadedMap, deltaSeconds);
+        updateEnemyAi(loadedMap, deltaSeconds);
+      }
       renderCurrentMapMode(loadedMap);
       lastMapStep = timestamp;
     }
@@ -1985,8 +2188,9 @@
     };
   }
 
-  function displayWadInfo(file, buffer, wad) {
+  function displayWadInfo(file, buffer, wad, preferredMode) {
     const previewCount = Math.min(wad.lumps.length, 24);
+    const nextMode = preferredMode === "firstPerson" ? "firstPerson" : "map";
 
     clearNode(wadSummary);
     clearNode(wadLumps);
@@ -2002,8 +2206,11 @@
     interactionMessage = "";
     combatMessage = "shot=ready";
     aiMessage = "none";
+    gameStateMessage = "No supported map loaded.";
+    pressedKeys.clear();
     mapModeButton.disabled = true;
     firstPersonModeButton.disabled = true;
+    updateHudPanel(null);
 
     if (previewCount > 0) {
       const title = document.createElement("h3");
@@ -2027,8 +2234,7 @@
         if (isMapRenderMode(renderMode)) setRenderMode("framebuffer");
       } else {
         loadedMap = mapData;
-        resetThingCombatState(loadedMap);
-        initPlayerState(loadedMap);
+        resetPlayableState(loadedMap);
         mapModeButton.disabled = false;
         firstPersonModeButton.disabled = false;
         appendDescription(mapSummary, "Map", mapData.name);
@@ -2069,7 +2275,7 @@
           appendDescription(mapSummary, "Wall textures",
             "Fallback: " + mapData.textureSet.reason);
         }
-        setRenderMode("map");
+        setRenderMode(nextMode);
       }
     } catch (error) {
       appendDescription(mapSummary, "Map", "Could not load statistics: " + error.message);
@@ -2086,10 +2292,13 @@
     interactionMessage = "";
     combatMessage = "shot=ready";
     aiMessage = "none";
+    gameStateMessage = "WAD parse failed.";
+    pressedKeys.clear();
     mapModeButton.disabled = true;
     firstPersonModeButton.disabled = true;
     if (isMapRenderMode(renderMode)) setRenderMode("framebuffer");
     wadStatus.textContent = "WAD parse failed: " + message;
+    updateHudPanel(null);
   }
 
   function loadWadFile(file) {
@@ -2103,9 +2312,12 @@
       interactionMessage = "";
       combatMessage = "shot=ready";
       aiMessage = "none";
+      gameStateMessage = "No WAD selected.";
+      pressedKeys.clear();
       mapModeButton.disabled = true;
       firstPersonModeButton.disabled = true;
       if (isMapRenderMode(renderMode)) setRenderMode("framebuffer");
+      updateHudPanel(null);
       return;
     }
 
@@ -2113,11 +2325,32 @@
     file.arrayBuffer()
       .then(function (buffer) {
         const wad = parseWadDirectory(buffer);
-        displayWadInfo(file, buffer, wad);
+        displayWadInfo(file, buffer, wad, "firstPerson");
         wadStatus.textContent = "Parsed " + file.name + ".";
       })
       .catch(function (error) {
         displayWadError(error.message);
+      });
+  }
+
+  function loadDefaultDemoWad() {
+    const demoUrl = new URL(DEFAULT_DEMO_WAD_URL, window.location.href);
+
+    wadStatus.textContent = "Loading bundled demo map...";
+    fetch(demoUrl.href, { cache: "no-store" })
+      .then(function (response) {
+        if (!response.ok) {
+          throw new Error("HTTP " + response.status);
+        }
+        return response.arrayBuffer();
+      })
+      .then(function (buffer) {
+        const wad = parseWadDirectory(buffer);
+        displayWadInfo({ name: "demo_map.pwad" }, buffer, wad, "firstPerson");
+        wadStatus.textContent = "Bundled demo map loaded.";
+      })
+      .catch(function (error) {
+        displayWadError("default demo map unavailable: " + error.message);
       });
   }
 
@@ -2152,7 +2385,7 @@
               wasmProvider = createWasmProvider(window.Module);
               resolved = true;
               wasmStatus.textContent = "Seed7-generated WASM framebuffer active.";
-              renderAndPresent(frame);
+              renderActiveMode();
             } catch (error) {
               wasmProvider = null;
               wasmStatus.textContent = "Generated WASM provider rejected; JS fallback active: " + error.message;
@@ -2192,21 +2425,20 @@
   }
 
   pauseButton.addEventListener("click", function () {
-    paused = !paused;
-    pauseButton.textContent = paused ? "Resume" : "Pause";
+    setPaused(!paused);
+    if (isMapRenderMode(renderMode) && loadedMap !== null) {
+      renderCurrentMapMode(loadedMap);
+    }
   });
 
   resetButton.addEventListener("click", function () {
-    frame = 0;
     if (isMapRenderMode(renderMode)) {
-      resetDoorStates(loadedMap);
-      interactionMessage = "";
-      combatMessage = "shot=ready";
-      aiMessage = "none";
-      resetThingCombatState(loadedMap);
-      initPlayerState(loadedMap);
+      resetPlayableState(loadedMap);
       renderCurrentMapMode(loadedMap);
     } else {
+      frame = 0;
+      pressedKeys.clear();
+      setPaused(false);
       renderAndPresent(frame);
     }
   });
@@ -2250,7 +2482,18 @@
       event.code === "Space";
 
     if (!controlledKey) return;
+    if (paused && isMapRenderMode(renderMode) && loadedMap !== null) {
+      pressedKeys.clear();
+      event.preventDefault();
+      return;
+    }
     if (event.code === "Space" && isMapRenderMode(renderMode) && loadedMap !== null) {
+      if (isPlayerDead()) {
+        interactionMessage = "Use blocked: player dead.";
+        renderCurrentMapMode(loadedMap);
+        event.preventDefault();
+        return;
+      }
       if (!event.repeat) useLinedefInFront(loadedMap);
       event.preventDefault();
       return;
@@ -2258,6 +2501,11 @@
     if ((event.code === "KeyF" || event.code === "ControlLeft" || event.code === "ControlRight") &&
         isMapRenderMode(renderMode) && loadedMap !== null) {
       if (!event.repeat) fireCurrentWeapon(loadedMap);
+      event.preventDefault();
+      return;
+    }
+    if (isPlayerDead() && isMapRenderMode(renderMode)) {
+      pressedKeys.clear();
       event.preventDefault();
       return;
     }
@@ -2272,6 +2520,7 @@
   });
 
   renderAndPresent(frame);
+  loadDefaultDemoWad();
   loadGeneratedWasmProvider();
   window.requestAnimationFrame(draw);
 }());

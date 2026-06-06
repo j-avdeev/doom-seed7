@@ -17,7 +17,7 @@ body {
   min-height: 100vh;
   margin: 0 auto;
   display: grid;
-  grid-template-rows: auto auto auto auto auto 1fr;
+  grid-template-rows: auto auto auto auto auto auto 1fr;
   align-content: start;
   gap: 12px;
   padding: 16px 0;
@@ -99,11 +99,20 @@ button:focus-visible,
   outline-offset: 2px;
 }
 
-canvas {
+.game-stage {
   width: min(100%, 640px);
+  border: 1px solid #34423e;
+  border-radius: 6px;
+  overflow: hidden;
+  background: #050606;
+  box-shadow: 0 0 0 1px #070908 inset, 0 10px 24px rgba(0, 0, 0, 0.28);
+}
+
+canvas {
+  width: 100%;
   aspect-ratio: 16 / 10;
   display: block;
-  border: 1px solid #2d3835;
+  border: 0;
   background: #000;
   image-rendering: pixelated;
 }
@@ -114,15 +123,78 @@ output {
   font-size: 14px;
 }
 
-#wasmStatus {
-  color: #77d0bd;
+.debug-panel {
+  display: grid;
+  gap: 2px;
+  width: min(100%, 640px);
+  border: 1px solid #2d3835;
+  border-radius: 4px;
+  background: #111615;
+  padding: 8px 10px;
+}
+
+.debug-panel output {
+  min-height: 18px;
+  color: #84908a;
+  font-family: ui-monospace, "Cascadia Mono", "Segoe UI Mono", monospace;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.debug-panel #wasmStatus {
+  color: #69aa9d;
+}
+
+.help-panel p {
+  margin: 0;
+  color: #aab6b0;
+  font-size: 14px;
+  line-height: 1.45;
+  padding: 0 12px 12px;
+}
+
+.advanced-panel,
+.debug-details,
+.help-panel {
+  width: min(100%, 640px);
+  border: 1px solid #2d3835;
+  border-radius: 6px;
+  background: #111615;
+}
+
+.advanced-panel summary,
+.debug-details summary,
+.help-panel summary {
+  min-height: 36px;
+  cursor: pointer;
+  color: #dce7e1;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 36px;
+  padding: 0 12px;
+}
+
+.advanced-panel[open],
+.debug-details[open],
+.help-panel[open] {
+  padding-bottom: 12px;
+}
+
+.debug-details .debug-panel,
+.debug-details .mode-control,
+.debug-details .wad-summary,
+.debug-details .wad-lumps {
+  margin: 0 12px 10px;
+}
+
+.debug-details .debug-panel {
+  width: auto;
 }
 
 .wad-panel {
   display: grid;
   gap: 10px;
-  border-top: 1px solid #2d3835;
-  padding-top: 12px;
+  padding: 0 12px 12px;
 }
 
 .wad-panel__header {
@@ -224,6 +296,10 @@ h3 {
 
   .mode-control {
     width: 100%;
+  }
+
+  .debug-details .mode-control {
+    width: calc(100% - 24px);
   }
 
   .mode-control__button {

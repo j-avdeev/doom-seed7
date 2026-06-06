@@ -224,16 +224,18 @@ See `docs/map-structures.md` for loaded record fields and expected output.
 
 ## Browser Map And First-Person Renderer
 
-Tasks 6 through 13 add browser map rendering on the existing 320x200 Canvas.
-Select `tests/wad_tests/minimal_map.pwad` in `web/index.html` to render the
-loaded `E1M1` vertexes, linedefs, and movable player state. The Canvas mode
-control switches between the original framebuffer demo, the first-person
-prototype, and the top-down debug map view. If an uploaded WAD includes
+Tasks 6 through 14.5 add browser map rendering on the existing 320x200 Canvas.
+Opening `web/index.html` over HTTP now starts a playable first-person demo from
+the generated, non-commercial `web/assets/demo_map.pwad` fixture. Manual WAD
+upload remains available under `Advanced / Load WAD`, and the Debug section
+keeps the original framebuffer demo and top-down map view available. If an
+uploaded WAD includes
 `PLAYPAL`, `PNAMES`, `TEXTURE1`, and referenced patch lumps, first-person wall
 columns can use basic Doom wall textures. Non-player `THINGS` are drawn as
 top-down markers and first-person placeholder billboards. The browser bridge
 also supports minimal pistol hitscan combat and simple melee enemy AI for those
-placeholder things.
+placeholder things, plus a HUD, pause, game-over, reset state, and a default
+playable browser UX.
 
 Generate the local map fixture:
 
@@ -291,37 +293,48 @@ http://localhost:8080/web/index.html
 
 In the page:
 
-1. Click `Choose file`.
-2. Select `tests/wad_tests/minimal_map.pwad`.
-3. Confirm the WAD panel shows `PWAD`, `E1M1`, four vertexes, four linedefs,
+1. Confirm the page starts in first-person mode automatically with the bundled
+   demo fixture loaded, with no raw mode line, player coordinates, wall-column
+   counts, AI counters, WASM status, WAD summary, or lump list visible by
+   default.
+   The health/ammo/weapon/enemy/status HUD should be drawn inside the Canvas
+   pixels, not shown as a DOM panel or CSS overlay.
+2. Move with `W`/`S`, strafe with `A`/`D`, turn with arrows or `Q`/`E`, fire
+   with left mouse, `Ctrl`, or `F`, and use Pause and Reset.
+3. Open `Advanced / Load WAD`, click `Choose file`, and select
+   `tests/wad_tests/minimal_map.pwad` for manual upload regression coverage.
+4. Open `Debug` and confirm the WAD details show `PWAD`, `E1M1`, four vertexes,
+   four linedefs,
    four sidedefs, one sector, one thing, and player start `128, 64 angle=90`.
-4. The page switches to `Mode: top-down map view` automatically. If needed,
-   click `Top-down Map`.
-5. Click `First-person` to render flat ceiling/floor bands and wall columns
-   from the player perspective. With `textured_map.pwad`, the WAD panel should
-   report `1 of 1 resolved` wall textures.
-6. To test Task 10 interaction, select `tests/wad_tests/door_map.pwad`, face
+5. Use the Debug mode buttons to switch between First-person, Top-down Map, and
+   Framebuffer. First-person is the primary play mode.
+6. With `textured_map.pwad`, the Debug WAD details should report `1 of 1
+   resolved` wall textures.
+7. To test Task 10 interaction, select `tests/wad_tests/door_map.pwad`, face
    the marked door line, and press `Space`. The closed line blocks movement;
    after opening, movement through that line is allowed.
-7. To test Task 11 thing rendering, select `tests/wad_tests/thing_map.pwad`.
-   The WAD panel should show two things and one renderable thing; top-down mode
-   should show its marker, and first-person mode should show one placeholder
-   billboard.
-8. To test Task 12 combat and Task 13 enemy AI in first-person mode, aim at the
-   placeholder and fire with left mouse, `Ctrl`, or `F`. The status line should
-   report ammo, hit or miss, visible thing count, alive thing count, AI state
-   counts, and player health. The enemy notices or chases the player, damages
-   the player at close range with a cooldown, and three hits kill the
+8. To test Task 11 thing rendering, select `tests/wad_tests/thing_map.pwad`.
+   The Debug WAD details should show two things and one renderable thing;
+   top-down mode should show its marker, and first-person mode should show one
+   placeholder billboard.
+9. To test Task 12 combat, Task 13 enemy AI, and Task 14 HUD/game state in
+   first-person mode, aim at the placeholder and fire with left mouse, `Ctrl`,
+   or `F`. The collapsed Debug panel should report renderer details while the
+   HUD reports health, ammo, weapon, enemy alive/dead counts, and the latest
+   player-facing combat message. The enemy notices or chases the player,
+   damages the player at close range with a cooldown, and three hits kill the
    placeholder. A dead enemy disappears in first-person mode, shows as a gray
-   cross in top-down mode, and no longer attacks.
-9. Click `Framebuffer` to return to the generated WASM framebuffer demo.
+   cross in top-down mode, and no longer attacks. If the enemy reduces player
+   health to zero, game-over blocks movement and firing until Reset restarts
+   the current map state.
 
 This is a temporary JavaScript bridge that preserves the Seed7-generated WASM
 framebuffer provider. In top-down and first-person modes, `W`/`S` move forward
 and backward, `A`/`D` strafe, and `ArrowLeft`/`ArrowRight` or `Q`/`E` turn.
 `Space` uses the synthetic Task 10 door line when one is in front of the player.
 Left mouse, `Ctrl`, and `F` fire the Task 12 pistol hitscan weapon and can alert
-placeholder enemies.
+placeholder enemies. Pause freezes gameplay, and Reset restores player
+position, health, ammo, enemy state, and synthetic door state.
 One-sided and explicitly blocking linedefs use conservative debug collision.
 The first-person renderer is still a ray/segment projection prototype; thing
 rendering, combat, and enemy AI are placeholder passes and do not add pickups,
@@ -340,8 +353,8 @@ Known limitations:
   placeholder billboards from map `THINGS`. No floor/ceiling flats, Doom sprite
   lump compatibility, pickups, audio, exits, or commercial WAD assets are
   included.
-- Combat support is limited to a pistol-style hitscan against alive placeholder
-  non-player things in the browser bridge.
+- Combat and HUD support are limited to a pistol-style hitscan, player health,
+  ammo, game-over, pause, and reset state in the browser bridge.
 - Enemy AI support is limited to placeholder idle/chase/attack/dead states,
   approximate line of sight, direct movement, and melee damage with a cooldown.
 - Door support is limited to the synthetic browser-side linedef special
@@ -353,4 +366,5 @@ See `docs/renderer-debug.md` for top-down details and
 `docs/line-specials.md` for Task 10 door support and limitations. See
 `docs/sprites.md` for Task 11 thing rendering and limitations. See
 `docs/combat.md` for Task 12 combat support and limitations. See
-`docs/enemy-ai.md` for Task 13 enemy AI support and limitations.
+`docs/enemy-ai.md` for Task 13 enemy AI support and limitations. See
+`docs/ui.md` for Task 14 HUD, pause, game-over, and reset behavior.

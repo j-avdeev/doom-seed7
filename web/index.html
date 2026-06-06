@@ -3,40 +3,54 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Seed7 Framebuffer Demo</title>
+  <title>Seed7 Doom Prototype</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
   <main class="shell">
     <header class="toolbar">
-      <h1>Seed7 Framebuffer Demo</h1>
+      <h1>Seed7 Doom Prototype</h1>
       <div class="controls">
         <button id="pauseButton" type="button">Pause</button>
         <button id="resetButton" type="button">Reset</button>
       </div>
     </header>
-    <div class="mode-control" role="group" aria-label="Canvas mode">
-      <button id="framebufferModeButton" class="mode-control__button is-active" type="button" aria-pressed="true">Framebuffer</button>
-      <button id="firstPersonModeButton" class="mode-control__button" type="button" aria-pressed="false" disabled>First-person</button>
-      <button id="mapModeButton" class="mode-control__button" type="button" aria-pressed="false" disabled>Top-down Map</button>
-    </div>
-    <canvas id="framebuffer" width="320" height="200" aria-label="320 by 200 software framebuffer"></canvas>
-    <output id="modeStatus">Mode: framebuffer demo</output>
-    <output id="status">Frame 0</output>
-    <output id="wasmStatus">Generated WASM provider not loaded.</output>
-    <section class="wad-panel" aria-labelledby="wadTitle">
-      <div class="wad-panel__header">
-        <h2 id="wadTitle">WAD</h2>
-        <label class="file-control">
-          <span>Choose file</span>
-          <input id="wadFileInput" type="file" accept=".wad,.WAD,application/octet-stream" />
-        </label>
+    <section class="game-stage" aria-label="Canvas-rendered game screen">
+      <canvas id="framebuffer" width="320" height="200" aria-label="320 by 200 game framebuffer with in-canvas HUD"></canvas>
+    </section>
+    <details class="help-panel">
+      <summary>Help</summary>
+      <p>W/S move | A/D strafe | Arrow keys or Q/E turn | Space use | Ctrl/F/click fire | Pause | Reset</p>
+    </details>
+    <details class="advanced-panel">
+      <summary>Advanced / Load WAD</summary>
+      <section class="wad-panel" aria-labelledby="wadTitle">
+        <div class="wad-panel__header">
+          <h2 id="wadTitle">Manual WAD</h2>
+          <label class="file-control">
+            <span>Choose file</span>
+            <input id="wadFileInput" type="file" accept=".wad,.WAD,application/octet-stream" />
+          </label>
+        </div>
+        <output id="wadStatus">Loading bundled demo map.</output>
+      </section>
+    </details>
+    <details class="debug-details">
+      <summary>Debug</summary>
+      <section class="debug-panel" aria-label="Renderer debug details">
+        <output id="modeStatus">Mode: framebuffer demo</output>
+        <output id="status">Frame 0</output>
+        <output id="wasmStatus">Generated WASM provider not loaded.</output>
+      </section>
+      <div class="mode-control" role="group" aria-label="Canvas mode">
+        <button id="firstPersonModeButton" class="mode-control__button is-active" type="button" aria-pressed="true" disabled>First-person</button>
+        <button id="framebufferModeButton" class="mode-control__button" type="button" aria-pressed="false">Framebuffer</button>
+        <button id="mapModeButton" class="mode-control__button" type="button" aria-pressed="false" disabled>Top-down Map</button>
       </div>
-      <output id="wadStatus">No WAD selected.</output>
       <dl id="wadSummary" class="wad-summary" aria-live="polite"></dl>
       <div id="wadLumps" class="wad-lumps" aria-live="polite"></div>
       <dl id="mapSummary" class="wad-summary" aria-live="polite"></dl>
-    </section>
+    </details>
   </main>
   <script src="main.js"></script>
 </body>
