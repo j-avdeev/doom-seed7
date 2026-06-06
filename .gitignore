@@ -2,7 +2,9 @@ Dwasm/
 wasm-doom/
 best_release.json
 sf.html
+build/
 *.exe
 *.log
 *.pk4
 !fixtures/base/pak000.pk4
+tests/wad_tests/minimal.pwad

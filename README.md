@@ -183,8 +183,24 @@ What still does not:
 
 - `seed7_win.exe` and `s7_direct.exe` were previously unreadable/corrupted in
   this checkout and are not part of the verified path.
-- No Doom logic, WAD parsing, pk4 parsing, or commercial asset loading is part
-  of this milestone.
+- No map loading, Doom rendering, gameplay, pk4 parsing, or commercial asset
+  loading is part of this milestone.
 
 See `docs/browser-runtime.md` and `tools/build-wasm.sh` for exact commands,
 Emscripten exports, and remaining blockers.
+
+## WAD Directory Parser
+
+Task 3 adds a minimal Doom WAD header and directory parser. It reads `IWAD` or
+`PWAD` magic, lump count, directory offset, lump offsets, lump sizes, and lump
+names. It also exposes `find_lump_by_name`. It does not load maps, textures,
+rendering data, browser uploads, or gameplay.
+
+Generate the synthetic test WAD and parse it:
+
+```bash
+node seed7/bin/s7.js -l seed7/lib tests/wad_tests/make_minimal_wad.s7
+node seed7/bin/s7.js -l seed7/lib -l src/wad src/wad/wad_reader.s7 tests/wad_tests/minimal.pwad --find TEST
+```
+
+See `docs/wad-format.md` for the parsed fields and expected output.

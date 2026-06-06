@@ -1,0 +1,8 @@
+# Synthetic PWAD for Task 3 parser tests.
+# Header: PWAD, 3 lumps, directory offset 16.
+# Data: one 4-byte TEST payload ("DATA"), then three directory entries.
+50 57 41 44 03 00 00 00 10 00 00 00
+44 41 54 41
+0c 00 00 00 04 00 00 00 54 45 53 54 00 00 00 00
+00 00 00 00 00 00 00 00 45 4d 50 54 59 00 00 00
+00 00 00 00 00 00 00 00 45 4e 44 00 00 00 00 00

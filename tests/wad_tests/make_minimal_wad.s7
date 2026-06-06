@@ -1,0 +1,86 @@
+(********************************************************************)
+(*  make_minimal_wad.s7                                             *)
+(*                                                                  *)
+(*  Writes a synthetic PWAD from tests/wad_tests/minimal_pwad.hex.  *)
+(********************************************************************)
+
+$ include "seed7_05.s7i";
+  include "stdio.s7i";
+  include "bytedata.s7i";
+
+const func boolean: is_hex_digit (in char: ch) is func
+  result
+    var boolean: isDigit is FALSE;
+  begin
+    isDigit := ch >= '0' and ch <= '9' or
+        ch >= 'a' and ch <= 'f' or
+        ch >= 'A' and ch <= 'F';
+  end func;
+
+const func string: read_hex_fixture (in string: fileName) is func
+  result
+    var string: hexData is "";
+  local
+    var file: inFile is STD_NULL;
+    var string: line is "";
+    var integer: index is 0;
+  begin
+    inFile := open(fileName, "r");
+    if inFile = STD_NULL then
+      writeln("*** Cannot open hex fixture: " <& fileName);
+    else
+      while hasNext(inFile) do
+        line := getln(inFile);
+        index := 1;
+        while index <= length(line) do
+          if line[index] = '#' then
+            index := succ(length(line));
+          elsif is_hex_digit(line[index]) then
+            hexData &:= line[index];
+          end if;
+          incr(index);
+        end while;
+      end while;
+      close(inFile);
+    end if;
+  end func;
+
+const proc: show_usage is func
+  begin
+    writeln("Usage:");
+    writeln("  node seed7/bin/s7.js -l seed7/lib tests/wad_tests/make_minimal_wad.s7 [output-wad]");
+    writeln("");
+    writeln("Default output:");
+    writeln("  tests/wad_tests/minimal.pwad");
+  end func;
+
+const proc: main is func
+  local
+    var array string: args is 0 times "";
+    var string: outName is "tests/wad_tests/minimal.pwad";
+    var string: hexData is "";
+    var file: outFile is STD_NULL;
+  begin
+    args := argv(PROGRAM);
+    if length(args) >= 1 then
+      if args[1] = "--help" then
+        show_usage;
+      else
+        outName := args[1];
+      end if;
+    end if;
+
+    if length(args) = 0 or args[1] <> "--help" then
+      hexData := read_hex_fixture("tests/wad_tests/minimal_pwad.hex");
+      if hexData <> "" then
+        outFile := open(outName, "w");
+        if outFile = STD_NULL then
+          writeln("*** Cannot open output WAD: " <& outName);
+        else
+          write(outFile, hex2Bytes(hexData));
+          close(outFile);
+          writeln("wrote_minimal_wad=" <& outName);
+        end if;
+      end if;
+    end if;
+  end func;

@@ -1,0 +1,58 @@
+(********************************************************************)
+(*  wad_types.s7                                                    *)
+(*                                                                  *)
+(*  Minimal Doom WAD header and directory types.                    *)
+(********************************************************************)
+
+const type: wadHeader is new struct
+    var string: wadType is "";
+    var integer: lumpCount is 0;
+    var integer: directoryOffset is 0;
+  end struct;
+
+const type: wadLump is new struct
+    var integer: dataOffset is 0;
+    var integer: dataSize is 0;
+    var string: name is "";
+  end struct;
+
+const type: wadDirectory is new struct
+    var wadHeader: header is wadHeader.value;
+    var array wadLump: lumps is 0 times wadLump.value;
+  end struct;
+
+const func string: normalize_lump_name (in string: name) is func
+  result
+    var string: normalized is "";
+  local
+    var integer: index is 0;
+    var char: ch is ' ';
+  begin
+    index := 1;
+    while index <= length(name) and index <= 8 do
+      ch := name[index];
+      if ch = '\0;' then
+        index := 9;
+      else
+        normalized &:= upper(ch);
+        incr(index);
+      end if;
+    end while;
+  end func;
+
+const func integer: find_lump_by_name (in wadDirectory: wad,
+    in string: name) is func
+  result
+    var integer: foundIndex is 0;
+  local
+    var integer: index is 1;
+    var string: normalizedName is "";
+  begin
+    normalizedName := normalize_lump_name(name);
+    while foundIndex = 0 and index <= length(wad.lumps) do
+      if wad.lumps[index].name = normalizedName then
+        foundIndex := index;
+      end if;
+      incr(index);
+    end while;
+  end func;

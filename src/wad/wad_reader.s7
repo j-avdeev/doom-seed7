@@ -1,0 +1,216 @@
+(********************************************************************)
+(*  wad_reader.s7                                                   *)
+(*                                                                  *)
+(*  Task 3: minimal Doom WAD header and directory parser.           *)
+(*  This does not load maps, render, or implement gameplay.         *)
+(********************************************************************)
+
+$ include "seed7_05.s7i";
+  include "stdio.s7i";
+  include "bytedata.s7i";
+  include "wad_types.s7";
+
+const integer: WAD_HEADER_SIZE is 12;
+const integer: WAD_DIRECTORY_ENTRY_SIZE is 16;
+
+const func string: wad_lump_name (in string: rawName) is func
+  result
+    var string: name is "";
+  local
+    var integer: index is 1;
+    var char: ch is ' ';
+  begin
+    while index <= length(rawName) and index <= 8 do
+      ch := rawName[index];
+      if ch = '\0;' then
+        index := 9;
+      else
+        name &:= ch;
+        incr(index);
+      end if;
+    end while;
+  end func;
+
+const func boolean: checked_read (inout file: wadFile, in integer: byteCount,
+    inout string: bytesRead) is func
+  result
+    var boolean: okay is FALSE;
+  begin
+    bytesRead := gets(wadFile, byteCount);
+    okay := length(bytesRead) = byteCount;
+  end func;
+
+const func boolean: parse_wad_header (inout file: wadFile,
+    inout wadHeader: header) is func
+  result
+    var boolean: okay is FALSE;
+  local
+    var string: headerBytes is "";
+  begin
+    if checked_read(wadFile, WAD_HEADER_SIZE, headerBytes) then
+      header.wadType := headerBytes[1 fixLen 4];
+      header.lumpCount := bytes2Int(headerBytes[5 fixLen 4], SIGNED, LE);
+      header.directoryOffset := bytes2Int(headerBytes[9 fixLen 4], SIGNED, LE);
+
+      if header.wadType <> "IWAD" and header.wadType <> "PWAD" then
+        writeln("*** Invalid WAD magic: " <& header.wadType);
+      elsif header.lumpCount < 0 then
+        writeln("*** Invalid negative lump count: " <& header.lumpCount);
+      elsif header.directoryOffset < WAD_HEADER_SIZE then
+        writeln("*** Invalid directory offset: " <& header.directoryOffset);
+      else
+        okay := TRUE;
+      end if;
+    else
+      writeln("*** WAD header is shorter than " <& WAD_HEADER_SIZE <& " bytes.");
+    end if;
+  end func;
+
+const func boolean: parse_wad_directory (inout file: wadFile,
+    in integer: fileSize, inout wadDirectory: wad) is func
+  result
+    var boolean: okay is FALSE;
+  local
+    var integer: index is 1;
+    var integer: directorySize is 0;
+    var integer: directoryEnd is 0;
+    var string: entryBytes is "";
+    var wadLump: lump is wadLump.value;
+  begin
+    directorySize := wad.header.lumpCount * WAD_DIRECTORY_ENTRY_SIZE;
+    directoryEnd := wad.header.directoryOffset + directorySize;
+
+    if directoryEnd > fileSize then
+      writeln("*** WAD directory exceeds file size: offset=" <&
+          wad.header.directoryOffset <& " size=" <& directorySize <&
+          " file_size=" <& fileSize);
+    else
+      seek(wadFile, succ(wad.header.directoryOffset));
+      wad.lumps := 0 times wadLump.value;
+      while index <= wad.header.lumpCount do
+        if checked_read(wadFile, WAD_DIRECTORY_ENTRY_SIZE, entryBytes) then
+          lump.dataOffset := bytes2Int(entryBytes[1 fixLen 4], SIGNED, LE);
+          lump.dataSize := bytes2Int(entryBytes[5 fixLen 4], SIGNED, LE);
+          lump.name := normalize_lump_name(wad_lump_name(entryBytes[9 fixLen 8]));
+
+          if lump.dataOffset < 0 or lump.dataSize < 0 then
+            writeln("*** Invalid negative lump field at index " <& index);
+            index := succ(wad.header.lumpCount);
+          elsif lump.dataSize > 0 and lump.dataOffset + lump.dataSize > fileSize then
+            writeln("*** Lump data exceeds file size at index " <& index <&
+                " name=" <& lump.name);
+            index := succ(wad.header.lumpCount);
+          else
+            wad.lumps &:= lump;
+            incr(index);
+          end if;
+        else
+          writeln("*** Short WAD directory entry at index " <& index);
+          index := succ(wad.header.lumpCount);
+        end if;
+      end while;
+      okay := length(wad.lumps) = wad.header.lumpCount;
+    end if;
+  end func;
+
+const func boolean: read_wad_directory (in string: fileName,
+    inout wadDirectory: wad) is func
+  result
+    var boolean: okay is FALSE;
+  local
+    var file: wadFile is STD_NULL;
+    var integer: fileSize is 0;
+  begin
+    wadFile := open(fileName, "r");
+    if wadFile = STD_NULL then
+      writeln("*** Cannot open WAD file: " <& fileName);
+    else
+      fileSize := length(wadFile);
+      if parse_wad_header(wadFile, wad.header) then
+        okay := parse_wad_directory(wadFile, fileSize, wad);
+      end if;
+      close(wadFile);
+    end if;
+  end func;
+
+const proc: print_wad_directory (in wadDirectory: wad) is func
+  local
+    var integer: index is 0;
+    var wadLump: lump is wadLump.value;
+  begin
+    writeln("wad_type=" <& wad.header.wadType);
+    writeln("lump_count=" <& wad.header.lumpCount);
+    writeln("directory_offset=" <& wad.header.directoryOffset);
+    writeln("lumps:");
+    for index range 1 to length(wad.lumps) do
+      lump := wad.lumps[index];
+      writeln("  " <& index <& " name=" <& lump.name <&
+          " offset=" <& lump.dataOffset <& " size=" <& lump.dataSize);
+    end for;
+  end func;
+
+const proc: print_find_result (in wadDirectory: wad, in string: lumpName) is func
+  local
+    var integer: index is 0;
+    var string: normalizedName is "";
+  begin
+    normalizedName := normalize_lump_name(lumpName);
+    index := find_lump_by_name(wad, lumpName);
+    if index = 0 then
+      writeln("find_lump_by_name name=" <& normalizedName <& " index=0");
+    else
+      writeln("find_lump_by_name name=" <& normalizedName <&
+          " index=" <& index <& " offset=" <& wad.lumps[index].dataOffset <&
+          " size=" <& wad.lumps[index].dataSize);
+    end if;
+  end func;
+
+const proc: show_usage is func
+  begin
+    writeln("Usage:");
+    writeln("  node seed7/bin/s7.js -l seed7/lib -l src/wad src/wad/wad_reader.s7 <wad-file> [--find <name>]");
+    writeln("");
+    writeln("Options:");
+    writeln("  --find <name>    Print find_lump_by_name result for an 8-byte lump name.");
+    writeln("  --help           Show this help.");
+  end func;
+
+const proc: main is func
+  local
+    var array string: args is 0 times "";
+    var wadDirectory: wad is wadDirectory.value;
+    var string: wadFileName is "";
+    var string: findName is "";
+    var integer: index is 1;
+    var boolean: okay is TRUE;
+  begin
+    args := argv(PROGRAM);
+    while index <= length(args) and okay do
+      if args[index] = "--help" then
+        show_usage;
+        okay := FALSE;
+      elsif args[index] = "--find" and index < length(args) then
+        incr(index);
+        findName := args[index];
+      elsif wadFileName = "" then
+        wadFileName := args[index];
+      else
+        writeln("*** Unknown argument: " <& args[index]);
+        show_usage;
+        okay := FALSE;
+      end if;
+      incr(index);
+    end while;
+
+    if okay and wadFileName = "" then
+      show_usage;
+      okay := FALSE;
+    end if;
+
+    if okay and read_wad_directory(wadFileName, wad) then
+      print_wad_directory(wad);
+      if findName <> "" then
+        print_find_result(wad, findName);
+      end if;
+    end if;
+  end func;
