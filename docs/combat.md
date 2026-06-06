@@ -2,8 +2,8 @@
 
 Task 12 adds minimal browser-side combat to the temporary JavaScript WAD bridge.
 It keeps the Seed7-generated WASM framebuffer provider unchanged and does not
-add enemy AI, enemy attacks, pickups, sound, advanced Doom weapon behavior, or
-real Doom sprite decoding.
+add pickups, advanced Doom weapon behavior, or real Doom sprite decoding. Task
+17 later adds generated placeholder browser sound effects for this combat path.
 
 ## Player State
 
@@ -40,8 +40,8 @@ The browser demo supports these fire inputs in top-down and first-person modes:
 The pistol is a simple hitscan weapon:
 
 - one ammo is spent per shot;
-- no spread, cooldown, recoil, animation, sound, or Doom weapon state is
-  implemented;
+- no spread, cooldown, recoil, animation, or Doom weapon state is implemented;
+- Task 17 plays a generated placeholder pistol sound from JavaScript;
 - the shot follows the player's current view direction;
 - the closest alive shootable thing within a small fixed aim radius is selected;
 - blocking walls and closed synthetic doors stop the shot.
@@ -81,7 +81,8 @@ Expected browser behavior:
 Combat is intentionally synthetic and debug-oriented. It does not implement Doom
 thing definitions, actor states, monster behavior, thing collision, blockmap
 queries, skill flags, damage randomness, weapon bob, muzzle flash, ammo pickups,
-enemy attacks, player death, sound, or sprite lump rendering.
+or sprite lump rendering. Sound remains limited to Task 17 generated browser
+effects, not Doom WAD sound lumps.
 
 The current implementation is suitable only for proving that visible
 placeholder things can be aimed at, damaged, and killed from the browser

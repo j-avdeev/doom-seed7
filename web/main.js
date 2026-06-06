@@ -16,6 +16,7 @@
   const wasmStatus = document.getElementById("wasmStatus");
   const pauseButton = document.getElementById("pauseButton");
   const resetButton = document.getElementById("resetButton");
+  const audioButton = document.getElementById("audioButton");
   const fullscreenButton = document.getElementById("fullscreenButton");
   const framebufferModeButton = document.getElementById("framebufferModeButton");
   const firstPersonModeButton = document.getElementById("firstPersonModeButton");
@@ -28,11 +29,31 @@
   const wadFileInput = document.getElementById("wadFileInput");
   const wadStatus = document.getElementById("wadStatus");
   const fpsStatus = document.getElementById("fpsStatus");
+  const audioStatus = document.getElementById("audioStatus");
   const wadSummary = document.getElementById("wadSummary");
   const wadLumps = document.getElementById("wadLumps");
   const mapSummary = document.getElementById("mapSummary");
   const context = canvas.getContext("2d", { alpha: false });
   const imageData = context.createImageData(WIDTH, HEIGHT);
+  const audioManager = window.createDoomAudioManager ?
+    window.createDoomAudioManager({
+      button: audioButton,
+      statusElement: audioStatus
+    }) :
+    {
+      play: function () {},
+      toggleMuted: function () {},
+      unlockFromUserGesture: function () {
+        return Promise.resolve(false);
+      },
+      refreshUi: function () {
+        if (audioStatus) audioStatus.textContent = "Audio: unavailable";
+        if (audioButton) {
+          audioButton.textContent = "Audio N/A";
+          audioButton.disabled = true;
+        }
+      }
+    };
 
   const WAD_HEADER_SIZE = 12;
   const WAD_DIRECTORY_ENTRY_SIZE = 16;
@@ -372,6 +393,7 @@
   }
 
   function focusGameControls() {
+    audioManager.unlockFromUserGesture();
     canvas.focus({ preventScroll: true });
     updateGameFocusState(true);
   }
@@ -390,6 +412,7 @@
     pressedKeys.clear();
     combatMessage = message || "player died";
     gameStateMessage = "GAME OVER - click Reset to restart.";
+    audioManager.play("gameOver");
   }
 
   function completeLevel(mapData) {
@@ -402,6 +425,7 @@
     interactionMessage = "Exit activated.";
     aiMessage = "level complete";
     gameStateMessage = "LEVEL COMPLETE - click Reset to replay.";
+    audioManager.play("complete");
     renderCurrentMapMode(mapData);
   }
 
@@ -752,6 +776,7 @@
           playerState.health = Math.max(0, playerState.health - ENEMY_MELEE_DAMAGE);
           thing.aiCooldown = ENEMY_ATTACK_COOLDOWN_SECONDS;
           attacks += 1;
+          audioManager.play("hurt");
           if (playerState.health <= 0) {
             killPlayer("player killed by enemy melee");
           }
@@ -906,10 +931,13 @@
       target.door.state = "opening";
       target.door.progress = 0;
       interactionMessage = "Door opening.";
+      audioManager.play("use");
     } else if (target.door.state === "opening") {
       interactionMessage = "Door is opening.";
+      audioManager.play("use");
     } else {
       interactionMessage = "Door already open.";
+      audioManager.play("use");
     }
     renderCurrentMapMode(mapData);
   }
@@ -980,6 +1008,7 @@
     }
 
     playerState.ammo -= 1;
+    audioManager.play("pistol");
     alertEnemiesFromShot(mapData);
     target = findHitscanThing(mapData);
     if (target === null) {
@@ -990,11 +1019,13 @@
         setThingDead(target.thing);
         aiMessage = "killed thing#" + (target.thing.index + 1);
         combatMessage = "shot=kill thing#" + (target.thing.index + 1);
+        audioManager.play("death");
       } else {
         target.thing.aiState = ENEMY_STATE_CHASE;
         aiMessage = "hurt thing#" + (target.thing.index + 1);
         combatMessage = "shot=hit thing#" + (target.thing.index + 1) +
           " hp=" + target.thing.health;
+        audioManager.play("hit");
       }
     }
     renderCurrentMapMode(mapData);
@@ -2852,6 +2883,7 @@
   });
 
   resetButton.addEventListener("click", function () {
+    audioManager.unlockFromUserGesture();
     if (isMapRenderMode(renderMode)) {
       resetPlayableState(loadedMap);
       renderCurrentMapMode(loadedMap);
@@ -2863,7 +2895,12 @@
     }
   });
 
+  audioButton.addEventListener("click", function () {
+    audioManager.toggleMuted();
+  });
+
   fullscreenButton.addEventListener("click", function () {
+    audioManager.unlockFromUserGesture();
     toggleFullscreen();
   });
 
@@ -2890,6 +2927,7 @@
 
   canvas.addEventListener("mousedown", function (event) {
     if (event.button !== 0) return;
+    audioManager.unlockFromUserGesture();
     if (!gameFocused) {
       focusGameControls();
       event.preventDefault();
@@ -2940,6 +2978,7 @@
       event.preventDefault();
       return;
     }
+    audioManager.unlockFromUserGesture();
     if (paused && isMapRenderMode(renderMode) && loadedMap !== null) {
       pressedKeys.clear();
       event.preventDefault();

@@ -222,9 +222,9 @@ node seed7/bin/s7.js -l seed7/lib -l src/wad src/wad/map_loader.s7 tests/wad_tes
 
 See `docs/map-structures.md` for loaded record fields and expected output.
 
-## Browser Map And First-Person Renderer
+## Browser Map, First-Person Renderer, And Sound
 
-Tasks 6 through 16 add browser map rendering on the existing 320x200 Canvas.
+Tasks 6 through 17 add browser map rendering on the existing 320x200 Canvas.
 Opening `web/index.html` over HTTP now starts a playable first-person demo from
 the generated, non-commercial `web/assets/demo_map.pwad` fixture. Manual WAD
 upload remains available under `Advanced / Load WAD`, and the Debug section
@@ -234,9 +234,9 @@ uploaded WAD includes
 columns can use basic Doom wall textures. Non-player `THINGS` are drawn as
 top-down markers and first-person placeholder billboards. The browser bridge
 also supports minimal pistol hitscan combat and simple melee enemy AI for those
-placeholder things, plus a HUD, pause, game-over, reset state, a synthetic
-level exit, fullscreen support, focus handling, loading/error status, and a
-clean default playable browser UX.
+placeholder things, plus generated WebAudio placeholder sound effects, a HUD,
+pause, game-over, reset state, a synthetic level exit, fullscreen support,
+focus handling, loading/error status, and a clean default playable browser UX.
 
 Generate the local map fixture:
 
@@ -413,6 +413,11 @@ In the page:
 15. Temporarily remove or rename `web/assets/demo_map.pwad`, reload, and confirm
     the package status reports the missing/unreadable demo map. Restore the
     fixture afterward.
+16. After the first click or gameplay key press, confirm the compact Audio
+    button can mute/unmute sounds. Shooting, enemy hit/kill, player hurt,
+    door/use, level complete, and game-over events should play short generated
+    effects when unmuted. If WebAudio is unavailable, the button should report
+    `Audio N/A` and gameplay should continue.
 
 This is a temporary JavaScript bridge that preserves the Seed7-generated WASM
 framebuffer provider. In top-down and first-person modes, `W`/`S` move forward
@@ -420,13 +425,16 @@ and backward, `A`/`D` strafe, and `ArrowLeft`/`ArrowRight` or `Q`/`E` turn.
 `Space` uses the synthetic Task 10 door line in front of the player or the Task
 15 exit line when it is in front of or near the player. Left mouse, `Ctrl`, and
 `F` fire the Task 12 pistol hitscan weapon and can alert placeholder enemies.
-Pause freezes gameplay, and Reset restores player position, health, ammo, enemy
-state, synthetic door state, and level-completion state. Click the Canvas before
-using gameplay keys; `Alt+Enter` toggles fullscreen.
+Task 17 adds generated WebAudio sound effects for those browser-side events,
+with mute/unmute in the toolbar and audio status in Debug. Pause freezes
+gameplay, and Reset restores player position, health, ammo, enemy state,
+synthetic door state, and level-completion state. Click the Canvas before using
+gameplay keys; `Alt+Enter` toggles fullscreen.
 One-sided and explicitly blocking linedefs use conservative debug collision.
 The first-person renderer is still a ray/segment projection prototype; thing
-rendering, combat, and enemy AI are placeholder passes and do not add pickups,
-advanced weapon behavior, sound, or full Doom gameplay.
+rendering, combat, enemy AI, and sound are placeholder passes and do not add
+pickups, advanced weapon behavior, music, Doom sound lump decoding, or full Doom
+gameplay.
 
 Known limitations:
 
@@ -439,10 +447,11 @@ Known limitations:
 - Texture support is limited to `PLAYPAL`, `PNAMES`, `TEXTURE1`, and vanilla
   patch picture lumps for wall columns. Sprite support is limited to
   placeholder billboards from map `THINGS`. No floor/ceiling flats, Doom sprite
-  lump compatibility, pickups, audio, episode progression, or commercial WAD
-  assets are included.
+  lump compatibility, pickups, music, Doom sound lump decoding, episode
+  progression, or commercial WAD assets are included.
 - Combat and HUD support are limited to a pistol-style hitscan, player health,
-  ammo, game-over, pause, and reset state in the browser bridge.
+  ammo, game-over, pause, reset state, and generated placeholder sound effects
+  in the browser bridge.
 - Enemy AI support is limited to placeholder idle/chase/attack/dead states,
   approximate line of sight, direct movement, and melee damage with a cooldown.
 - Door support is limited to the synthetic browser-side linedef special
@@ -461,4 +470,5 @@ See `docs/renderer-debug.md` for top-down details and
 `docs/ui.md` for Task 14 HUD, pause, game-over, and reset behavior. See
 `docs/level-flow.md` for Task 15 exit and level-complete behavior. See
 `docs/browser-runtime.md` for Task 16 local packaging and browser-run details.
-See `docs/deployment.md` for Task 16.1 GitHub Pages deployment.
+See `docs/deployment.md` for Task 16.1 GitHub Pages deployment. See
+`docs/audio.md` for Task 17 sound effect support and limitations.

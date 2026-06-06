@@ -4,8 +4,9 @@ This note records the current feasibility of compiling Seed7 programs to browser
 WebAssembly and the current browser WAD upload bridge. It is scoped to the
 software framebuffer, WAD inspection, top-down map-debug, and first-person
 prototype milestones with basic Task 9 wall textures, Task 11 placeholder thing
-rendering, Task 12 placeholder combat, and Task 13 placeholder enemy AI. It
-does not add audio, pk4 parsing, pickups, advanced weapons, or full gameplay.
+rendering, Task 12 placeholder combat, Task 13 placeholder enemy AI, and Task
+17 generated browser sound effects. It does not add music, Doom sound lump
+decoding, pk4 parsing, pickups, advanced weapons, or full gameplay.
 
 ## Current Result
 
@@ -259,6 +260,11 @@ enemies. The status line reports AI state counts, top-down mode color-codes
 alive enemy states, and first-person mode keeps using the existing billboard
 depth pass for alive enemies. See `docs/enemy-ai.md` for behavior and
 limitations.
+
+Task 17 adds `web/audio.js`, a browser WebAudio manager for short generated
+placeholder effects. It is unlocked only after user interaction and can be
+muted from the toolbar. WebAudio failures leave gameplay running. See
+`docs/audio.md` for sound events, autoplay behavior, and limitations.
 
 The expected interpreted and Node-generated checksum proof line remains:
 
