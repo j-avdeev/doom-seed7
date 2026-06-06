@@ -54,7 +54,7 @@ $activeFiles = @(
   "doom3.html",
   "doom3_seed7_runtime.s7",
   "doom3_seed7_engine.s7",
-  ".github\workflows\deploy-pages.yml",
+  ".github\workflows\pages.yml",
   "wasm\pre_js_browser.js",
   "wasm\s7.js",
   "tools\run_doom3_seed7_browser.ps1",
@@ -119,10 +119,13 @@ Assert-FileContains -Path "wasm\pre_js_browser.js" -Needle "Module.seed7UseDocum
 Assert-FileContains -Path "wasm\s7.js" -Needle "Module.seed7UseDocumentCanvas" -Label "wasm runtime"
 
 Write-Host "Checking Pages artifact contents..."
-Assert-FileContains -Path ".github\workflows\deploy-pages.yml" -Needle "cp doom3_seed7_runtime.s7 doom3_seed7_engine.s7 _site/" -Label "Pages deploy"
-Assert-FileContains -Path ".github\workflows\deploy-pages.yml" -Needle "cp -R generated _site/generated" -Label "Pages deploy"
-Assert-FileNotMatches -Path ".github\workflows\deploy-pages.yml" -Pattern "cp doom3_seed7\*\.s7" -Label "Pages deploy"
-Assert-FileNotMatches -Path ".github\workflows\deploy-pages.yml" -Pattern "\bfixtures\b" -Label "Pages deploy"
+Assert-FileContains -Path ".github\workflows\pages.yml" -Needle "name: Deploy playable web demo" -Label "Pages deploy"
+Assert-FileContains -Path ".github\workflows\pages.yml" -Needle "path: web" -Label "Pages deploy"
+Assert-FileContains -Path ".github\workflows\pages.yml" -Needle "test -f web/index.html" -Label "Pages deploy"
+Assert-FileContains -Path ".github\workflows\pages.yml" -Needle "test -f web/assets/demo_map.pwad" -Label "Pages deploy"
+Assert-FileContains -Path ".github\workflows\pages.yml" -Needle "test -f web/wasm/framebuffer_demo.wasm" -Label "Pages deploy"
+Assert-FileNotMatches -Path ".github\workflows\pages.yml" -Pattern "\b_site\b" -Label "Pages deploy"
+Assert-FileNotMatches -Path ".github\workflows\pages.yml" -Pattern "\bfixtures\b" -Label "Pages deploy"
 
 Write-Host "Checking generated replacement asset pack..."
 Assert-FileContains -Path "generated\doom3_seed7\manifest.txt" -Needle "doom3_seed7_generated_assets=1" -Label "generated assets"
