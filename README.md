@@ -224,7 +224,7 @@ See `docs/map-structures.md` for loaded record fields and expected output.
 
 ## Browser Map And First-Person Renderer
 
-Tasks 6 through 14.5 add browser map rendering on the existing 320x200 Canvas.
+Tasks 6 through 16 add browser map rendering on the existing 320x200 Canvas.
 Opening `web/index.html` over HTTP now starts a playable first-person demo from
 the generated, non-commercial `web/assets/demo_map.pwad` fixture. Manual WAD
 upload remains available under `Advanced / Load WAD`, and the Debug section
@@ -234,8 +234,9 @@ uploaded WAD includes
 columns can use basic Doom wall textures. Non-player `THINGS` are drawn as
 top-down markers and first-person placeholder billboards. The browser bridge
 also supports minimal pistol hitscan combat and simple melee enemy AI for those
-placeholder things, plus a HUD, pause, game-over, reset state, and a default
-playable browser UX.
+placeholder things, plus a HUD, pause, game-over, reset state, a synthetic
+level exit, fullscreen support, focus handling, loading/error status, and a
+clean default playable browser UX.
 
 Generate the local map fixture:
 
@@ -261,6 +262,12 @@ Generate the synthetic thing/sprite placeholder fixture:
 node seed7/bin/s7.js -l seed7/lib tests/wad_tests/make_minimal_wad.s7 --thing-map
 ```
 
+Generate the synthetic exit/playable-loop fixture:
+
+```bash
+node seed7/bin/s7.js -l seed7/lib tests/wad_tests/make_minimal_wad.s7 --exit-map
+```
+
 Build the current generated WASM framebuffer provider:
 
 ```powershell
@@ -273,10 +280,32 @@ From Git Bash or another POSIX-like shell:
 tools/build-wasm.sh
 ```
 
-Serve the repository locally:
+Serve the repository locally with PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tools\serve-web.ps1
+```
+
+Serve it from Git Bash:
 
 ```bash
-python -m http.server 8080
+tools/serve-web.sh
+```
+
+The default port is `8080`. To choose another port:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tools\serve-web.ps1 -Port 8090
+```
+
+```bash
+tools/serve-web.sh 8090
+```
+
+The raw Python equivalent is:
+
+```bash
+python -m http.server 8080 --bind 127.0.0.1
 ```
 
 Open the local browser demo:
@@ -291,6 +320,42 @@ Or open this URL manually:
 http://localhost:8080/web/index.html
 ```
 
+### GitHub Pages Deployment
+
+Task 16.1 adds a GitHub Actions deployment workflow for the static playable
+demo:
+
+```text
+.github/workflows/pages.yml
+```
+
+The workflow publishes the committed `web/` directory directly. It does not
+rebuild Seed7 or Emscripten in CI. It includes `web/index.html`, `web/main.js`,
+`web/styles.css`, `web/assets/demo_map.pwad`, `web/wasm/*.js`,
+`web/wasm/*.wasm`, and `web/.nojekyll`.
+
+To enable it:
+
+1. Push the workflow to `main`.
+2. In GitHub, open `Settings -> Pages`.
+3. Set `Build and deployment` source to `GitHub Actions`.
+4. Run `Deploy playable web demo` from the Actions tab, or push a change under
+   `web/**` or `.github/workflows/pages.yml` to `main`.
+
+Expected URL:
+
+```text
+https://<owner>.github.io/<repository>/
+```
+
+If the demo loads but WASM fails, open the collapsed `Debug` panel and browser
+devtools Network tab. `framebuffer_demo.js`, `framebuffer_demo.wasm`, and
+`assets/demo_map.pwad` should return HTTP 200. The playable first-person WAD
+demo still runs if only the generated WASM framebuffer provider fails; the
+Framebuffer debug mode falls back to JavaScript.
+
+See `docs/deployment.md` for the full deployment asset list and limitations.
+
 In the page:
 
 1. Confirm the page starts in first-person mode automatically with the bundled
@@ -299,25 +364,33 @@ In the page:
    default.
    The health/ammo/weapon/enemy/status HUD should be drawn inside the Canvas
    pixels, not shown as a DOM panel or CSS overlay.
-2. Move with `W`/`S`, strafe with `A`/`D`, turn with arrows or `Q`/`E`, fire
+2. Confirm the compact package status moves from loading to ready/playable.
+   Debug and Advanced remain collapsed by default.
+3. Click the game area to focus controls. The focus hint should disappear, and
+   gameplay keys should not scroll the page.
+4. Move with `W`/`S`, strafe with `A`/`D`, turn with arrows or `Q`/`E`, fire
    with left mouse, `Ctrl`, or `F`, and use Pause and Reset.
-3. Open `Advanced / Load WAD`, click `Choose file`, and select
+5. Click `Fullscreen` or press `Alt+Enter`; the game keeps its 16:10 shape,
+   the Canvas HUD remains inside the game viewport, and Pause/Reset stay
+   visible. Exit fullscreen and continue playing.
+6. Open `Advanced / Load WAD`, click `Choose file`, and select
    `tests/wad_tests/minimal_map.pwad` for manual upload regression coverage.
-4. Open `Debug` and confirm the WAD details show `PWAD`, `E1M1`, four vertexes,
+7. Open `Debug` and confirm the WAD details show `PWAD`, `E1M1`, four vertexes,
    four linedefs,
    four sidedefs, one sector, one thing, and player start `128, 64 angle=90`.
-5. Use the Debug mode buttons to switch between First-person, Top-down Map, and
-   Framebuffer. First-person is the primary play mode.
-6. With `textured_map.pwad`, the Debug WAD details should report `1 of 1
+8. Use the Debug mode buttons to switch between First-person, Top-down Map, and
+   Framebuffer. First-person is the primary play mode. The FPS counter is only
+   inside Debug.
+9. With `textured_map.pwad`, the Debug WAD details should report `1 of 1
    resolved` wall textures.
-7. To test Task 10 interaction, select `tests/wad_tests/door_map.pwad`, face
+10. To test Task 10 interaction, select `tests/wad_tests/door_map.pwad`, face
    the marked door line, and press `Space`. The closed line blocks movement;
    after opening, movement through that line is allowed.
-8. To test Task 11 thing rendering, select `tests/wad_tests/thing_map.pwad`.
+11. To test Task 11 thing rendering, select `tests/wad_tests/thing_map.pwad`.
    The Debug WAD details should show two things and one renderable thing;
    top-down mode should show its marker, and first-person mode should show one
    placeholder billboard.
-9. To test Task 12 combat, Task 13 enemy AI, and Task 14 HUD/game state in
+12. To test Task 12 combat, Task 13 enemy AI, and Task 14 HUD/game state in
    first-person mode, aim at the placeholder and fire with left mouse, `Ctrl`,
    or `F`. The collapsed Debug panel should report renderer details while the
    HUD reports health, ammo, weapon, enemy alive/dead counts, and the latest
@@ -327,14 +400,29 @@ In the page:
    cross in top-down mode, and no longer attacks. If the enemy reduces player
    health to zero, game-over blocks movement and firing until Reset restarts
    the current map state.
+13. To test Task 15.1 level completion in the default bundled demo, confirm the
+    first-person view starts facing a green wall segment labeled `EXIT`, with
+    one placeholder enemy off-center. Move forward toward the green `EXIT` wall
+    until the in-canvas HUD says `Press Space at EXIT.`, then press `Space`.
+    `LEVEL COMPLETE` should appear inside the Canvas game view/HUD,
+    movement/firing/enemy AI should stop, and Reset should restart the same map.
+14. Open the collapsed `Debug` panel, switch to `Top-down Map`, and confirm the
+    exit line is bright green and labeled `EXIT 901`. The Debug WAD details for
+    the bundled map should include player start `128, 96 angle=90`, two things,
+    one renderable/shootable thing, and `1 synthetic exit special 901`.
+15. Temporarily remove or rename `web/assets/demo_map.pwad`, reload, and confirm
+    the package status reports the missing/unreadable demo map. Restore the
+    fixture afterward.
 
 This is a temporary JavaScript bridge that preserves the Seed7-generated WASM
 framebuffer provider. In top-down and first-person modes, `W`/`S` move forward
 and backward, `A`/`D` strafe, and `ArrowLeft`/`ArrowRight` or `Q`/`E` turn.
-`Space` uses the synthetic Task 10 door line when one is in front of the player.
-Left mouse, `Ctrl`, and `F` fire the Task 12 pistol hitscan weapon and can alert
-placeholder enemies. Pause freezes gameplay, and Reset restores player
-position, health, ammo, enemy state, and synthetic door state.
+`Space` uses the synthetic Task 10 door line in front of the player or the Task
+15 exit line when it is in front of or near the player. Left mouse, `Ctrl`, and
+`F` fire the Task 12 pistol hitscan weapon and can alert placeholder enemies.
+Pause freezes gameplay, and Reset restores player position, health, ammo, enemy
+state, synthetic door state, and level-completion state. Click the Canvas before
+using gameplay keys; `Alt+Enter` toggles fullscreen.
 One-sided and explicitly blocking linedefs use conservative debug collision.
 The first-person renderer is still a ray/segment projection prototype; thing
 rendering, combat, and enemy AI are placeholder passes and do not add pickups,
@@ -351,14 +439,17 @@ Known limitations:
 - Texture support is limited to `PLAYPAL`, `PNAMES`, `TEXTURE1`, and vanilla
   patch picture lumps for wall columns. Sprite support is limited to
   placeholder billboards from map `THINGS`. No floor/ceiling flats, Doom sprite
-  lump compatibility, pickups, audio, exits, or commercial WAD assets are
-  included.
+  lump compatibility, pickups, audio, episode progression, or commercial WAD
+  assets are included.
 - Combat and HUD support are limited to a pistol-style hitscan, player health,
   ammo, game-over, pause, and reset state in the browser bridge.
 - Enemy AI support is limited to placeholder idle/chase/attack/dead states,
   approximate line of sight, direct movement, and melee damage with a cooldown.
 - Door support is limited to the synthetic browser-side linedef special
   documented in `docs/line-specials.md`; it is not Doom-compatible door logic.
+- Exit support is limited to the synthetic browser-side linedef special
+  documented in `docs/level-flow.md`; it is not Doom-compatible level
+  progression.
 
 See `docs/renderer-debug.md` for top-down details and
 `docs/renderer-options.md` for the first-person renderer approach. See
@@ -367,4 +458,7 @@ See `docs/renderer-debug.md` for top-down details and
 `docs/sprites.md` for Task 11 thing rendering and limitations. See
 `docs/combat.md` for Task 12 combat support and limitations. See
 `docs/enemy-ai.md` for Task 13 enemy AI support and limitations. See
-`docs/ui.md` for Task 14 HUD, pause, game-over, and reset behavior.
+`docs/ui.md` for Task 14 HUD, pause, game-over, and reset behavior. See
+`docs/level-flow.md` for Task 15 exit and level-complete behavior. See
+`docs/browser-runtime.md` for Task 16 local packaging and browser-run details.
+See `docs/deployment.md` for Task 16.1 GitHub Pages deployment.

@@ -5,6 +5,14 @@ the temporary JavaScript WAD bridge. The Seed7-generated WASM framebuffer
 provider remains unchanged; the WAD gameplay prototype still runs in
 `web/main.js`.
 
+Task 15 keeps this HUD path and adds the `level_complete` state. `LEVEL
+COMPLETE` is drawn inside the Canvas playfield/HUD, not as an external DOM
+panel.
+
+Task 16 keeps the default page game-first and adds local packaging polish:
+compact package status, click-to-focus controls, fullscreen, readable loading
+and error states, and an FPS counter inside the collapsed Debug panel.
+
 Task 14.2 made `web/index.html` start as a playable browser prototype. On page
 load it fetches the generated, non-commercial `web/assets/demo_map.pwad`
 fixture, loads it through the same WAD parser path as manual uploads, and starts
@@ -43,6 +51,11 @@ Manual WAD upload remains available in the collapsed `Advanced / Load WAD`
 section. Framebuffer and top-down map modes remain available in the collapsed
 `Debug` section, alongside WAD summary and lump details.
 
+The compact package status above the Canvas reports demo-map loading, generated
+WASM-provider loading, ready/playable state, and readable default-demo errors.
+It does not show player coordinates, WAD internals, frame checksums, or other
+debug-only diagnostics in the default view.
+
 ## Playable State
 
 When a supported `E1M1` or `MAP01` map is loaded, Reset initializes the playable
@@ -80,9 +93,15 @@ Reset clears pause and restarts the current map state.
 Detailed controls are available from the collapsed `Help` panel:
 
 ```text
-W/S move, A/D strafe, Arrow keys or Q/E turn, Space uses doors,
-left mouse/Ctrl/F fires, Pause freezes play, Reset restarts the current map.
+Click game first, W/S move, A/D strafe, Arrow keys or Q/E turn,
+Space uses doors/exits, left mouse/Ctrl/F fires, Alt+Enter fullscreen,
+Pause freezes play, Reset restarts the current map.
 ```
+
+Clicking the game area focuses the Canvas and hides the focus hint. Gameplay
+keys are ignored until the Canvas is focused, and those keys are prevented from
+scrolling the page. Fullscreen keeps the Canvas HUD inside the game viewport and
+keeps Pause/Reset visible.
 
 ## Verification
 
@@ -115,6 +134,8 @@ to first-person mode without manual upload. Verify:
 - health, ammo, weapon, enemies, and the last combat message are visible inside
   the game viewport;
 - movement, firing, enemy melee damage, game over, pause, and reset work;
+- clicking the game focuses controls and `Alt+Enter` or Fullscreen toggles
+  fullscreen;
 - `Advanced / Load WAD` still allows manual WAD upload;
 - `Debug` still exposes Framebuffer and Top-down Map modes plus WAD details.
 
@@ -135,6 +156,7 @@ verify:
 
 ## Limitations
 
-This milestone does not add level exits, pickups, sound, save/load, advanced
-weapons, or real Doom HUD assets. The HUD and state handling are intentionally
-minimal and scoped to the Task 12/13 placeholder combat and enemy AI prototype.
+This milestone does not add pickups, sound, save/load, advanced weapons, real
+Doom HUD assets, intermissions, or episode progression. Level exits are limited
+to the synthetic Task 15 browser-side special documented in
+`docs/level-flow.md`.

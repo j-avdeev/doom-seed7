@@ -13,14 +13,17 @@
       <div class="controls">
         <button id="pauseButton" type="button">Pause</button>
         <button id="resetButton" type="button">Reset</button>
+        <button id="fullscreenButton" type="button">Fullscreen</button>
       </div>
     </header>
+    <output id="packageStatus" class="package-status" aria-live="polite">Loading demo map...</output>
     <section class="game-stage" aria-label="Canvas-rendered game screen">
-      <canvas id="framebuffer" width="320" height="200" aria-label="320 by 200 game framebuffer with in-canvas HUD"></canvas>
+      <canvas id="framebuffer" width="320" height="200" tabindex="0" aria-label="320 by 200 game framebuffer with in-canvas HUD"></canvas>
+      <div id="focusHint" class="focus-hint">Click game to focus controls</div>
     </section>
     <details class="help-panel">
       <summary>Help</summary>
-      <p>W/S move | A/D strafe | Arrow keys or Q/E turn | Space use | Ctrl/F/click fire | Pause | Reset</p>
+      <p>Click the game first. W/S move | A/D strafe | Arrow keys or Q/E turn | Space use | Ctrl/F/click fire | Alt+Enter fullscreen | Pause | Reset</p>
     </details>
     <details class="advanced-panel">
       <summary>Advanced / Load WAD</summary>
@@ -41,6 +44,7 @@
         <output id="modeStatus">Mode: framebuffer demo</output>
         <output id="status">Frame 0</output>
         <output id="wasmStatus">Generated WASM provider not loaded.</output>
+        <output id="fpsStatus">FPS --</output>
       </section>
       <div class="mode-control" role="group" aria-label="Canvas mode">
         <button id="firstPersonModeButton" class="mode-control__button is-active" type="button" aria-pressed="true" disabled>First-person</button>

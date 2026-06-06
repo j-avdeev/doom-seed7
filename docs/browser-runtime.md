@@ -185,8 +185,22 @@ emcc src/platform/wasm_framebuffer_bridge.c \
 
 Serve the repository over HTTP:
 
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tools\serve-web.ps1
+```
+
+or from Git Bash:
+
 ```bash
-python -m http.server 8080
+tools/serve-web.sh
+```
+
+Both commands serve the repo on port `8080` by default. Pass `-Port 8090` to the
+PowerShell script or `8090` as the first Git Bash argument to choose a different
+port. The raw Python equivalent is:
+
+```bash
+python -m http.server 8080 --bind 127.0.0.1
 ```
 
 Open:
@@ -200,6 +214,20 @@ fetches `web/wasm/framebuffer_demo.js`; when present, that generated Seed7 WASM
 module is initialized without running `main`, wrapped with `cwrap`, and used as
 the per-frame pixel provider.
 
+Task 16 packages the current playable prototype as a cleaner local browser demo.
+The default view remains game-first: Pause, Reset, Fullscreen, the compact
+package status, and the Canvas are visible; Help, Advanced / Load WAD, and Debug
+are collapsed. The package status reports demo-map loading, WASM-provider
+loading, ready/playable state, and readable default-demo errors. Detailed frame,
+WAD, WASM, player, and FPS diagnostics remain inside the collapsed Debug panel.
+
+Gameplay keys are active after the player clicks the game area. The focus hint
+is drawn over the game area until the Canvas receives focus, and gameplay keys
+are prevented from scrolling the page. `Alt+Enter` or the Fullscreen button
+requests fullscreen for the page shell, preserving the 16:10 Canvas aspect ratio
+and keeping Pause/Reset visible. The HUD remains drawn into the bottom of the
+Canvas in all modes and in fullscreen.
+
 The same page now includes a `WAD` file input. Selecting a `.wad` file reads the
 file as an `ArrayBuffer`, validates the WAD header and directory, and updates the
 page with the parsed WAD type, lump count, directory offset, file size, and the
@@ -208,6 +236,12 @@ present and the required map lumps are valid, the page also displays vertex,
 linedef, sidedef, sector, thing, and player-start statistics, then switches the
 Canvas mode to the top-down map view. The mode control can switch back to the
 original framebuffer demo or into the first-person prototype.
+
+Readable error states are surfaced for missing `web/assets/demo_map.pwad`, WAD
+header/directory parse failures, supported-map absence, map-lump parse failures,
+and generated WASM provider failures. WASM provider failures do not block the
+playable WAD demo; they only leave the framebuffer debug mode on the JavaScript
+fallback path.
 
 When the selected map references wall textures and the WAD provides supported
 texture lumps, first-person mode resolves those textures and reports the count

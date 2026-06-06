@@ -23,6 +23,16 @@ body {
   padding: 16px 0;
 }
 
+.shell:fullscreen {
+  width: 100vw;
+  min-height: 100vh;
+  padding: 16px;
+  box-sizing: border-box;
+  background: #050606;
+  align-content: center;
+  justify-items: center;
+}
+
 .toolbar {
   display: flex;
   align-items: center;
@@ -42,6 +52,26 @@ h1 {
 .controls {
   display: flex;
   gap: 8px;
+}
+
+.package-status {
+  width: min(100%, 640px);
+  min-height: 20px;
+  color: #b7c7bd;
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.package-status.is-ready {
+  color: #9df08c;
+}
+
+.package-status.is-loading {
+  color: #ffd46f;
+}
+
+.package-status.is-error {
+  color: #ffb0a4;
 }
 
 .mode-control {
@@ -100,12 +130,18 @@ button:focus-visible,
 }
 
 .game-stage {
+  position: relative;
   width: min(100%, 640px);
   border: 1px solid #34423e;
   border-radius: 6px;
   overflow: hidden;
   background: #050606;
   box-shadow: 0 0 0 1px #070908 inset, 0 10px 24px rgba(0, 0, 0, 0.28);
+}
+
+.shell:fullscreen .game-stage {
+  width: min(calc(100vw - 32px), calc((100vh - 152px) * 1.6));
+  max-height: calc(100vh - 152px);
 }
 
 canvas {
@@ -115,6 +151,33 @@ canvas {
   border: 0;
   background: #000;
   image-rendering: pixelated;
+}
+
+canvas:focus-visible {
+  outline: 2px solid #9df08c;
+  outline-offset: -3px;
+}
+
+.focus-hint {
+  position: absolute;
+  left: 50%;
+  top: 14px;
+  transform: translateX(-50%);
+  max-width: calc(100% - 32px);
+  border: 1px solid #9df08c;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.72);
+  color: #eef3ef;
+  font-size: 13px;
+  line-height: 1.2;
+  padding: 6px 9px;
+  pointer-events: none;
+  text-align: center;
+}
+
+.game-stage.has-focus .focus-hint,
+.game-stage.is-unavailable .focus-hint {
+  display: none;
 }
 
 output {
@@ -172,6 +235,12 @@ output {
   font-weight: 700;
   line-height: 36px;
   padding: 0 12px;
+}
+
+.advanced-panel:not([open]) > :not(summary),
+.debug-details:not([open]) > :not(summary),
+.help-panel:not([open]) > :not(summary) {
+  display: none;
 }
 
 .advanced-panel[open],

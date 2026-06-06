@@ -16,13 +16,18 @@
   const wasmStatus = document.getElementById("wasmStatus");
   const pauseButton = document.getElementById("pauseButton");
   const resetButton = document.getElementById("resetButton");
+  const fullscreenButton = document.getElementById("fullscreenButton");
   const framebufferModeButton = document.getElementById("framebufferModeButton");
   const firstPersonModeButton = document.getElementById("firstPersonModeButton");
   const mapModeButton = document.getElementById("mapModeButton");
   const gameStage = document.querySelector(".game-stage");
+  const shell = document.querySelector(".shell");
+  const packageStatus = document.getElementById("packageStatus");
+  const focusHint = document.getElementById("focusHint");
   const modeStatus = document.getElementById("modeStatus");
   const wadFileInput = document.getElementById("wadFileInput");
   const wadStatus = document.getElementById("wadStatus");
+  const fpsStatus = document.getElementById("fpsStatus");
   const wadSummary = document.getElementById("wadSummary");
   const wadLumps = document.getElementById("wadLumps");
   const mapSummary = document.getElementById("mapSummary");
@@ -45,6 +50,7 @@
   const MAP_LUMPS = ["THINGS", "LINEDEFS", "SIDEDEFS", "VERTEXES", "SECTORS"];
   const LINEDEF_BLOCKING = 1;
   const SYNTHETIC_DOOR_SPECIAL = 900;
+  const SYNTHETIC_EXIT_SPECIAL = 901;
   const USE_DISTANCE = 96;
   const DOOR_OPEN_SECONDS = 0.45;
   const PLAYER_RADIUS = 12;
@@ -61,7 +67,8 @@
   const GAME_STATE_READY = "ready";
   const GAME_STATE_PLAYING = "playing";
   const GAME_STATE_PAUSED = "paused";
-  const GAME_STATE_DEAD = "dead";
+  const GAME_STATE_PLAYER_DEAD = "player_dead";
+  const GAME_STATE_LEVEL_COMPLETE = "level_complete";
   const ENEMY_DETECTION_RANGE = 192;
   const ENEMY_SHOT_ALERT_RANGE = 512;
   const ENEMY_MOVE_SPEED = 46;
@@ -92,6 +99,14 @@
   let combatMessage = "shot=ready";
   let aiMessage = "none";
   let gameStateMessage = "No map loaded.";
+  let demoLoadState = "loading";
+  let wasmLoadState = "loading";
+  let wasmPackageMessage = "";
+  let packageErrorMessage = "";
+  let gameFocused = false;
+  let fpsFrameCount = 0;
+  let fpsLastTimestamp = 0;
+  let fpsValue = 0;
   const pressedKeys = new Set();
 
   function byteWrap(value) {
@@ -284,12 +299,81 @@
     return playerState !== null && (playerState.dead === true || playerState.health <= 0);
   }
 
+  function isLevelComplete(mapData) {
+    return mapData !== null && mapData.levelComplete === true;
+  }
+
   function currentGameState() {
-    if (isPlayerDead()) return GAME_STATE_DEAD;
+    if (isLevelComplete(loadedMap)) return GAME_STATE_LEVEL_COMPLETE;
+    if (isPlayerDead()) return GAME_STATE_PLAYER_DEAD;
     if (paused) return GAME_STATE_PAUSED;
     if (playerState !== null) return GAME_STATE_PLAYING;
     if (loadedMap !== null) return GAME_STATE_READY;
     return GAME_STATE_READY;
+  }
+
+  function setPackageStatus(message, kind) {
+    packageStatus.textContent = message;
+    packageStatus.classList.toggle("is-loading", kind === "loading");
+    packageStatus.classList.toggle("is-ready", kind === "ready");
+    packageStatus.classList.toggle("is-error", kind === "error");
+  }
+
+  function playableStatusMessage() {
+    if (wasmLoadState === "loading") {
+      return "Demo loaded. Loading WASM provider...";
+    }
+    if (wasmLoadState === "ready") {
+      return "Ready - click the game to play. Fullscreen: Alt+Enter.";
+    }
+    return wasmPackageMessage ||
+      "Ready - click the game to play. Framebuffer debug uses JS fallback.";
+  }
+
+  function refreshPackageStatus() {
+    if (packageErrorMessage !== "") {
+      setPackageStatus(packageErrorMessage, "error");
+    } else if (demoLoadState === "loading") {
+      setPackageStatus("Loading demo map...", "loading");
+    } else if (demoLoadState === "ready") {
+      setPackageStatus(playableStatusMessage(), "ready");
+    } else {
+      setPackageStatus("Demo map is not playable.", "error");
+    }
+    updateHudPanel(loadedMap);
+  }
+
+  function setDemoLoadState(nextState, message) {
+    demoLoadState = nextState;
+    if (nextState === "error") {
+      packageErrorMessage = message || "Demo map failed to load.";
+    } else if (message) {
+      packageErrorMessage = message;
+    } else {
+      packageErrorMessage = "";
+    }
+    refreshPackageStatus();
+  }
+
+  function setWasmLoadState(nextState, message) {
+    wasmLoadState = nextState;
+    wasmPackageMessage = nextState === "error" && message ? message : "";
+    if (nextState === "error" && demoLoadState === "ready" && message) {
+      setPackageStatus(message, "ready");
+    } else {
+      refreshPackageStatus();
+    }
+  }
+
+  function updateGameFocusState(focused) {
+    gameFocused = focused;
+    gameStage.classList.toggle("has-focus", gameFocused);
+    if (!gameFocused) pressedKeys.clear();
+  }
+
+  function focusGameControls() {
+    canvas.focus({ preventScroll: true });
+    updateGameFocusState(true);
   }
 
   function setPaused(nextPaused) {
@@ -306,6 +390,19 @@
     pressedKeys.clear();
     combatMessage = message || "player died";
     gameStateMessage = "GAME OVER - click Reset to restart.";
+  }
+
+  function completeLevel(mapData) {
+    if (!mapData || mapData.levelComplete === true || isPlayerDead()) return;
+    mapData.levelComplete = true;
+    paused = false;
+    pauseButton.textContent = "Pause";
+    pressedKeys.clear();
+    combatMessage = "level=complete";
+    interactionMessage = "Exit activated.";
+    aiMessage = "level complete";
+    gameStateMessage = "LEVEL COMPLETE - click Reset to replay.";
+    renderCurrentMapMode(mapData);
   }
 
   function setThingDead(thing) {
@@ -370,6 +467,7 @@
   function resetPlayableState(mapData) {
     frame = 0;
     pressedKeys.clear();
+    if (mapData) mapData.levelComplete = false;
     resetDoorStates(mapData);
     resetThingCombatState(mapData);
     initPlayerState(mapData);
@@ -383,6 +481,10 @@
 
   function isDoorLinedef(linedef) {
     return linedef.specialType === SYNTHETIC_DOOR_SPECIAL;
+  }
+
+  function isExitLinedef(linedef) {
+    return linedef.specialType === SYNTHETIC_EXIT_SPECIAL;
   }
 
   function doorStateAt(mapData, linedefIndex) {
@@ -450,6 +552,38 @@
     const dx = px - nearestX;
     const dy = py - nearestY;
     return dx * dx + dy * dy;
+  }
+
+  function findNearbyExitLinedef(mapData, maxDistance) {
+    const maxDistanceSquared = maxDistance * maxDistance;
+    let nearest = null;
+
+    if (playerState === null || !mapData || !mapData.exitLinedefs) return null;
+
+    for (let index = 0; index < mapData.exitLinedefs.length; index += 1) {
+      const linedefIndex = mapData.exitLinedefs[index];
+      const linedef = mapData.linedefs[linedefIndex];
+      const start = mapData.vertexes[linedef.startVertex];
+      const end = mapData.vertexes[linedef.endVertex];
+      let distanceSquared = 0;
+
+      if (!start || !end) continue;
+      distanceSquared = pointSegmentDistanceSquared(
+        playerState.x, playerState.y,
+        start.x, start.y,
+        end.x, end.y
+      );
+      if (distanceSquared <= maxDistanceSquared &&
+          (nearest === null || distanceSquared < nearest.distanceSquared)) {
+        nearest = {
+          linedef: linedef,
+          linedefIndex: linedefIndex,
+          distanceSquared: distanceSquared
+        };
+      }
+    }
+
+    return nearest;
   }
 
   function movementTouchesSolidLine(mapData, fromX, fromY, toX, toY, radius) {
@@ -582,7 +716,8 @@
     let detected = 0;
     let attacks = 0;
 
-    if (!mapData || playerState === null || isPlayerDead() || seconds <= 0) return;
+    if (!mapData || playerState === null || isPlayerDead() ||
+        isLevelComplete(mapData) || seconds <= 0) return;
 
     renderableThings(mapData).forEach(function (thing) {
       const dx = playerState.x - thing.x;
@@ -638,7 +773,7 @@
 
   function updatePlayerFromInput(mapData, deltaSeconds) {
     if (playerState === null) return;
-    if (isPlayerDead() || paused) return;
+    if (isPlayerDead() || paused || isLevelComplete(mapData)) return;
 
     const seconds = Math.min(deltaSeconds, 0.1);
     let turn = 0;
@@ -686,6 +821,18 @@
     return doors;
   }
 
+  function createExitLinedefIndexes(mapData) {
+    const exits = [];
+
+    for (let index = 0; index < mapData.linedefs.length; index += 1) {
+      if (isExitLinedef(mapData.linedefs[index])) {
+        exits.push(index);
+      }
+    }
+
+    return exits;
+  }
+
   function updateDoorStates(mapData, deltaSeconds) {
     if (!mapData || !mapData.doors) return;
     mapData.doors.forEach(function (door) {
@@ -699,20 +846,22 @@
   }
 
   function findUsableLinedefInFront(mapData) {
-    if (playerState === null || !mapData || !mapData.doors || mapData.doors.size === 0) return null;
+    if (playerState === null || !mapData) return null;
 
     const radians = playerState.angle * Math.PI / 180;
     const rayX = Math.cos(radians);
     const rayY = Math.sin(radians);
     let nearest = null;
 
-    mapData.doors.forEach(function (door, linedefIndex) {
+    for (let linedefIndex = 0; linedefIndex < mapData.linedefs.length; linedefIndex += 1) {
       const linedef = mapData.linedefs[linedefIndex];
+      const door = doorStateAt(mapData, linedefIndex);
       const start = mapData.vertexes[linedef.startVertex];
       const end = mapData.vertexes[linedef.endVertex];
       let hit = null;
 
-      if (!start || !end) return;
+      if (door === null && !isExitLinedef(linedef)) continue;
+      if (!start || !end) continue;
       hit = raySegmentIntersection(
         playerState.x, playerState.y,
         rayX, rayY,
@@ -725,18 +874,30 @@
           distance: hit.distance,
           linedef: linedef,
           linedefIndex: linedefIndex,
-          door: door
+          door: door,
+          kind: isExitLinedef(linedef) ? "exit" : "door"
         };
       }
-    });
+    }
 
     return nearest;
   }
 
   function useLinedefInFront(mapData) {
-    const target = findUsableLinedefInFront(mapData);
+    let target = null;
+    let nearbyExit = null;
 
-    if (isPlayerDead() || paused) return;
+    if (isPlayerDead() || paused || isLevelComplete(mapData)) return;
+    target = findUsableLinedefInFront(mapData);
+    if (target !== null && target.kind === "exit") {
+      completeLevel(mapData);
+      return;
+    }
+    nearbyExit = findNearbyExitLinedef(mapData, USE_DISTANCE);
+    if (nearbyExit !== null && target === null) {
+      completeLevel(mapData);
+      return;
+    }
     if (target === null) {
       interactionMessage = "No usable line in reach.";
       return;
@@ -792,6 +953,11 @@
     let target = null;
 
     if (playerState === null || mapData === null) return;
+    if (isLevelComplete(mapData)) {
+      combatMessage = "shot=blocked level complete";
+      renderCurrentMapMode(mapData);
+      return;
+    }
     if (isPlayerDead()) {
       combatMessage = "shot=blocked player dead";
       renderCurrentMapMode(mapData);
@@ -874,7 +1040,8 @@
   function gameStateText() {
     const state = currentGameState();
 
-    if (state === GAME_STATE_DEAD) return "Game over";
+    if (state === GAME_STATE_LEVEL_COMPLETE) return "Level complete";
+    if (state === GAME_STATE_PLAYER_DEAD) return "Game over";
     if (state === GAME_STATE_PAUSED) return "Paused";
     if (state === GAME_STATE_PLAYING) return "Playing";
     if (loadedMap !== null && playerState === null) return "No player start";
@@ -888,6 +1055,8 @@
     if (combatMessage === "shot=no weapon") return "No weapon.";
     if (combatMessage === "shot=blocked paused") return "Paused.";
     if (combatMessage === "shot=blocked player dead") return "Game over.";
+    if (combatMessage === "shot=blocked level complete") return "Level complete.";
+    if (combatMessage === "level=complete") return "Level complete.";
     if (combatMessage.indexOf("shot=kill") === 0) return "Enemy down.";
     if (combatMessage.indexOf("shot=hit") === 0) return "Enemy hit.";
     return combatMessage;
@@ -896,23 +1065,44 @@
   function canvasHudMessage(mapData, visibleThingCount) {
     const state = currentGameState();
     const messageParts = [];
+    const exitHint = exitHintText(mapData);
 
     if (playerState === null) return gameStateMessage;
-    if (state === GAME_STATE_DEAD) {
+    if (state === GAME_STATE_LEVEL_COMPLETE) {
+      messageParts.push(gameStateMessage);
+    } else if (state === GAME_STATE_PLAYER_DEAD) {
       messageParts.push(gameStateMessage);
     } else if (state === GAME_STATE_PAUSED) {
       messageParts.push("Paused.");
     }
-    messageParts.push(playerFacingCombatMessage());
+    if (exitHint !== "") messageParts.push(exitHint);
+    if (combatMessage !== "shot=ready" || exitHint === "") {
+      messageParts.push(playerFacingCombatMessage());
+    }
     if (interactionMessage !== "") messageParts.push(interactionMessage);
     return messageParts.join(" ");
+  }
+
+  function exitHintText(mapData) {
+    if (playerState === null || !mapData || !mapData.exitLinedefs ||
+        mapData.exitLinedefs.length === 0 || isPlayerDead() ||
+        isLevelComplete(mapData)) {
+      return "";
+    }
+    if (findNearbyExitLinedef(mapData, USE_DISTANCE) !== null) {
+      return "Press Space at EXIT.";
+    }
+    return "Find green EXIT wall; press Space.";
   }
 
   function updateHudPanel(mapData, visibleThingCount) {
     const state = currentGameState();
 
-    gameStage.classList.toggle("is-dead", state === GAME_STATE_DEAD);
+    gameStage.classList.toggle("is-dead", state === GAME_STATE_PLAYER_DEAD);
     gameStage.classList.toggle("is-paused", state === GAME_STATE_PAUSED);
+    gameStage.classList.toggle("is-complete", state === GAME_STATE_LEVEL_COMPLETE);
+    gameStage.classList.toggle("has-focus", gameFocused);
+    gameStage.classList.toggle("is-unavailable", demoLoadState === "error" || loadedMap === null);
   }
 
   function drawHudBox(x, y, width, height, label, value, accentColor) {
@@ -939,7 +1129,9 @@
     const messageText = canvasHudMessage(mapData, visibleThingCount);
     let stateColor = "#8fd9c7";
 
-    if (state === GAME_STATE_DEAD) {
+    if (state === GAME_STATE_LEVEL_COMPLETE) {
+      stateColor = "#9df08c";
+    } else if (state === GAME_STATE_PLAYER_DEAD) {
       stateColor = "#ff8f80";
     } else if (state === GAME_STATE_PAUSED) {
       stateColor = "#ffd46f";
@@ -954,7 +1146,7 @@
     context.strokeStyle = "#6f7b73";
     context.strokeRect(0.5, hudTop + 0.5, WIDTH - 1, HUD_HEIGHT - 1);
 
-    drawHudBox(6, hudTop + 6, 48, 24, "HP", healthText, state === GAME_STATE_DEAD ? "#b84f45" : "#679d87");
+    drawHudBox(6, hudTop + 6, 48, 24, "HP", healthText, state === GAME_STATE_PLAYER_DEAD ? "#b84f45" : "#679d87");
     drawHudBox(60, hudTop + 6, 50, 24, "AMMO", ammoText, "#8c9fb0");
     drawHudBox(116, hudTop + 6, 70, 24, "WEAPON", weaponText, "#a9975c");
     drawHudBox(192, hudTop + 6, 62, 24, "ENEMY", enemyText, "#9d6a61");
@@ -965,9 +1157,46 @@
     context.fillText(stateText, WIDTH - 8, hudTop + 34);
 
     context.textAlign = "left";
-    context.fillStyle = state === GAME_STATE_DEAD ? "#ffb0a4" : "#d7ddd6";
+    context.fillStyle = state === GAME_STATE_PLAYER_DEAD ? "#ffb0a4" : "#d7ddd6";
     context.font = "9px monospace";
     context.fillText(messageText.slice(0, 41), 8, hudTop + 36);
+    context.restore();
+  }
+
+  function renderStateOverlay() {
+    const state = currentGameState();
+    let title = "";
+    let subtitle = "";
+    let color = "#f2ead2";
+
+    if (state === GAME_STATE_LEVEL_COMPLETE) {
+      title = "LEVEL COMPLETE";
+      subtitle = "RESET TO REPLAY";
+      color = "#9df08c";
+    } else if (state === GAME_STATE_PLAYER_DEAD) {
+      title = "GAME OVER";
+      subtitle = "RESET TO RESTART";
+      color = "#ffb0a4";
+    } else if (state === GAME_STATE_PAUSED) {
+      title = "PAUSED";
+      subtitle = "RESUME OR RESET";
+      color = "#ffd46f";
+    } else {
+      return;
+    }
+
+    context.save();
+    context.fillStyle = "rgba(0, 0, 0, 0.68)";
+    context.fillRect(43, 56, 234, 48);
+    context.strokeStyle = color;
+    context.strokeRect(43.5, 56.5, 233, 47);
+    context.textAlign = "center";
+    context.fillStyle = color;
+    context.font = "bold 18px monospace";
+    context.fillText(title, WIDTH / 2, 78);
+    context.fillStyle = "#eef3ef";
+    context.font = "9px monospace";
+    context.fillText(subtitle, WIDTH / 2, 94);
     context.restore();
   }
 
@@ -995,16 +1224,27 @@
     return parts.length === 0 ? "" : " " + parts.join(" ");
   }
 
+  function gameStateDebugSuffix() {
+    const state = currentGameState();
+
+    if (state === GAME_STATE_LEVEL_COMPLETE) return " LEVEL COMPLETE";
+    if (state === GAME_STATE_PLAYER_DEAD) return " GAME OVER";
+    if (state === GAME_STATE_PAUSED) return " PAUSED";
+    return "";
+  }
+
   function renderAndPresent(frameNumber) {
     if (wasmProvider !== null) {
       const checksum = wasmProvider.writeFrame(frameNumber, imageData.data);
       context.putImageData(imageData, 0, 0);
       renderCanvasHud(loadedMap);
+      renderStateOverlay();
       status.textContent = "Frame " + frameNumber + " (WASM checksum " + checksum + ")";
     } else {
       writeFrame(frameNumber, imageData.data);
       context.putImageData(imageData, 0, 0);
       renderCanvasHud(loadedMap);
+      renderStateOverlay();
       status.textContent = "Frame " + frameNumber + " (JS fallback)";
     }
     updateHudPanel(loadedMap);
@@ -1019,6 +1259,7 @@
     const scale = Math.min((WIDTH - padding * 2) / mapWidth, (VIEW_HEIGHT - padding * 2) / mapHeight);
     const centerX = (bounds.minX + bounds.maxX) / 2;
     const centerY = (bounds.minY + bounds.maxY) / 2;
+    const exitLabels = [];
 
     function toScreen(vertex) {
       return {
@@ -1037,7 +1278,15 @@
         const startScreen = toScreen(start);
         const endScreen = toScreen(end);
         const door = doorStateAt(mapData, index);
-        if (door !== null && door.state === "open") {
+        if (isExitLinedef(linedef)) {
+          drawLine(data, startScreen.x, startScreen.y - 1, endScreen.x, endScreen.y - 1, 42, 110, 78);
+          drawLine(data, startScreen.x, startScreen.y, endScreen.x, endScreen.y, 144, 240, 120);
+          drawLine(data, startScreen.x, startScreen.y + 1, endScreen.x, endScreen.y + 1, 144, 240, 120);
+          exitLabels.push({
+            x: (startScreen.x + endScreen.x) / 2,
+            y: (startScreen.y + endScreen.y) / 2
+          });
+        } else if (door !== null && door.state === "open") {
           drawLine(data, startScreen.x, startScreen.y, endScreen.x, endScreen.y, 94, 196, 135);
         } else if (door !== null && door.state === "opening") {
           drawLine(data, startScreen.x, startScreen.y, endScreen.x, endScreen.y, 255, 212, 96);
@@ -1089,14 +1338,16 @@
     }
 
     context.putImageData(imageData, 0, 0);
+    drawTopDownExitLabels(exitLabels);
     renderCanvasHud(mapData, aliveThingCount(mapData));
+    renderStateOverlay();
     if (playerState !== null) {
       status.textContent = "Map " + mapData.name + " player x=" +
         playerState.x.toFixed(1) + " y=" + playerState.y.toFixed(1) +
         " angle=" + Math.round(playerState.angle) + " (" +
         mapData.vertexes.length + " vertexes, " + mapData.linedefs.length +
         " linedefs, scale " + scale.toFixed(2) + ")" +
-        (isPlayerDead() ? " GAME OVER" : paused ? " PAUSED" : "") +
+        gameStateDebugSuffix() +
         interactionSuffix(mapData, aliveThingCount(mapData));
     } else {
       status.textContent = "Map " + mapData.name + " top-down: no player start (" +
@@ -1104,6 +1355,19 @@
       " linedefs, scale " + scale.toFixed(2) + ")";
     }
     updateHudPanel(mapData, aliveThingCount(mapData));
+  }
+
+  function drawTopDownExitLabels(exitLabels) {
+    context.save();
+    context.font = "bold 9px monospace";
+    context.textAlign = "center";
+    exitLabels.forEach(function (label) {
+      context.fillStyle = "rgba(0, 0, 0, 0.72)";
+      context.fillRect(label.x - 24, label.y - 17, 48, 12);
+      context.fillStyle = "#9df08c";
+      context.fillText("EXIT 901", label.x, label.y - 8);
+    });
+    context.restore();
   }
 
   function raySegmentIntersection(originX, originY, rayX, rayY, ax, ay, bx, by) {
@@ -1176,14 +1440,18 @@
     }
   }
 
-  function wallFallbackColor(perpendicularDistance, segmentT) {
+  function wallFallbackColor(perpendicularDistance, segmentT, linedef) {
     const shade = Math.max(0.28, Math.min(1, 220 / (perpendicularDistance + 96)));
     const edgeShade = segmentT < 0.04 || segmentT > 0.96 ? 0.72 : 1;
+    const base = isExitLinedef(linedef) ?
+      { red: 78, green: 255, blue: 96 } :
+      { red: 188, green: 201, blue: 190 };
+
     return {
       shade: shade * edgeShade,
-      red: Math.round(188 * shade * edgeShade),
-      green: Math.round(201 * shade * edgeShade),
-      blue: Math.round(190 * shade * edgeShade)
+      red: Math.round(base.red * shade * edgeShade),
+      green: Math.round(base.green * shade * edgeShade),
+      blue: Math.round(base.blue * shade * edgeShade)
     };
   }
 
@@ -1268,6 +1536,12 @@
     const playerAngleRadians = playerState === null ? 0 : playerState.angle * Math.PI / 180;
     const fovRadians = FIRST_PERSON_FOV_DEGREES * Math.PI / 180;
     const wallDepthByColumn = new Float64Array(WIDTH);
+    const exitView = {
+      minColumn: WIDTH,
+      maxColumn: -1,
+      nearestDistance: Infinity,
+      columns: 0
+    };
     let hitColumns = 0;
     let texturedColumns = 0;
     let thingSprites = 0;
@@ -1310,10 +1584,18 @@
         );
         const wallTop = VIEW_HEIGHT / 2 - wallHeight / 2;
         const wallBottom = VIEW_HEIGHT / 2 + wallHeight / 2;
-        const fallbackColor = wallFallbackColor(perpendicularDistance, hit.segmentT);
+        const fallbackColor = wallFallbackColor(perpendicularDistance, hit.segmentT, hit.linedef);
         const resolvedTexture = resolveWallTexture(mapData, hit);
+        const exitHit = isExitLinedef(hit.linedef);
 
-        if (resolvedTexture === null) {
+        if (exitHit) {
+          exitView.minColumn = Math.min(exitView.minColumn, column);
+          exitView.maxColumn = Math.max(exitView.maxColumn, column);
+          exitView.nearestDistance = Math.min(exitView.nearestDistance, perpendicularDistance);
+          exitView.columns += 1;
+        }
+
+        if (resolvedTexture === null || exitHit) {
           drawVerticalColumn(
             data,
             column,
@@ -1351,19 +1633,52 @@
     }
 
     context.putImageData(imageData, 0, 0);
+    drawFirstPersonExitMarker(exitView);
     renderCanvasHud(mapData, thingSprites);
+    renderStateOverlay();
     if (playerState !== null) {
       status.textContent = "First-person " + mapData.name + " player x=" +
         playerState.x.toFixed(1) + " y=" + playerState.y.toFixed(1) +
         " angle=" + Math.round(playerState.angle) + " (" +
         hitColumns + " wall columns, " + texturedColumns + " textured, " +
         thingSprites + " things)" +
-        (isPlayerDead() ? " GAME OVER" : paused ? " PAUSED" : "") +
+        gameStateDebugSuffix() +
         interactionSuffix(mapData, thingSprites);
     } else {
       status.textContent = "First-person " + mapData.name + ": no player start";
     }
     updateHudPanel(mapData, thingSprites);
+  }
+
+  function drawFirstPersonExitMarker(exitView) {
+    const visible = exitView.columns >= 8 && exitView.maxColumn >= exitView.minColumn;
+    const nearbyExit = loadedMap !== null ? findNearbyExitLinedef(loadedMap, USE_DISTANCE) : null;
+    let centerX = WIDTH / 2;
+    let labelY = 24;
+    let subtitle = "";
+
+    if (!visible && nearbyExit === null) return;
+    if (visible) {
+      centerX = (exitView.minColumn + exitView.maxColumn) / 2;
+      labelY = exitView.nearestDistance <= USE_DISTANCE ? 24 : 18;
+    }
+    if (nearbyExit !== null) subtitle = "SPACE";
+
+    context.save();
+    context.textAlign = "center";
+    context.fillStyle = "rgba(0, 0, 0, 0.72)";
+    context.fillRect(centerX - 31, labelY - 13, 62, subtitle === "" ? 17 : 29);
+    context.strokeStyle = "#9df08c";
+    context.strokeRect(centerX - 30.5, labelY - 12.5, 61, subtitle === "" ? 16 : 28);
+    context.fillStyle = "#9df08c";
+    context.font = "bold 14px monospace";
+    context.fillText("EXIT", centerX, labelY);
+    if (subtitle !== "") {
+      context.fillStyle = "#eef3ef";
+      context.font = "8px monospace";
+      context.fillText(subtitle, centerX, labelY + 12);
+    }
+    context.restore();
   }
 
   function drawFirstPersonThings(mapData, wallDepthByColumn, playerAngleRadians) {
@@ -1493,7 +1808,23 @@
     }
   }
 
+  function updateFpsCounter(timestamp) {
+    if (fpsLastTimestamp === 0) {
+      fpsLastTimestamp = timestamp;
+      fpsFrameCount = 0;
+      return;
+    }
+    fpsFrameCount += 1;
+    if (timestamp - fpsLastTimestamp >= 1000) {
+      fpsValue = Math.round(fpsFrameCount * 1000 / (timestamp - fpsLastTimestamp));
+      fpsStatus.textContent = "FPS " + fpsValue;
+      fpsFrameCount = 0;
+      fpsLastTimestamp = timestamp;
+    }
+  }
+
   function draw(timestamp) {
+    updateFpsCounter(timestamp);
     if (renderMode === "framebuffer" && !paused && timestamp - lastStep >= 33) {
       renderAndPresent(frame);
       frame += 1;
@@ -1501,7 +1832,7 @@
     } else if (isMapRenderMode(renderMode) && loadedMap !== null) {
       if (lastMapStep === 0) lastMapStep = timestamp;
       const deltaSeconds = (timestamp - lastMapStep) / 1000;
-      if (!paused && !isPlayerDead()) {
+      if (!paused && !isPlayerDead() && !isLevelComplete(loadedMap)) {
         updatePlayerFromInput(loadedMap, deltaSeconds);
         updateDoorStates(loadedMap, deltaSeconds);
         updateEnemyAi(loadedMap, deltaSeconds);
@@ -2115,9 +2446,12 @@
       sidedefs: sidedefs,
       bounds: computeMapBounds(vertexes, things),
       doors: new Map(),
+      exitLinedefs: [],
+      levelComplete: false,
       textureSet: unavailableTextureSet("not loaded", 0)
     };
     mapData.doors = createDoorStates(mapData);
+    mapData.exitLinedefs = createExitLinedefIndexes(mapData);
     mapData.textureSet = loadWallTextureSet(
       buffer,
       wad,
@@ -2191,6 +2525,7 @@
   function displayWadInfo(file, buffer, wad, preferredMode) {
     const previewCount = Math.min(wad.lumps.length, 24);
     const nextMode = preferredMode === "firstPerson" ? "firstPerson" : "map";
+    let playableMapLoaded = false;
 
     clearNode(wadSummary);
     clearNode(wadLumps);
@@ -2231,8 +2566,17 @@
       const mapData = parseMapData(buffer, wad);
       if (mapData === null) {
         appendDescription(mapSummary, "Map", "No E1M1 or MAP01 marker found");
+        gameStateMessage = "No playable map found.";
+        if (file.name === "demo_map.pwad") {
+          setDemoLoadState("error",
+            "Bundled demo WAD loaded, but no playable E1M1 or MAP01 map was found.");
+        } else {
+          packageErrorMessage = "Selected WAD has no playable E1M1 or MAP01 map.";
+          refreshPackageStatus();
+        }
         if (isMapRenderMode(renderMode)) setRenderMode("framebuffer");
       } else {
+        playableMapLoaded = true;
         loadedMap = mapData;
         resetPlayableState(loadedMap);
         mapModeButton.disabled = false;
@@ -2247,9 +2591,17 @@
         appendDescription(mapSummary, "Shootable things", String(shootableThingCount(mapData)));
         appendDescription(mapSummary, "Enemy AI", shootableThingCount(mapData) > 0 ?
           "basic idle/chase/attack/dead placeholders" : "No shootable enemies");
-        if (mapData.doors.size > 0) {
-          appendDescription(mapSummary, "Line specials",
-            mapData.doors.size + " synthetic door special " + SYNTHETIC_DOOR_SPECIAL);
+        if (mapData.doors.size > 0 || mapData.exitLinedefs.length > 0) {
+          const lineSpecials = [];
+          if (mapData.doors.size > 0) {
+            lineSpecials.push(mapData.doors.size + " synthetic door special " +
+              SYNTHETIC_DOOR_SPECIAL);
+          }
+          if (mapData.exitLinedefs.length > 0) {
+            lineSpecials.push(mapData.exitLinedefs.length + " synthetic exit special " +
+              SYNTHETIC_EXIT_SPECIAL);
+          }
+          appendDescription(mapSummary, "Line specials", lineSpecials.join("; "));
         }
         appendDescription(mapSummary, "Bounds",
           mapData.bounds.minX + "," + mapData.bounds.minY + " to " +
@@ -2279,11 +2631,19 @@
       }
     } catch (error) {
       appendDescription(mapSummary, "Map", "Could not load statistics: " + error.message);
+      if (file.name === "demo_map.pwad") {
+        setDemoLoadState("error", "Bundled demo map failed to parse: " + error.message);
+      } else {
+        packageErrorMessage = "Selected WAD map failed to parse: " + error.message;
+        refreshPackageStatus();
+      }
       if (isMapRenderMode(renderMode)) setRenderMode("framebuffer");
     }
+
+    return playableMapLoaded;
   }
 
-  function displayWadError(message) {
+  function displayWadError(message, packageMessage) {
     clearNode(wadSummary);
     clearNode(wadLumps);
     clearNode(mapSummary);
@@ -2298,6 +2658,8 @@
     firstPersonModeButton.disabled = true;
     if (isMapRenderMode(renderMode)) setRenderMode("framebuffer");
     wadStatus.textContent = "WAD parse failed: " + message;
+    packageErrorMessage = packageMessage || ("WAD parse failed: " + message);
+    refreshPackageStatus();
     updateHudPanel(null);
   }
 
@@ -2322,14 +2684,22 @@
     }
 
     wadStatus.textContent = "Loading " + file.name + "...";
+    packageErrorMessage = "";
+    refreshPackageStatus();
     file.arrayBuffer()
       .then(function (buffer) {
         const wad = parseWadDirectory(buffer);
-        displayWadInfo(file, buffer, wad, "firstPerson");
-        wadStatus.textContent = "Parsed " + file.name + ".";
+        const playable = displayWadInfo(file, buffer, wad, "firstPerson");
+        if (playable) {
+          packageErrorMessage = "";
+          if (demoLoadState === "ready") refreshPackageStatus();
+        }
+        wadStatus.textContent = playable ?
+          "Parsed " + file.name + "." :
+          "Parsed " + file.name + ", but no playable map was found.";
       })
       .catch(function (error) {
-        displayWadError(error.message);
+        displayWadError(error.message, "Selected WAD failed to parse: " + error.message);
       });
   }
 
@@ -2337,20 +2707,28 @@
     const demoUrl = new URL(DEFAULT_DEMO_WAD_URL, window.location.href);
 
     wadStatus.textContent = "Loading bundled demo map...";
+    setDemoLoadState("loading");
     fetch(demoUrl.href, { cache: "no-store" })
       .then(function (response) {
         if (!response.ok) {
-          throw new Error("HTTP " + response.status);
+          throw new Error(DEFAULT_DEMO_WAD_URL + " returned HTTP " + response.status);
         }
         return response.arrayBuffer();
       })
       .then(function (buffer) {
         const wad = parseWadDirectory(buffer);
-        displayWadInfo({ name: "demo_map.pwad" }, buffer, wad, "firstPerson");
-        wadStatus.textContent = "Bundled demo map loaded.";
+        const playable = displayWadInfo({ name: "demo_map.pwad" }, buffer, wad, "firstPerson");
+        if (playable) {
+          wadStatus.textContent = "Bundled demo map loaded.";
+          setDemoLoadState("ready");
+        } else {
+          wadStatus.textContent = "Bundled demo map has no playable map.";
+        }
       })
       .catch(function (error) {
-        displayWadError("default demo map unavailable: " + error.message);
+        displayWadError("default demo map unavailable: " + error.message,
+          "Missing or unreadable demo map: " + error.message);
+        setDemoLoadState("error", "Missing or unreadable demo map: " + error.message);
       });
   }
 
@@ -2358,10 +2736,13 @@
     const providerUrl = new URL("wasm/framebuffer_demo.js", window.location.href);
     const wasmUrl = new URL("wasm/framebuffer_demo.wasm", window.location.href);
 
+    wasmStatus.textContent = "Loading generated WASM provider...";
+    setWasmLoadState("loading");
     fetch(providerUrl.href, { cache: "no-store" })
       .then(function (response) {
         if (!response.ok) {
-          wasmStatus.textContent = "Generated WASM provider not built; JS fallback active.";
+          wasmStatus.textContent = "Generated WASM provider missing; JS fallback active.";
+          setWasmLoadState("error", "WASM provider missing; playable demo is ready.");
           return null;
         }
         return response.text();
@@ -2385,10 +2766,12 @@
               wasmProvider = createWasmProvider(window.Module);
               resolved = true;
               wasmStatus.textContent = "Seed7-generated WASM framebuffer active.";
+              setWasmLoadState("ready");
               renderActiveMode();
             } catch (error) {
               wasmProvider = null;
               wasmStatus.textContent = "Generated WASM provider rejected; JS fallback active: " + error.message;
+              setWasmLoadState("error", "WASM provider failed; playable demo is ready.");
             }
           },
           print: function (line) {
@@ -2409,19 +2792,56 @@
             URL.revokeObjectURL(objectUrl);
             if (!resolved) {
               wasmStatus.textContent = "Generated WASM provider loaded without framebuffer ABI.";
+              setWasmLoadState("error", "WASM provider loaded without framebuffer ABI; playable demo is ready.");
             }
           }, 500);
         };
         script.onerror = function () {
           URL.revokeObjectURL(objectUrl);
           wasmStatus.textContent = "Generated WASM provider failed to load; JS fallback active.";
+          setWasmLoadState("error", "WASM provider failed to load; playable demo is ready.");
         };
         script.src = objectUrl;
         document.body.appendChild(script);
       })
       .catch(function () {
         wasmStatus.textContent = "Generated WASM provider unavailable; JS fallback active.";
+        setWasmLoadState("error", "WASM provider unavailable; playable demo is ready.");
       });
+  }
+
+  function isFullscreenActive() {
+    return document.fullscreenElement === shell ||
+      document.fullscreenElement === gameStage ||
+      document.fullscreenElement === document.documentElement;
+  }
+
+  function updateFullscreenButton() {
+    fullscreenButton.textContent = isFullscreenActive() ? "Exit Fullscreen" : "Fullscreen";
+  }
+
+  function toggleFullscreen() {
+    if (!document.fullscreenEnabled) {
+      setPackageStatus("Fullscreen is not available in this browser.", "error");
+      return;
+    }
+    if (isFullscreenActive()) {
+      document.exitFullscreen().catch(function (error) {
+        setPackageStatus("Could not exit fullscreen: " + error.message, "error");
+      });
+    } else {
+      shell.requestFullscreen().then(function () {
+        focusGameControls();
+      }).catch(function (error) {
+        setPackageStatus("Could not enter fullscreen: " + error.message, "error");
+      });
+    }
+  }
+
+  function isUiControlTarget(target) {
+    return target instanceof HTMLElement &&
+      target.closest("button,input,label,summary,details") !== null &&
+      target !== canvas;
   }
 
   pauseButton.addEventListener("click", function () {
@@ -2443,6 +2863,10 @@
     }
   });
 
+  fullscreenButton.addEventListener("click", function () {
+    toggleFullscreen();
+  });
+
   framebufferModeButton.addEventListener("click", function () {
     setRenderMode("framebuffer");
   });
@@ -2459,12 +2883,35 @@
     loadWadFile(wadFileInput.files[0]);
   });
 
+  gameStage.addEventListener("mousedown", function (event) {
+    if (isUiControlTarget(event.target)) return;
+    focusGameControls();
+  });
+
   canvas.addEventListener("mousedown", function (event) {
     if (event.button !== 0) return;
+    if (!gameFocused) {
+      focusGameControls();
+      event.preventDefault();
+      return;
+    }
     if (isMapRenderMode(renderMode) && loadedMap !== null) {
       fireCurrentWeapon(loadedMap);
       event.preventDefault();
     }
+  });
+
+  canvas.addEventListener("focus", function () {
+    updateGameFocusState(true);
+  });
+
+  canvas.addEventListener("blur", function () {
+    updateGameFocusState(false);
+  });
+
+  document.addEventListener("fullscreenchange", function () {
+    updateFullscreenButton();
+    updateHudPanel(loadedMap);
   });
 
   window.addEventListener("keydown", function (event) {
@@ -2481,7 +2928,18 @@
       event.code === "ArrowRight" ||
       event.code === "Space";
 
+    if (event.altKey && event.code === "Enter") {
+      toggleFullscreen();
+      event.preventDefault();
+      return;
+    }
     if (!controlledKey) return;
+    if (isUiControlTarget(event.target)) return;
+    if (!gameFocused) {
+      pressedKeys.clear();
+      event.preventDefault();
+      return;
+    }
     if (paused && isMapRenderMode(renderMode) && loadedMap !== null) {
       pressedKeys.clear();
       event.preventDefault();
@@ -2490,6 +2948,12 @@
     if (event.code === "Space" && isMapRenderMode(renderMode) && loadedMap !== null) {
       if (isPlayerDead()) {
         interactionMessage = "Use blocked: player dead.";
+        renderCurrentMapMode(loadedMap);
+        event.preventDefault();
+        return;
+      }
+      if (isLevelComplete(loadedMap)) {
+        interactionMessage = "Level complete.";
         renderCurrentMapMode(loadedMap);
         event.preventDefault();
         return;
@@ -2504,7 +2968,7 @@
       event.preventDefault();
       return;
     }
-    if (isPlayerDead() && isMapRenderMode(renderMode)) {
+    if ((isPlayerDead() || isLevelComplete(loadedMap)) && isMapRenderMode(renderMode)) {
       pressedKeys.clear();
       event.preventDefault();
       return;

@@ -1,0 +1,42 @@
+# Synthetic PWAD for Task 15 level-exit/playable-loop tests.
+# Header: PWAD, 6 lumps, directory offset 250.
+# Map: E1M1 marker followed by THINGS, LINEDEFS, SIDEDEFS, VERTEXES, SECTORS.
+# Data is non-copyright fake geometry: one square sector, one player start
+# facing the exit, one off-center non-player thing, and a use-activated
+# synthetic exit line.
+# Exit special: north wall linedef special 901.
+50 57 41 44 06 00 00 00 fa 00 00 00
+
+# THINGS: player start at (128, 96), then a synthetic enemy/object at (80, 144).
+80 00 60 00 5a 00 01 00 07 00
+50 00 90 00 00 00 bc 0b 07 00
+
+# LINEDEFS: four one-sided solid walls around vertexes 0..3.
+# The third record is the north wall and uses synthetic exit special 901.
+00 00 01 00 01 00 00 00 00 00 00 00 ff ff
+01 00 02 00 01 00 00 00 00 00 01 00 ff ff
+02 00 03 00 01 00 85 03 00 00 02 00 ff ff
+03 00 00 00 01 00 00 00 00 00 03 00 ff ff
+
+# SIDEDEFS: four identical synthetic sidedefs referencing sector 0.
+00 00 00 00 55 50 50 45 52 31 00 00 4c 4f 57 45 52 31 00 00 4d 49 44 31 00 00 00 00 00 00
+00 00 00 00 55 50 50 45 52 31 00 00 4c 4f 57 45 52 31 00 00 4d 49 44 31 00 00 00 00 00 00
+00 00 00 00 55 50 50 45 52 31 00 00 4c 4f 57 45 52 31 00 00 4d 49 44 31 00 00 00 00 00 00
+00 00 00 00 55 50 50 45 52 31 00 00 4c 4f 57 45 52 31 00 00 4d 49 44 31 00 00 00 00 00 00
+
+# VERTEXES: square from (0,0) to (256,256).
+00 00 00 00
+00 01 00 00
+00 01 00 01
+00 00 00 01
+
+# SECTORS: one sector, floor 0, ceiling 128, light 160.
+00 00 80 00 46 4c 4f 4f 52 31 00 00 43 45 49 4c 31 00 00 00 a0 00 00 00 00 00
+
+# Directory.
+00 00 00 00 00 00 00 00 45 31 4d 31 00 00 00 00
+0c 00 00 00 14 00 00 00 54 48 49 4e 47 53 00 00
+20 00 00 00 38 00 00 00 4c 49 4e 45 44 45 46 53
+58 00 00 00 78 00 00 00 53 49 44 45 44 45 46 53
+d0 00 00 00 10 00 00 00 56 45 52 54 45 58 45 53
+e0 00 00 00 1a 00 00 00 53 45 43 54 4f 52 53 00
