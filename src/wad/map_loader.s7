@@ -1,0 +1,353 @@
+(********************************************************************)
+(*  map_loader.s7                                                   *)
+(*                                                                  *)
+(*  Task 4: load one Doom map from map marker and map data lumps.    *)
+(*  This does not render, load textures, or implement gameplay.      *)
+(********************************************************************)
+
+$ include "seed7_05.s7i";
+  include "stdio.s7i";
+  include "bytedata.s7i";
+  include "wad_types.s7";
+  include "wad_io.s7";
+  include "map_types.s7";
+
+const integer: THING_SIZE is 10;
+const integer: LINEDEF_SIZE is 14;
+const integer: SIDEDEF_SIZE is 30;
+const integer: VERTEX_SIZE is 4;
+const integer: SECTOR_SIZE is 26;
+
+const func integer: int16_le (in string: data, in integer: offset) is func
+  result
+    var integer: value is 0;
+  begin
+    value := bytes2Int(data[offset fixLen 2], SIGNED, LE);
+  end func;
+
+const func boolean: is_supported_map_marker (in string: lumpName) is func
+  result
+    var boolean: supported is FALSE;
+  begin
+    supported := lumpName = "E1M1" or lumpName = "MAP01";
+  end func;
+
+const func boolean: is_digit_char (in char: ch) is func
+  result
+    var boolean: digit is FALSE;
+  begin
+    digit := ch >= '0' and ch <= '9';
+  end func;
+
+const func boolean: is_map_marker_boundary (in string: lumpName) is func
+  result
+    var boolean: boundary is FALSE;
+  begin
+    boundary := is_supported_map_marker(lumpName) or
+        length(lumpName) = 4 and lumpName[1] = 'E' and
+        is_digit_char(lumpName[2]) and lumpName[3] = 'M' and
+        is_digit_char(lumpName[4]) or
+        length(lumpName) = 5 and lumpName[1 fixLen 3] = "MAP" and
+        is_digit_char(lumpName[4]) and is_digit_char(lumpName[5]);
+  end func;
+
+const func integer: find_first_supported_map (in wadDirectory: wad) is func
+  result
+    var integer: foundIndex is 0;
+  local
+    var integer: index is 1;
+  begin
+    while foundIndex = 0 and index <= length(wad.lumps) do
+      if is_supported_map_marker(wad.lumps[index].name) then
+        foundIndex := index;
+      end if;
+      incr(index);
+    end while;
+  end func;
+
+const func integer: find_map_lump_after_marker (in wadDirectory: wad,
+    in integer: markerIndex, in string: lumpName) is func
+  result
+    var integer: foundIndex is 0;
+  local
+    var integer: index is 0;
+    var string: normalizedName is "";
+  begin
+    normalizedName := normalize_lump_name(lumpName);
+    index := markerIndex + 1;
+    while foundIndex = 0 and index <= length(wad.lumps) and
+        not is_map_marker_boundary(wad.lumps[index].name) do
+      if wad.lumps[index].name = normalizedName then
+        foundIndex := index;
+      end if;
+      incr(index);
+    end while;
+  end func;
+
+const func boolean: read_map_lump_data (in string: fileName,
+    in wadDirectory: wad, in integer: markerIndex, in string: lumpName,
+    inout string: data) is func
+  result
+    var boolean: okay is FALSE;
+  local
+    var integer: lumpIndex is 0;
+  begin
+    lumpIndex := find_map_lump_after_marker(wad, markerIndex, lumpName);
+    if lumpIndex = 0 then
+      writeln("*** Missing map lump " <& normalize_lump_name(lumpName) <&
+          " after map marker " <& wad.lumps[markerIndex].name);
+    else
+      okay := read_wad_lump_data(fileName, wad.lumps[lumpIndex], data);
+    end if;
+  end func;
+
+const func boolean: check_lump_record_size (in string: lumpName,
+    in string: data, in integer: recordSize) is func
+  result
+    var boolean: okay is FALSE;
+  begin
+    if length(data) rem recordSize <> 0 then
+      writeln("*** Lump " <& lumpName <& " has invalid size " <&
+          length(data) <& " for record size " <& recordSize);
+    else
+      okay := TRUE;
+    end if;
+  end func;
+
+const func boolean: parse_things (in string: data,
+    inout array mapThing: things) is func
+  result
+    var boolean: okay is FALSE;
+  local
+    var integer: offset is 1;
+    var mapThing: thing is mapThing.value;
+  begin
+    things := 0 times mapThing.value;
+    if check_lump_record_size("THINGS", data, THING_SIZE) then
+      while offset <= length(data) do
+        thing.x := int16_le(data, offset);
+        thing.y := int16_le(data, offset + 2);
+        thing.angle := int16_le(data, offset + 4);
+        thing.thingType := int16_le(data, offset + 6);
+        thing.flags := int16_le(data, offset + 8);
+        things &:= thing;
+        offset +:= THING_SIZE;
+      end while;
+      okay := TRUE;
+    end if;
+  end func;
+
+const func boolean: parse_linedefs (in string: data,
+    inout array mapLinedef: linedefs) is func
+  result
+    var boolean: okay is FALSE;
+  local
+    var integer: offset is 1;
+    var mapLinedef: linedef is mapLinedef.value;
+  begin
+    linedefs := 0 times mapLinedef.value;
+    if check_lump_record_size("LINEDEFS", data, LINEDEF_SIZE) then
+      while offset <= length(data) do
+        linedef.startVertex := int16_le(data, offset);
+        linedef.endVertex := int16_le(data, offset + 2);
+        linedef.flags := int16_le(data, offset + 4);
+        linedef.specialType := int16_le(data, offset + 6);
+        linedef.sectorTag := int16_le(data, offset + 8);
+        linedef.rightSidedef := int16_le(data, offset + 10);
+        linedef.leftSidedef := int16_le(data, offset + 12);
+        linedefs &:= linedef;
+        offset +:= LINEDEF_SIZE;
+      end while;
+      okay := TRUE;
+    end if;
+  end func;
+
+const func boolean: parse_sidedefs (in string: data,
+    inout array mapSidedef: sidedefs) is func
+  result
+    var boolean: okay is FALSE;
+  local
+    var integer: offset is 1;
+    var mapSidedef: sidedef is mapSidedef.value;
+  begin
+    sidedefs := 0 times mapSidedef.value;
+    if check_lump_record_size("SIDEDEFS", data, SIDEDEF_SIZE) then
+      while offset <= length(data) do
+        sidedef.xOffset := int16_le(data, offset);
+        sidedef.yOffset := int16_le(data, offset + 2);
+        sidedef.upperTexture := wad_lump_name(data[offset + 4 fixLen 8]);
+        sidedef.lowerTexture := wad_lump_name(data[offset + 12 fixLen 8]);
+        sidedef.middleTexture := wad_lump_name(data[offset + 20 fixLen 8]);
+        sidedef.sector := int16_le(data, offset + 28);
+        sidedefs &:= sidedef;
+        offset +:= SIDEDEF_SIZE;
+      end while;
+      okay := TRUE;
+    end if;
+  end func;
+
+const func boolean: parse_vertexes (in string: data,
+    inout array mapVertex: vertexes) is func
+  result
+    var boolean: okay is FALSE;
+  local
+    var integer: offset is 1;
+    var mapVertex: vertex is mapVertex.value;
+  begin
+    vertexes := 0 times mapVertex.value;
+    if check_lump_record_size("VERTEXES", data, VERTEX_SIZE) then
+      while offset <= length(data) do
+        vertex.x := int16_le(data, offset);
+        vertex.y := int16_le(data, offset + 2);
+        vertexes &:= vertex;
+        offset +:= VERTEX_SIZE;
+      end while;
+      okay := TRUE;
+    end if;
+  end func;
+
+const func boolean: parse_sectors (in string: data,
+    inout array mapSector: sectors) is func
+  result
+    var boolean: okay is FALSE;
+  local
+    var integer: offset is 1;
+    var mapSector: sector is mapSector.value;
+  begin
+    sectors := 0 times mapSector.value;
+    if check_lump_record_size("SECTORS", data, SECTOR_SIZE) then
+      while offset <= length(data) do
+        sector.floorHeight := int16_le(data, offset);
+        sector.ceilingHeight := int16_le(data, offset + 2);
+        sector.floorTexture := wad_lump_name(data[offset + 4 fixLen 8]);
+        sector.ceilingTexture := wad_lump_name(data[offset + 12 fixLen 8]);
+        sector.lightLevel := int16_le(data, offset + 20);
+        sector.specialType := int16_le(data, offset + 22);
+        sector.tag := int16_le(data, offset + 24);
+        sectors &:= sector;
+        offset +:= SECTOR_SIZE;
+      end while;
+      okay := TRUE;
+    end if;
+  end func;
+
+const proc: find_player_start (inout doomMap: mapData) is func
+  local
+    var integer: index is 1;
+  begin
+    mapData.hasPlayerStart := FALSE;
+    mapData.playerStart := mapThing.value;
+    while not mapData.hasPlayerStart and index <= length(mapData.things) do
+      if mapData.things[index].thingType = 1 then
+        mapData.playerStart := mapData.things[index];
+        mapData.hasPlayerStart := TRUE;
+      end if;
+      incr(index);
+    end while;
+  end func;
+
+const func boolean: load_map (in string: fileName, inout doomMap: mapData) is func
+  result
+    var boolean: okay is FALSE;
+  local
+    var wadDirectory: wad is wadDirectory.value;
+    var integer: markerIndex is 0;
+    var string: data is "";
+  begin
+    mapData := doomMap.value;
+    if read_wad_directory(fileName, wad) then
+      markerIndex := find_first_supported_map(wad);
+      if markerIndex = 0 then
+        writeln("*** No supported map marker found. Expected E1M1 or MAP01.");
+      else
+        mapData.name := wad.lumps[markerIndex].name;
+        okay := TRUE;
+
+        if okay and read_map_lump_data(fileName, wad, markerIndex, "THINGS", data) then
+          okay := parse_things(data, mapData.things);
+        else
+          okay := FALSE;
+        end if;
+
+        if okay and read_map_lump_data(fileName, wad, markerIndex, "LINEDEFS", data) then
+          okay := parse_linedefs(data, mapData.linedefs);
+        else
+          okay := FALSE;
+        end if;
+
+        if okay and read_map_lump_data(fileName, wad, markerIndex, "SIDEDEFS", data) then
+          okay := parse_sidedefs(data, mapData.sidedefs);
+        else
+          okay := FALSE;
+        end if;
+
+        if okay and read_map_lump_data(fileName, wad, markerIndex, "VERTEXES", data) then
+          okay := parse_vertexes(data, mapData.vertexes);
+        else
+          okay := FALSE;
+        end if;
+
+        if okay and read_map_lump_data(fileName, wad, markerIndex, "SECTORS", data) then
+          okay := parse_sectors(data, mapData.sectors);
+        else
+          okay := FALSE;
+        end if;
+
+        if okay then
+          find_player_start(mapData);
+          if not mapData.hasPlayerStart then
+            writeln("*** No player start thing of type 1 found in map " <& mapData.name);
+            okay := FALSE;
+          end if;
+        end if;
+      end if;
+    end if;
+  end func;
+
+const proc: print_map_statistics (in doomMap: mapData) is func
+  begin
+    writeln("map_name=" <& mapData.name);
+    writeln("vertex_count=" <& length(mapData.vertexes));
+    writeln("linedef_count=" <& length(mapData.linedefs));
+    writeln("sidedef_count=" <& length(mapData.sidedefs));
+    writeln("sector_count=" <& length(mapData.sectors));
+    writeln("thing_count=" <& length(mapData.things));
+    if mapData.hasPlayerStart then
+      writeln("player_start_x=" <& mapData.playerStart.x);
+      writeln("player_start_y=" <& mapData.playerStart.y);
+      writeln("player_start_angle=" <& mapData.playerStart.angle);
+    else
+      writeln("player_start=missing");
+    end if;
+  end func;
+
+const proc: show_usage is func
+  begin
+    writeln("Usage:");
+    writeln("  node seed7/bin/s7.js -l seed7/lib -l src/wad src/wad/map_loader.s7 <wad-file>");
+    writeln("");
+    writeln("Loads the first supported map marker, E1M1 or MAP01, and prints map statistics.");
+  end func;
+
+const proc: main is func
+  local
+    var array string: args is 0 times "";
+    var doomMap: mapData is doomMap.value;
+    var string: wadFileName is "";
+    var boolean: okay is TRUE;
+  begin
+    args := argv(PROGRAM);
+    if length(args) = 1 and args[1] <> "--help" then
+      wadFileName := args[1];
+    else
+      if length(args) <> 0 and (length(args) <> 1 or args[1] <> "--help") then
+        writeln("*** Expected exactly one WAD file argument.");
+      end if;
+      show_usage;
+      okay := FALSE;
+    end if;
+
+    if okay and load_map(wadFileName, mapData) then
+      print_map_statistics(mapData);
+    end if;
+  end func;

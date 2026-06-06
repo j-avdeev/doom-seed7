@@ -204,3 +204,20 @@ node seed7/bin/s7.js -l seed7/lib -l src/wad src/wad/wad_reader.s7 tests/wad_tes
 ```
 
 See `docs/wad-format.md` for the parsed fields and expected output.
+
+## WAD Map Loader
+
+Task 4 adds a data-only Doom map lump loader. It finds the first supported map
+marker, `E1M1` or `MAP01`, then loads `THINGS`, `LINEDEFS`, `SIDEDEFS`,
+`VERTEXES`, and `SECTORS` into Seed7 records. It identifies the first type-1
+player start and prints map statistics. It does not render, load textures, or
+implement gameplay.
+
+Generate and parse the synthetic map PWAD:
+
+```bash
+node seed7/bin/s7.js -l seed7/lib tests/wad_tests/make_minimal_wad.s7 --map
+node seed7/bin/s7.js -l seed7/lib -l src/wad src/wad/map_loader.s7 tests/wad_tests/minimal_map.pwad
+```
+
+See `docs/map-structures.md` for loaded record fields and expected output.

@@ -49,15 +49,20 @@ const proc: show_usage is func
   begin
     writeln("Usage:");
     writeln("  node seed7/bin/s7.js -l seed7/lib tests/wad_tests/make_minimal_wad.s7 [output-wad]");
+    writeln("  node seed7/bin/s7.js -l seed7/lib tests/wad_tests/make_minimal_wad.s7 --map [output-wad]");
     writeln("");
     writeln("Default output:");
     writeln("  tests/wad_tests/minimal.pwad");
+    writeln("");
+    writeln("Map fixture output:");
+    writeln("  tests/wad_tests/minimal_map.pwad");
   end func;
 
 const proc: main is func
   local
     var array string: args is 0 times "";
     var string: outName is "tests/wad_tests/minimal.pwad";
+    var string: fixtureName is "tests/wad_tests/minimal_pwad.hex";
     var string: hexData is "";
     var file: outFile is STD_NULL;
   begin
@@ -65,13 +70,19 @@ const proc: main is func
     if length(args) >= 1 then
       if args[1] = "--help" then
         show_usage;
+      elsif args[1] = "--map" then
+        outName := "tests/wad_tests/minimal_map.pwad";
+        fixtureName := "tests/wad_tests/minimal_map_pwad.hex";
+        if length(args) >= 2 then
+          outName := args[2];
+        end if;
       else
         outName := args[1];
       end if;
     end if;
 
     if length(args) = 0 or args[1] <> "--help" then
-      hexData := read_hex_fixture("tests/wad_tests/minimal_pwad.hex");
+      hexData := read_hex_fixture(fixtureName);
       if hexData <> "" then
         outFile := open(outName, "w");
         if outFile = STD_NULL then

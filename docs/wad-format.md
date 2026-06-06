@@ -3,6 +3,8 @@
 Task 3 implements only the WAD header and lump directory. It does not load maps,
 textures, rendering data, or gameplay state.
 
+Task 4 map lump loading is documented separately in `docs/map-structures.md`.
+
 ## Header
 
 A Doom WAD starts with a 12-byte little-endian header:
@@ -66,4 +68,11 @@ directory_offset=16
   2 name=EMPTY offset=0 size=0
   3 name=END offset=0 size=0
 find_lump_by_name name=TEST index=1 offset=12 size=4
+```
+
+The same generator can produce the Task 4 map fixture without changing the
+Task 3 default fixture:
+
+```bash
+node seed7/bin/s7.js -l seed7/lib tests/wad_tests/make_minimal_wad.s7 --map
 ```

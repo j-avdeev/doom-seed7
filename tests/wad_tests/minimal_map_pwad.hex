@@ -1,0 +1,37 @@
+# Synthetic PWAD for Task 4 map loader tests.
+# Header: PWAD, 6 lumps, directory offset 240.
+# Map: E1M1 marker followed by THINGS, LINEDEFS, SIDEDEFS, VERTEXES, SECTORS.
+# Data is non-copyright fake geometry: one square sector and one player start.
+50 57 41 44 06 00 00 00 f0 00 00 00
+
+# THINGS: one player start at (128, 64), angle 90, type 1, flags 7.
+80 00 40 00 5a 00 01 00 07 00
+
+# LINEDEFS: four one-sided solid walls around vertexes 0..3.
+00 00 01 00 01 00 00 00 00 00 00 00 ff ff
+01 00 02 00 01 00 00 00 00 00 01 00 ff ff
+02 00 03 00 01 00 00 00 00 00 02 00 ff ff
+03 00 00 00 01 00 00 00 00 00 03 00 ff ff
+
+# SIDEDEFS: four identical synthetic sidedefs referencing sector 0.
+00 00 00 00 55 50 50 45 52 31 00 00 4c 4f 57 45 52 31 00 00 4d 49 44 31 00 00 00 00 00 00
+00 00 00 00 55 50 50 45 52 31 00 00 4c 4f 57 45 52 31 00 00 4d 49 44 31 00 00 00 00 00 00
+00 00 00 00 55 50 50 45 52 31 00 00 4c 4f 57 45 52 31 00 00 4d 49 44 31 00 00 00 00 00 00
+00 00 00 00 55 50 50 45 52 31 00 00 4c 4f 57 45 52 31 00 00 4d 49 44 31 00 00 00 00 00 00
+
+# VERTEXES: square from (0,0) to (256,256).
+00 00 00 00
+00 01 00 00
+00 01 00 01
+00 00 00 01
+
+# SECTORS: one sector, floor 0, ceiling 128, light 160.
+00 00 80 00 46 4c 4f 4f 52 31 00 00 43 45 49 4c 31 00 00 00 a0 00 00 00 00 00
+
+# Directory.
+00 00 00 00 00 00 00 00 45 31 4d 31 00 00 00 00
+0c 00 00 00 0a 00 00 00 54 48 49 4e 47 53 00 00
+16 00 00 00 38 00 00 00 4c 49 4e 45 44 45 46 53
+4e 00 00 00 78 00 00 00 53 49 44 45 44 45 46 53
+c6 00 00 00 10 00 00 00 56 45 52 54 45 58 45 53
+d6 00 00 00 1a 00 00 00 53 45 43 54 4f 52 53 00

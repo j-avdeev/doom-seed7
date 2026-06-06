@@ -1,0 +1,58 @@
+(********************************************************************)
+(*  map_types.s7                                                    *)
+(*                                                                  *)
+(*  Doom map lump records loaded by Task 4.                         *)
+(********************************************************************)
+
+const type: mapThing is new struct
+    var integer: x is 0;
+    var integer: y is 0;
+    var integer: angle is 0;
+    var integer: thingType is 0;
+    var integer: flags is 0;
+  end struct;
+
+const type: mapLinedef is new struct
+    var integer: startVertex is 0;
+    var integer: endVertex is 0;
+    var integer: flags is 0;
+    var integer: specialType is 0;
+    var integer: sectorTag is 0;
+    var integer: rightSidedef is 0;
+    var integer: leftSidedef is 0;
+  end struct;
+
+const type: mapSidedef is new struct
+    var integer: xOffset is 0;
+    var integer: yOffset is 0;
+    var string: upperTexture is "";
+    var string: lowerTexture is "";
+    var string: middleTexture is "";
+    var integer: sector is 0;
+  end struct;
+
+const type: mapVertex is new struct
+    var integer: x is 0;
+    var integer: y is 0;
+  end struct;
+
+const type: mapSector is new struct
+    var integer: floorHeight is 0;
+    var integer: ceilingHeight is 0;
+    var string: floorTexture is "";
+    var string: ceilingTexture is "";
+    var integer: lightLevel is 0;
+    var integer: specialType is 0;
+    var integer: tag is 0;
+  end struct;
+
+const type: doomMap is new struct
+    var string: name is "";
+    var array mapThing: things is 0 times mapThing.value;
+    var array mapLinedef: linedefs is 0 times mapLinedef.value;
+    var array mapSidedef: sidedefs is 0 times mapSidedef.value;
+    var array mapVertex: vertexes is 0 times mapVertex.value;
+    var array mapSector: sectors is 0 times mapSector.value;
+    var boolean: hasPlayerStart is FALSE;
+    var mapThing: playerStart is mapThing.value;
+  end struct;
