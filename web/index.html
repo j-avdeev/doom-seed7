@@ -18,6 +18,19 @@
     <canvas id="framebuffer" width="320" height="200" aria-label="320 by 200 software framebuffer"></canvas>
     <output id="status">Frame 0</output>
     <output id="wasmStatus">Generated WASM provider not loaded.</output>
+    <section class="wad-panel" aria-labelledby="wadTitle">
+      <div class="wad-panel__header">
+        <h2 id="wadTitle">WAD</h2>
+        <label class="file-control">
+          <span>Choose file</span>
+          <input id="wadFileInput" type="file" accept=".wad,.WAD,application/octet-stream" />
+        </label>
+      </div>
+      <output id="wadStatus">No WAD selected.</output>
+      <dl id="wadSummary" class="wad-summary" aria-live="polite"></dl>
+      <div id="wadLumps" class="wad-lumps" aria-live="polite"></div>
+      <dl id="mapSummary" class="wad-summary" aria-live="polite"></dl>
+    </section>
   </main>
   <script src="main.js"></script>
 </body>

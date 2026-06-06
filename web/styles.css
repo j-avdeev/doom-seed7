@@ -17,7 +17,7 @@ body {
   min-height: 100vh;
   margin: 0 auto;
   display: grid;
-  grid-template-rows: auto auto auto 1fr;
+  grid-template-rows: auto auto auto auto 1fr;
   align-content: start;
   gap: 12px;
   padding: 16px 0;
@@ -60,6 +60,12 @@ button:hover {
   background: #2a3531;
 }
 
+button:focus-visible,
+.file-control:focus-within {
+  outline: 2px solid #77d0bd;
+  outline-offset: 2px;
+}
+
 canvas {
   width: min(100%, 640px);
   aspect-ratio: 16 / 10;
@@ -79,8 +85,102 @@ output {
   color: #77d0bd;
 }
 
+.wad-panel {
+  display: grid;
+  gap: 10px;
+  border-top: 1px solid #2d3835;
+  padding-top: 12px;
+}
+
+.wad-panel__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+h2 {
+  margin: 0;
+  font-size: 16px;
+  line-height: 1.25;
+}
+
+h3 {
+  margin: 0 0 6px;
+  color: #dce7e1;
+  font-size: 14px;
+  line-height: 1.25;
+}
+
+.file-control {
+  min-height: 34px;
+  border: 1px solid #66756f;
+  border-radius: 6px;
+  background: #202926;
+  color: #eef3ef;
+  display: inline-grid;
+  place-items: center;
+  padding: 0 12px;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.file-control:hover {
+  background: #2a3531;
+}
+
+.file-control input {
+  position: absolute;
+  inline-size: 1px;
+  block-size: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.wad-summary {
+  display: grid;
+  grid-template-columns: minmax(110px, max-content) minmax(0, 1fr);
+  gap: 6px 12px;
+  margin: 0;
+  color: #aab6b0;
+  font-size: 14px;
+}
+
+.wad-summary dt {
+  color: #dce7e1;
+}
+
+.wad-summary dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.wad-lumps {
+  color: #aab6b0;
+  font-size: 13px;
+}
+
+.wad-lumps ol {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 4px 12px;
+  margin: 0;
+  padding-left: 20px;
+}
+
+.wad-lumps li {
+  font-family: ui-monospace, "Cascadia Mono", "Segoe UI Mono", monospace;
+  overflow-wrap: anywhere;
+}
+
 @media (max-width: 520px) {
   .toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .wad-panel__header {
     align-items: stretch;
     flex-direction: column;
   }
@@ -91,5 +191,14 @@ output {
 
   button {
     flex: 1;
+  }
+
+  .file-control {
+    width: auto;
+  }
+
+  .wad-summary {
+    grid-template-columns: 1fr;
+    gap: 2px;
   }
 }

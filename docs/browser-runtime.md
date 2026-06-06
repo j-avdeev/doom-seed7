@@ -1,8 +1,9 @@
 # Seed7 Browser WebAssembly Feasibility
 
 This note records the current feasibility of compiling Seed7 programs to browser
-WebAssembly. It is scoped to the software framebuffer milestone and does not add
-Doom logic, WAD parsing, pk4 parsing, or game runtime work.
+WebAssembly and the current browser WAD upload bridge. It is scoped to the
+software framebuffer and data-inspection milestones and does not add Doom
+rendering, textures, audio, pk4 parsing, enemies, weapons, combat, or gameplay.
 
 ## Current Result
 
@@ -43,6 +44,25 @@ to the generated WASM provider when the ABI is ready. `web/main.js` calls
 `Module.HEAPU8` into Canvas `ImageData`, and displays the WASM checksum in the
 frame status. If the generated provider cannot be fetched or its ABI is invalid,
 the JavaScript fallback remains active.
+
+Task 5 adds a WAD file picker to `web/index.html`. The selected file is read in
+`web/main.js` with `File.arrayBuffer()`. The current bridge parses those bytes
+on the JavaScript side instead of changing the working framebuffer WASM module.
+This keeps the Task 2.5 Seed7-generated WASM framebuffer path stable while still
+exercising the browser upload flow. The browser bridge mirrors the Task 3 and
+Task 4 data fields:
+
+- WAD magic: `IWAD` or `PWAD`
+- lump count
+- directory offset
+- lump offsets, sizes, and normalized 8-byte lump names
+- first supported map marker: `E1M1` or `MAP01`
+- map lump statistics for `THINGS`, `LINEDEFS`, `SIDEDEFS`, `VERTEXES`, and
+  `SECTORS`, when the selected WAD contains a complete supported map
+
+The upload path does not bundle, fetch, or require copyrighted WAD files. User
+files remain in browser memory. No map rendering or gameplay is started by this
+milestone.
 
 ## How Seed7 Compiles To C
 
@@ -160,6 +180,13 @@ fetches `web/wasm/framebuffer_demo.js`; when present, that generated Seed7 WASM
 module is initialized without running `main`, wrapped with `cwrap`, and used as
 the per-frame pixel provider.
 
+The same page now includes a `WAD` file input. Selecting a `.wad` file reads the
+file as an `ArrayBuffer`, validates the WAD header and directory, and updates the
+page with the parsed WAD type, lump count, directory offset, file size, and the
+first 24 lump names with offsets and sizes. If an `E1M1` or `MAP01` marker is
+present and the required map lumps are valid, the page also displays vertex,
+linedef, sidedef, sector, thing, and player-start statistics.
+
 The expected interpreted and Node-generated checksum proof line remains:
 
 ```text
@@ -235,3 +262,18 @@ Headless Chrome smoke at `http://localhost:8090/web/index.html` verified:
 wasm ok frame=12->21 checksum=261054247 status="Frame 12 (WASM checksum 261054247)" wasmStatus="Seed7-generated WASM framebuffer active."
 fallback ok frame=11->20 checksum=169447138 status="Frame 11 (JS fallback)" wasmStatus="Generated WASM provider not built; JS fallback active."
 ```
+
+Task 5 verification should include:
+
+```powershell
+node seed7/bin/s7.js -l seed7/lib tests/wad_tests/make_minimal_wad.s7
+node seed7/bin/s7.js -l seed7/lib -l src/wad src/wad/wad_reader.s7 tests/wad_tests/minimal.pwad --find TEST
+node seed7/bin/s7.js -l seed7/lib tests/wad_tests/make_minimal_wad.s7 --map
+node seed7/bin/s7.js -l seed7/lib -l src/wad src/wad/map_loader.s7 tests/wad_tests/minimal_map.pwad
+```
+
+Then serve the browser demo, select `tests/wad_tests/minimal.pwad` and
+`tests/wad_tests/minimal_map.pwad`, and confirm that the framebuffer keeps
+animating while the WAD panel reports parsed WAD metadata. For the map fixture,
+the expected browser map marker is `E1M1` and the expected counts are one thing,
+four linedefs, four sidedefs, four vertexes, and one sector.
