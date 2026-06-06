@@ -2,8 +2,8 @@
 
 This note records the current feasibility of compiling Seed7 programs to browser
 WebAssembly and the current browser WAD upload bridge. It is scoped to the
-software framebuffer, WAD inspection, and top-down map-debug milestones and does
-not add first-person Doom rendering, textures, audio, pk4 parsing, enemies,
+software framebuffer, WAD inspection, top-down map-debug, and first-person
+prototype milestones and does not add textures, audio, pk4 parsing, enemies,
 weapons, combat, or gameplay.
 
 ## Current Result
@@ -47,9 +47,11 @@ frame status. If the generated provider cannot be fetched or its ABI is invalid,
 the JavaScript fallback remains active.
 
 Task 5 adds a WAD file picker to `web/index.html`. The selected file is read in
-`web/main.js` with `File.arrayBuffer()`. Task 6 extends that same bridge with a
-temporary JavaScript top-down map renderer instead of changing the working
-framebuffer WASM module. This keeps the Task 2.5 Seed7-generated WASM
+`web/main.js` with `File.arrayBuffer()`. Tasks 6 and 7 extend that same bridge
+with a temporary JavaScript top-down map renderer and movable debug player
+instead of changing the working framebuffer WASM module. Task 8 adds a
+browser-only first-person projection prototype on top of that same parsed
+geometry and player state. This keeps the Task 2.5 Seed7-generated WASM
 framebuffer path stable while still exercising the browser upload flow. The
 browser bridge mirrors the Task 3 and Task 4 data fields:
 
@@ -62,6 +64,8 @@ browser bridge mirrors the Task 3 and Task 4 data fields:
   `SECTORS`, when the selected WAD contains a complete supported map
 - top-down geometry data from `VERTEXES`, `LINEDEFS`, and the type-1 player
   start, rendered into the existing 320x200 Canvas `ImageData`
+- first-person untextured wall columns from solid linedef ray intersections,
+  sharing the same player `x`, `y`, and `angle`
 
 The upload path does not bundle, fetch, or require copyrighted WAD files. User
 files remain in browser memory. No gameplay is started by this milestone.
@@ -189,7 +193,7 @@ first 24 lump names with offsets and sizes. If an `E1M1` or `MAP01` marker is
 present and the required map lumps are valid, the page also displays vertex,
 linedef, sidedef, sector, thing, and player-start statistics, then switches the
 Canvas mode to the top-down map view. The mode control can switch back to the
-original framebuffer demo.
+original framebuffer demo or into the first-person prototype.
 
 The expected interpreted and Node-generated checksum proof line remains:
 
@@ -289,3 +293,9 @@ player-start marker with an angle arrow. Switching back to `Framebuffer` should
 resume the generated Seed7/WASM framebuffer provider when present, or the
 JavaScript fallback when the provider is unavailable. See
 `docs/renderer-debug.md` for the debug-renderer behavior.
+
+Task 8 verification should additionally click `First-person`, confirm the Canvas
+mode label changes to `Mode: first-person prototype`, confirm flat ceiling/floor
+bands and untextured wall columns are visible, confirm movement/turning updates
+the player perspective, and confirm `Top-down Map` and `Framebuffer` still work.
+See `docs/renderer-options.md` for the prototype renderer approach.

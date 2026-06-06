@@ -222,13 +222,13 @@ node seed7/bin/s7.js -l seed7/lib -l src/wad src/wad/map_loader.s7 tests/wad_tes
 
 See `docs/map-structures.md` for loaded record fields and expected output.
 
-## Browser Top-Down Map Viewer
+## Browser Map And First-Person Renderer
 
-Tasks 6 and 7 add a debug-only browser map view on the existing 320x200 Canvas.
+Tasks 6 through 8 add browser map rendering on the existing 320x200 Canvas.
 Select `tests/wad_tests/minimal_map.pwad` in `web/index.html` to render the
-loaded `E1M1` vertexes, linedefs, and movable player marker. The Canvas mode
-control switches between the original framebuffer demo and the top-down map
-view.
+loaded `E1M1` vertexes, linedefs, and movable player state. The Canvas mode
+control switches between the original framebuffer demo, the first-person
+prototype, and the top-down debug map view.
 
 Generate the local map fixture:
 
@@ -274,23 +274,27 @@ In the page:
    four sidedefs, one sector, one thing, and player start `128, 64 angle=90`.
 4. The page switches to `Mode: top-down map view` automatically. If needed,
    click `Top-down Map`.
-5. Click `Framebuffer` to return to the generated WASM framebuffer demo.
+5. Click `First-person` to render flat ceiling/floor bands and untextured wall
+   columns from the player perspective.
+6. Click `Framebuffer` to return to the generated WASM framebuffer demo.
 
 This is a temporary JavaScript bridge that preserves the Seed7-generated WASM
-framebuffer provider. In top-down mode, `W`/`S` move forward and backward,
-`A`/`D` strafe, and `ArrowLeft`/`ArrowRight` or `Q`/`E` turn. One-sided and
-explicitly blocking linedefs use conservative debug collision. This does not add
-first-person rendering, textures, enemies, weapons, combat, or gameplay.
+framebuffer provider. In top-down and first-person modes, `W`/`S` move forward
+and backward, `A`/`D` strafe, and `ArrowLeft`/`ArrowRight` or `Q`/`E` turn.
+One-sided and explicitly blocking linedefs use conservative debug collision.
+The first-person renderer is an untextured ray/segment projection prototype; it
+does not add textures, sprites, enemies, weapons, combat, sound, or gameplay.
 
 Known limitations:
 
-- The top-down map renderer is a browser debug view, not Doom gameplay.
-- Map rendering uses the JavaScript WAD bridge; the WASM path remains the
+- The map renderers are browser debug/prototype views, not Doom gameplay.
+- Map and first-person rendering use the JavaScript WAD bridge; the WASM path remains the
   framebuffer provider.
 - Only the first supported `E1M1` or `MAP01` map marker is loaded.
 - Collision is conservative debug collision against one-sided or blocking
   linedefs, not full Doom movement, height, blockmap, or thing collision.
-- No first-person projection, textures, sprites, enemies, weapons, combat,
-  audio, exits, or commercial WAD assets are included.
+- No textures, sprites, enemies, weapons, combat, audio, exits, or commercial
+  WAD assets are included.
 
-See `docs/renderer-debug.md` for verification steps and renderer details.
+See `docs/renderer-debug.md` for top-down details and
+`docs/renderer-options.md` for the first-person renderer approach.

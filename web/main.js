@@ -12,6 +12,7 @@
   const pauseButton = document.getElementById("pauseButton");
   const resetButton = document.getElementById("resetButton");
   const framebufferModeButton = document.getElementById("framebufferModeButton");
+  const firstPersonModeButton = document.getElementById("firstPersonModeButton");
   const mapModeButton = document.getElementById("mapModeButton");
   const modeStatus = document.getElementById("modeStatus");
   const wadFileInput = document.getElementById("wadFileInput");
@@ -34,6 +35,11 @@
   const PLAYER_RADIUS = 12;
   const PLAYER_SPEED = 120;
   const PLAYER_TURN_SPEED = 150;
+  const FIRST_PERSON_FOV_DEGREES = 66;
+  const FIRST_PERSON_WALL_HEIGHT = 96;
+  const FIRST_PERSON_NEAR_DISTANCE = 0.25;
+  const FIRST_PERSON_PROJECTION_DISTANCE =
+    (WIDTH / 2) / Math.tan((FIRST_PERSON_FOV_DEGREES * Math.PI / 180) / 2);
 
   let frame = 0;
   let paused = false;
@@ -140,6 +146,10 @@
 
   function normalizeAngle(angle) {
     return ((angle % 360) + 360) % 360;
+  }
+
+  function isMapRenderMode(mode) {
+    return mode === "map" || mode === "firstPerson";
   }
 
   function initPlayerState(mapData) {
@@ -251,7 +261,7 @@
     return false;
   }
 
-  function updateTopDownPlayer(mapData, deltaSeconds) {
+  function updatePlayerFromInput(mapData, deltaSeconds) {
     if (playerState === null) return;
 
     const seconds = Math.min(deltaSeconds, 0.1);
@@ -365,17 +375,166 @@
     }
   }
 
+  function raySegmentIntersection(originX, originY, rayX, rayY, ax, ay, bx, by) {
+    const segmentX = bx - ax;
+    const segmentY = by - ay;
+    const denominator = rayX * segmentY - rayY * segmentX;
+
+    if (Math.abs(denominator) < 0.000001) return null;
+
+    const toSegmentX = ax - originX;
+    const toSegmentY = ay - originY;
+    const distance = (toSegmentX * segmentY - toSegmentY * segmentX) / denominator;
+    const segmentT = (toSegmentX * rayY - toSegmentY * rayX) / denominator;
+
+    if (distance <= FIRST_PERSON_NEAR_DISTANCE || segmentT < 0 || segmentT > 1) {
+      return null;
+    }
+
+    return {
+      distance: distance,
+      segmentT: segmentT
+    };
+  }
+
+  function findNearestWallHit(mapData, rayAngleRadians) {
+    const rayX = Math.cos(rayAngleRadians);
+    const rayY = Math.sin(rayAngleRadians);
+    let nearestHit = null;
+
+    for (let index = 0; index < mapData.linedefs.length; index += 1) {
+      const linedef = mapData.linedefs[index];
+      if (!isSolidLinedef(linedef)) continue;
+
+      const start = mapData.vertexes[linedef.startVertex];
+      const end = mapData.vertexes[linedef.endVertex];
+      if (!start || !end) continue;
+
+      const hit = raySegmentIntersection(
+        playerState.x, playerState.y,
+        rayX, rayY,
+        start.x, start.y,
+        end.x, end.y
+      );
+
+      if (hit !== null && (nearestHit === null || hit.distance < nearestHit.distance)) {
+        nearestHit = {
+          distance: hit.distance,
+          segmentT: hit.segmentT,
+          linedef: linedef,
+          start: start,
+          end: end
+        };
+      }
+    }
+
+    return nearestHit;
+  }
+
+  function drawVerticalColumn(data, x, y0, y1, red, green, blue) {
+    const startY = Math.max(0, Math.floor(y0));
+    const endY = Math.min(HEIGHT - 1, Math.ceil(y1));
+
+    for (let y = startY; y <= endY; y += 1) {
+      const offset = (y * WIDTH + x) * 4;
+      data[offset] = red;
+      data[offset + 1] = green;
+      data[offset + 2] = blue;
+      data[offset + 3] = 255;
+    }
+  }
+
+  function renderFirstPersonMap(mapData) {
+    const data = imageData.data;
+    const playerAngleRadians = playerState === null ? 0 : playerState.angle * Math.PI / 180;
+    const fovRadians = FIRST_PERSON_FOV_DEGREES * Math.PI / 180;
+    let hitColumns = 0;
+
+    for (let y = 0; y < HEIGHT; y += 1) {
+      const ceiling = y < HEIGHT / 2;
+      for (let x = 0; x < WIDTH; x += 1) {
+        const offset = (y * WIDTH + x) * 4;
+        if (ceiling) {
+          data[offset] = 42;
+          data[offset + 1] = 50;
+          data[offset + 2] = 58;
+        } else {
+          data[offset] = 35;
+          data[offset + 1] = 38;
+          data[offset + 2] = 33;
+        }
+        data[offset + 3] = 255;
+      }
+    }
+
+    if (playerState !== null) {
+      for (let column = 0; column < WIDTH; column += 1) {
+        const cameraX = (column + 0.5) / WIDTH - 0.5;
+        const angleOffset = cameraX * fovRadians;
+        const rayAngle = playerAngleRadians + angleOffset;
+        const hit = findNearestWallHit(mapData, rayAngle);
+
+        if (hit === null) continue;
+
+        const perpendicularDistance = Math.max(
+          FIRST_PERSON_NEAR_DISTANCE,
+          hit.distance * Math.cos(angleOffset)
+        );
+        const wallHeight = Math.min(
+          HEIGHT * 2,
+          FIRST_PERSON_WALL_HEIGHT * FIRST_PERSON_PROJECTION_DISTANCE / perpendicularDistance
+        );
+        const wallTop = HEIGHT / 2 - wallHeight / 2;
+        const wallBottom = HEIGHT / 2 + wallHeight / 2;
+        const shade = Math.max(0.28, Math.min(1, 220 / (perpendicularDistance + 96)));
+        const edgeShade = hit.segmentT < 0.04 || hit.segmentT > 0.96 ? 0.72 : 1;
+        const red = Math.round(188 * shade * edgeShade);
+        const green = Math.round(201 * shade * edgeShade);
+        const blue = Math.round(190 * shade * edgeShade);
+
+        drawVerticalColumn(data, column, wallTop, wallBottom, red, green, blue);
+        hitColumns += 1;
+      }
+    }
+
+    context.putImageData(imageData, 0, 0);
+    if (playerState !== null) {
+      status.textContent = "First-person " + mapData.name + " player x=" +
+        playerState.x.toFixed(1) + " y=" + playerState.y.toFixed(1) +
+        " angle=" + Math.round(playerState.angle) + " (" +
+        hitColumns + " wall columns)";
+    } else {
+      status.textContent = "First-person " + mapData.name + ": no player start";
+    }
+  }
+
+  function renderCurrentMapMode(mapData) {
+    if (renderMode === "firstPerson") {
+      renderFirstPersonMap(mapData);
+    } else {
+      renderTopDownMap(mapData);
+    }
+  }
+
   function setRenderMode(nextMode) {
-    if (nextMode === "map" && loadedMap === null) return;
+    if (isMapRenderMode(nextMode) && loadedMap === null) return;
     renderMode = nextMode;
     lastMapStep = 0;
     framebufferModeButton.classList.toggle("is-active", renderMode === "framebuffer");
+    firstPersonModeButton.classList.toggle("is-active", renderMode === "firstPerson");
     mapModeButton.classList.toggle("is-active", renderMode === "map");
     framebufferModeButton.setAttribute("aria-pressed", renderMode === "framebuffer" ? "true" : "false");
+    firstPersonModeButton.setAttribute("aria-pressed", renderMode === "firstPerson" ? "true" : "false");
     mapModeButton.setAttribute("aria-pressed", renderMode === "map" ? "true" : "false");
-    modeStatus.textContent = renderMode === "map" ? "Mode: top-down map view" : "Mode: framebuffer demo";
-    if (renderMode === "map") {
-      renderTopDownMap(loadedMap);
+    if (renderMode === "firstPerson") {
+      modeStatus.textContent = "Mode: first-person prototype";
+    } else if (renderMode === "map") {
+      modeStatus.textContent = "Mode: top-down map view";
+    } else {
+      modeStatus.textContent = "Mode: framebuffer demo";
+    }
+    if (isMapRenderMode(renderMode)) {
+      renderCurrentMapMode(loadedMap);
     } else {
       renderAndPresent(frame);
     }
@@ -386,10 +545,10 @@
       renderAndPresent(frame);
       frame += 1;
       lastStep = timestamp;
-    } else if (renderMode === "map" && loadedMap !== null) {
+    } else if (isMapRenderMode(renderMode) && loadedMap !== null) {
       if (lastMapStep === 0) lastMapStep = timestamp;
-      updateTopDownPlayer(loadedMap, (timestamp - lastMapStep) / 1000);
-      renderTopDownMap(loadedMap);
+      updatePlayerFromInput(loadedMap, (timestamp - lastMapStep) / 1000);
+      renderCurrentMapMode(loadedMap);
       lastMapStep = timestamp;
     }
     window.requestAnimationFrame(draw);
@@ -697,6 +856,7 @@
     loadedMap = null;
     playerState = null;
     mapModeButton.disabled = true;
+    firstPersonModeButton.disabled = true;
 
     if (previewCount > 0) {
       const title = document.createElement("h3");
@@ -717,11 +877,12 @@
       const mapData = parseMapData(buffer, wad);
       if (mapData === null) {
         appendDescription(mapSummary, "Map", "No E1M1 or MAP01 marker found");
-        if (renderMode === "map") setRenderMode("framebuffer");
+        if (isMapRenderMode(renderMode)) setRenderMode("framebuffer");
       } else {
         loadedMap = mapData;
         initPlayerState(loadedMap);
         mapModeButton.disabled = false;
+        firstPersonModeButton.disabled = false;
         appendDescription(mapSummary, "Map", mapData.name);
         appendDescription(mapSummary, "Vertexes", String(mapData.counts.vertexes));
         appendDescription(mapSummary, "Linedefs", String(mapData.counts.linedefs));
@@ -742,7 +903,7 @@
       }
     } catch (error) {
       appendDescription(mapSummary, "Map", "Could not load statistics: " + error.message);
-      if (renderMode === "map") setRenderMode("framebuffer");
+      if (isMapRenderMode(renderMode)) setRenderMode("framebuffer");
     }
   }
 
@@ -753,7 +914,8 @@
     loadedMap = null;
     playerState = null;
     mapModeButton.disabled = true;
-    if (renderMode === "map") setRenderMode("framebuffer");
+    firstPersonModeButton.disabled = true;
+    if (isMapRenderMode(renderMode)) setRenderMode("framebuffer");
     wadStatus.textContent = "WAD parse failed: " + message;
   }
 
@@ -766,7 +928,8 @@
       loadedMap = null;
       playerState = null;
       mapModeButton.disabled = true;
-      if (renderMode === "map") setRenderMode("framebuffer");
+      firstPersonModeButton.disabled = true;
+      if (isMapRenderMode(renderMode)) setRenderMode("framebuffer");
       return;
     }
 
@@ -859,9 +1022,9 @@
 
   resetButton.addEventListener("click", function () {
     frame = 0;
-    if (renderMode === "map") {
+    if (isMapRenderMode(renderMode)) {
       initPlayerState(loadedMap);
-      renderTopDownMap(loadedMap);
+      renderCurrentMapMode(loadedMap);
     } else {
       renderAndPresent(frame);
     }
@@ -869,6 +1032,10 @@
 
   framebufferModeButton.addEventListener("click", function () {
     setRenderMode("framebuffer");
+  });
+
+  firstPersonModeButton.addEventListener("click", function () {
+    setRenderMode("firstPerson");
   });
 
   mapModeButton.addEventListener("click", function () {
@@ -891,7 +1058,7 @@
 
     if (!controlledKey) return;
     pressedKeys.add(event.code);
-    if (renderMode === "map") {
+    if (isMapRenderMode(renderMode)) {
       event.preventDefault();
     }
   });
